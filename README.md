@@ -1,6 +1,8 @@
 # RP2040Sharp
 
-![Build Status](https://github.com/PyMCU/RP2040Sharp/actions/workflows/test.yml/badge.svg)
+[![Build Status](https://github.com/PyMCU/RP2040Sharp/actions/workflows/test.yml/badge.svg)](https://github.com/PyMCU/RP2040Sharp/actions/workflows/test.yml)
+[![NuGet](https://img.shields.io/nuget/v/RP2040Sharp.svg)](https://www.nuget.org/packages/RP2040Sharp)
+[![Downloads](https://img.shields.io/nuget/dt/RP2040Sharp.svg)](https://www.nuget.org/packages/RP2040Sharp)
 ![License](https://img.shields.io/badge/license-BUSL--1.1-orange.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple)
 
@@ -32,25 +34,28 @@ The emulator boots MicroPython v1.21.0 and reaches the interactive REPL in appro
 - **Per-pin GPIO API** (`SetGpioExternalIn`, `GetGpioOutputEnable`, `GetGpioOut`) for embedding in circuit simulators
 - **TestKit** fluent API for writing firmware integration tests
 
-## Getting Started
+## Installation
+
+```bash
+dotnet add package RP2040Sharp              # the emulator
+dotnet add package RP2040Sharp.TestKit      # fluent harness for firmware tests
+```
+
+Requires the .NET 10 SDK.
+
+## Building from source
 
 ```bash
 git clone https://github.com/PyMCU/RP2040Sharp.git
 cd RP2040Sharp
-dotnet restore
 dotnet build
+dotnet test
 ```
 
 **Run the demo** (downloads MicroPython, boots it, executes REPL snippets, reports MIPS):
 
 ```bash
 dotnet run --project src/RP2040Sharp.Demo -c Release
-```
-
-**Run the tests:**
-
-```bash
-dotnet test
 ```
 
 ## Basic Usage
@@ -185,7 +190,6 @@ server.Start();
 - [x] Real RP2040 B1 BootROM (embedded resource)
 - [x] MicroPython v1.21.0 boots to REPL
 - [x] Per-pin GPIO API for circuit simulator embedding
-- [ ] iCircuit element (`RP2040Elm`) — in design
 - [ ] NativeAOT targets (Windows, Linux, macOS, iOS)
 - [ ] WebAssembly (WASM) target
 
