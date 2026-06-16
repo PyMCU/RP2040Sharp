@@ -284,6 +284,15 @@ public sealed class RP2040Machine : IDisposable
             Dma.RegisterDreq( 8 + sm, () => Pio1.TxFifoNotFull(sm));
             Dma.RegisterDreq(12 + sm, () => !Pio1.RxFifoEmpty(sm));
         }
+        // Re-arm a DREQ-paced DMA the instant the SM frees a TX slot or produces an RX word — otherwise
+        // a paced transfer (e.g. a CYW43 firmware download over the PIO gSPI) stalls BUSY forever.
+        Pio0.OnTxConsumed += sm => Dma.ResumeDreq(0 + sm);
+        Pio0.OnRxPush     += (sm, _) => Dma.ResumeDreq(4 + sm);
+        Pio1.OnTxConsumed += sm => Dma.ResumeDreq(8 + sm);
+        Pio1.OnRxPush     += (sm, _) => Dma.ResumeDreq(12 + sm);
+        // Gate the PIO's per-tick NVIC recompute to the window where core 0 sleeps (a busy core
+        // re-checks interrupts itself), removing the churn that dominated fine-grained stepping.
+        Pio0.CoreWaiting = Pio1.CoreWaiting = () => Core0Waiting;
         // SPI0 TX(16), RX(17), SPI1 TX(18), RX(19)
         Dma.RegisterDreq(16, () => true);              // SPI0 TX always ready
         Dma.RegisterDreq(17, () => Spi0.RxDataAvailable);
@@ -301,10 +310,13 @@ public sealed class RP2040Machine : IDisposable
         // Shared helpers: read physical GPIO levels; update SIO output and notify IoBank0
         uint ReadGpio() => Sio.GpioIn | Sio.GpioOut;
 
-        void ApplyPins(uint value, uint mask)
+        void ApplyPins(int block, uint value, uint mask)
         {
             // PIO output: update SIO GpioIn so physical level is visible to CPU reads
             Sio.GpioIn = (Sio.GpioIn & ~mask) | (value & mask);
+            // Route to the GPIO function mux so a pad muxed to PIO reflects the SM output
+            // (the level a circuit host reads via IoBank0.GetPadOutputLevel).
+            IoBank0.SetPioOut(block, value, mask);
             // Notify IoBank0 for edge/level interrupt detection on each changed pin
             for (var pin = 0; pin < 30; pin++)
                 if ((mask & (1u << pin)) != 0)
@@ -312,12 +324,25 @@ public sealed class RP2040Machine : IDisposable
         }
 
         Pio0.ReadGpioIn    = ReadGpio;
-        Pio0.WriteGpioPins = ApplyPins;
-        Pio0.WriteGpioDirs = (value, mask) => { /* dir changes tracked in SM only */ };
+        Pio0.WriteGpioPins = (value, mask) => ApplyPins(0, value, mask);
+        Pio0.WriteGpioDirs = (value, mask) => IoBank0.SetPioDirs(0, value, mask);
 
         Pio1.ReadGpioIn    = ReadGpio;
-        Pio1.WriteGpioPins = ApplyPins;
-        Pio1.WriteGpioDirs = (value, mask) => { };
+        Pio1.WriteGpioPins = (value, mask) => ApplyPins(1, value, mask);
+        Pio1.WriteGpioDirs = (value, mask) => IoBank0.SetPioDirs(1, value, mask);
+    }
+
+    /// <summary>
+    /// Writes bytes directly into the existing Flash backing store at <paramref name="offset"/>
+    /// (relative to 0x10000000), without re-loading the whole image. Lets a host edit a filesystem
+    /// region in place — e.g. stage a new code.py — then call <see cref="Reset"/> to re-run, instead
+    /// of allocating and re-loading a fresh multi-MB flash image on every change.
+    /// </summary>
+    public unsafe void WriteFlash(int offset, ReadOnlySpan<byte> data)
+    {
+        if (offset < 0 || offset + data.Length > Bus.FlashSize)
+            throw new ArgumentOutOfRangeException(nameof(offset), "Write would fall outside the flash region");
+        data.CopyTo(new Span<byte>(Bus.PtrFlash + offset, data.Length));
     }
 
     /// <summary>Load a binary image into Flash starting at 0x10000000.</summary>
@@ -792,6 +817,10 @@ public sealed class RP2040Machine : IDisposable
     /// <summary>Total instructions executed by Core 0 since reset.</summary>
     public long InstructionCount => Cpu.Cycles;
 
+    /// <summary>True while core 0 is parked in WFI/WFE waiting for an event. Lets a test harness coarsen
+    /// the run quantum while idle, and gates the PIO's per-tick NVIC recompute to the sleeping window.</summary>
+    public bool Core0Waiting => Cpu.Registers.Waiting;
+
     /// <summary>True once Core 1 has been launched via the SIO FIFO multicore handshake.</summary>
     public bool Core1Launched => _core1Launched;
 
@@ -830,6 +859,28 @@ public sealed class RP2040Machine : IDisposable
 
         LastElapsedCycles = delta;
 
+        foreach (var t in _tickables)
+            t.Tick(delta);
+    }
+
+    /// <summary>Diagnostic sibling of <see cref="Run"/> that drives core 0 through the per-instruction
+    /// profiling path (<see cref="CortexM0Plus.RunProfiled"/>), then ticks peripherals. Core 1, if
+    /// launched, runs unobserved. For boot/fault tracing only — not throughput-sensitive.</summary>
+    public void RunProfiled(int instructions, Core.Cpu.IProfilingObserver observer)
+    {
+        _activeCoreId = 0;
+        var before0 = Cpu.Cycles;
+        Cpu.RunProfiled(instructions, observer);
+        var delta = Cpu.Cycles - before0;
+        if (_core1Launched)
+        {
+            _activeCoreId = 1;
+            var before1 = Cpu1.Cycles;
+            Cpu1.Run(instructions);
+            _activeCoreId = 0;
+            delta = Math.Max(delta, (int)(Cpu1.Cycles - before1));
+        }
+        LastElapsedCycles = delta;
         foreach (var t in _tickables)
             t.Tick(delta);
     }

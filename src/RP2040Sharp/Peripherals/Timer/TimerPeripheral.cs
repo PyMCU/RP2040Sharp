@@ -137,6 +137,13 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
                 break;
             case INTR:
                 _intr &= ~value;    // write 1 to clear raw IRQ
+                // De-assert any timer NVIC line whose effective interrupt (INTR|INTF)&INTE is now clear.
+                // Without this the level-high IRQ re-fires every instruction after the handler clears it,
+                // and a firmware that arms a periodic alarm (e.g. the Pico W cyw43/lwIP boot) spins forever
+                // in alarm_pool_irq_handler. Only touched on the clear path — no per-tick NVIC churn.
+                for (var i = 0; i < 4; i++)
+                    if ((((_intr | _intf) & _inte) & (1u << i)) == 0)
+                        _cpu.SetInterrupt(i, false);
                 break;
             case INTE:
                 _inte = value & 0xF;

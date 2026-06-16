@@ -68,6 +68,26 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     private uint _irq1Inte;
     private uint _irq1Intf;
 
+    // IRQ-state caching: only re-poke the NVIC when the computed IRQ lines actually change, or while
+    // the target core sleeps (so the wake heartbeat survives). Removes the per-tick NVIC churn that
+    // otherwise dominates fine-grained stepping.
+    private bool _lastIrq0, _lastIrq1, _irqStateKnown;
+    /// <summary>Returns whether the core that fields PIO interrupts is currently sleeping (WFE/WFI). A
+    /// busy core re-checks interrupts on its own, so the per-tick recompute is only needed while it sleeps.</summary>
+    public Func<bool>? CoreWaiting;
+
+    /// <summary>Raised when a state machine frees a TX FIFO slot (explicit PULL or autopull), so a
+    /// DREQ-paced DMA feeding that SM can re-arm. Mirrors <see cref="OnRxPush"/> for the RX direction.</summary>
+    public Action<int>? OnTxConsumed { get; set; }
+    /// <summary>Raised when a state machine pushes a word into the RX FIFO (PUSH or autopush), so a
+    /// DREQ-paced DMA draining that SM can re-arm. (smIndex, value).</summary>
+    public Action<int, uint>? OnRxPush { get; set; }
+
+    // FIFO helpers that notify the DREQ-resume hooks. Over-notifying is safe: ResumeDreq is
+    // reentrancy-guarded and a no-op unless a channel is stalled on that exact DREQ with the source ready.
+    private void RxEnqueue(PioStateMachine sm, uint value) { sm.RxFifo.Enqueue(value); OnRxPush?.Invoke(sm.SmIndex, value); }
+    private uint TxDequeue(PioStateMachine sm) { var v = sm.TxFifo.Dequeue(); OnTxConsumed?.Invoke(sm.SmIndex); return v; }
+
     public uint Size => 0x100000;  // up to 1 MB address space per block
 
     /// <summary>Read current physical GPIO input levels (used by WAIT GPIO, IN PINS).</summary>
@@ -279,7 +299,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             if (((instr >> 13) & 7) == OP_PUSH_PULL)
             {
                 // Blocking PULL: its sole effect is to load the OSR — do it and step past it.
-                sm.OSR = sm.TxFifo.Dequeue();
+                sm.OSR = TxDequeue(sm);
                 sm.OsrCount = 32;
                 sm.Stalled = false;
                 AdvanceSmPc(sm);
@@ -299,7 +319,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             {
                 // Deferred autopush: the ISR already holds the captured data; flush it and
                 // step past the IN that stalled.
-                sm.RxFifo.Enqueue(sm.ISR);
+                RxEnqueue(sm, sm.ISR);
                 sm.ISR = 0; sm.IsrCount = 0;
                 sm.AutopushPending = false;
                 sm.Stalled = false;
@@ -310,7 +330,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             if (((instr >> 13) & 7) == OP_PUSH_PULL && (instr & 0x80) == 0)
             {
                 // Blocking PUSH: flush the ISR and step past it.
-                sm.RxFifo.Enqueue(sm.ISR);
+                RxEnqueue(sm, sm.ISR);
                 sm.ISR = 0; sm.IsrCount = 0;
                 sm.Stalled = false;
                 AdvanceSmPc(sm);
@@ -445,6 +465,16 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         var intr = BuildIntr();
         var irq0Active = ((intr | _irq0Intf) & _irq0Inte) != 0;
         var irq1Active = ((intr | _irq1Intf) & _irq1Inte) != 0;
+
+        // Re-poke the NVIC only when the IRQ state actually changed, or — to preserve the wake
+        // heartbeat — while the target core sleeps. A busy core re-checks interrupts on its own, so
+        // skipping the unchanged-state recompute removes the per-tick NVIC churn that otherwise
+        // dominated fine-grained stepping, with no change in observed interrupt behaviour.
+        var changed = !_irqStateKnown || irq0Active != _lastIrq0 || irq1Active != _lastIrq1;
+        if (!changed && CoreWaiting != null && !CoreWaiting()) return;
+        _lastIrq0 = irq0Active; _lastIrq1 = irq1Active; _irqStateKnown = true;
+
+        // PIO0_IRQ0=7, PIO0_IRQ1=8, PIO1_IRQ0=9, PIO1_IRQ1=10
         _cpu.SetInterrupt((int)(7 + _blockIndex * 2),     irq0Active);
         _cpu.SetInterrupt((int)(7 + _blockIndex * 2 + 1), irq1Active);
     }
@@ -515,7 +545,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         {
             if (sm.RxFifo.Count < sm.RxDepth)
             {
-                sm.RxFifo.Enqueue(sm.ISR);
+                RxEnqueue(sm, sm.ISR);
                 sm.ISR = 0; sm.IsrCount = 0;
                 sm.AutopushPending = false;
                 sm.Stalled = false;
@@ -723,7 +753,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         {
             if (sm.RxFifo.Count < sm.RxDepth)
             {
-                sm.RxFifo.Enqueue(sm.ISR);
+                RxEnqueue(sm, sm.ISR);
                 sm.ISR = 0; sm.IsrCount = 0;
             }
             else
@@ -757,7 +787,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 _fdebug |= 1u << (24 + sm.SmIndex);  // TXSTALL
                 return;
             }
-            sm.OSR = sm.TxFifo.Dequeue();
+            sm.OSR = TxDequeue(sm);
             sm.OsrCount = 32;
         }
 
@@ -831,7 +861,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             if (!block) { sm.ISR = 0; sm.IsrCount = 0; }
             return;
         }
-        sm.RxFifo.Enqueue(sm.ISR);
+        RxEnqueue(sm, sm.ISR);
         sm.ISR = 0;
         sm.IsrCount = 0;
         sm.Stalled = false;
@@ -861,7 +891,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         }
         else
         {
-            sm.OSR = sm.TxFifo.Dequeue();
+            sm.OSR = TxDequeue(sm);
         }
         sm.OsrCount = 32;
         sm.Stalled = false;
