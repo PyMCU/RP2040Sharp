@@ -48,13 +48,24 @@ public class RP2040TestSimulation : IDisposable
     public IReadOnlyList<byte> BreakpointHits => _breakpointHits;
     private readonly List<byte> _breakpointHits = new();
 
+    // A firmware panic (pico-sdk panic() = BKPT #0) spins in `_exit: bkpt; b _exit`, so the capturing
+    // handler below fires on every loop iteration. Over a long run that is millions of identical hits —
+    // enough to exhaust memory (the List backing array hits the 2 GB array-length limit and throws
+    // OutOfMemoryException). Cap the recorded sequence: the panic is fully observable from the first
+    // entries, and no legitimate test records anywhere near this many distinct breakpoints.
+    private const int MaxBreakpointHits = 1 << 16;
+    private void RecordBreakpoint(byte imm8)
+    {
+        if (_breakpointHits.Count < MaxBreakpointHits) _breakpointHits.Add(imm8);
+    }
+
     protected RP2040TestSimulation()
     {
         Machine = new RP2040Machine();
         // Install a capturing breakpoint handler so BKPT does not escalate to HardFault.
         // This is the correct ARMv6-M behaviour when a debugger/monitor is attached.
-        Machine.Cpu.OnBreakpoint  = imm8 => _breakpointHits.Add(imm8);
-        Machine.Cpu1.OnBreakpoint = imm8 => _breakpointHits.Add(imm8);
+        Machine.Cpu.OnBreakpoint  = RecordBreakpoint;
+        Machine.Cpu1.OnBreakpoint = RecordBreakpoint;
     }
 
     /// <summary>Create a new simulation instance.</summary>
