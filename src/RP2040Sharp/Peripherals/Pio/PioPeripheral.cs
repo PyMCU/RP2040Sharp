@@ -1,3 +1,4 @@
+using RP2040.Core;
 using RP2040.Core.Cpu;
 using RP2040.Core.Memory;
 
@@ -710,7 +711,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             0 => (((ReadGpioIn?.Invoke() ?? sm.GpioPins) >> (int)index) & 1) == polarity,  // GPIO (absolute)
             1 => (((ReadGpioIn?.Invoke() ?? sm.GpioPins) >> (int)((index + sm.InBase) & 0x1F)) & 1) == polarity,  // PIN relative to IN_BASE
             2 => ((_irq >> irqFlagIdx) & 1) == polarity,   // IRQ flag
-            _ => true,
+            _ => EmuStrict.NoteRet ("pio.wait.src-reserved", $"src={source}", true),  // 3 = reserved
         };
 
         sm.Stalled = !condition;
@@ -733,7 +734,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             3 => 0,             // NULL
             6 => sm.ISR,
             7 => sm.OSR,
-            _ => 0,
+            _ => EmuStrict.NoteRet ("pio.in.src-reserved", $"src={source}", 0u),  // 4,5 = reserved
         };
 
         if (sm.IsrShiftRight)
@@ -913,13 +914,14 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             5 => ComputeStatus(sm),
             6 => sm.ISR,
             7 => sm.OSR,
-            _ => 0,
+            _ => EmuStrict.NoteRet ("pio.mov.src-reserved", $"src={source}", 0u),  // 4 = reserved
         };
 
         data = op switch
         {
             1 => ~data,
             2 => BitReverse(data),
+            3 => EmuStrict.NoteRet ("pio.mov.op-reserved", "op=3", data),  // 3 = reserved
             _ => data,
         };
 
@@ -946,6 +948,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 // MOV OSR: rp2040js §setMovDestination / TRM §3.4.3 —
                 // "The OSR shift count is set to 0 (full, i.e. 32 bits remain)."
                 sm.OSR = data; sm.OsrCount = 32; break;
+            default: EmuStrict.Note ("pio.mov.dest-reserved", $"dest={dest}"); break;  // 3 = reserved
         }
         sm.Stalled = false;
     }
