@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using RP2040.Core;
 
 namespace RP2040.Wireless.Cyw43;
 
@@ -167,6 +168,18 @@ public sealed class Sdpcm
             HandleJoin(payload, 0);
         else if (cmd == WLC_SET_VAR && varName == "join")
             HandleJoin(payload, varName.Length + 1);
+        // SoftAP SSID: cyw43_ll_wifi_ap_init sends iovar "bsscfg:ssid" = u32(ap iface) u32(ssid_len) ssid[32].
+        // Capture it so the virtual air can advertise this guest's own AP to other stations' scans.
+        else if (cmd == WLC_SET_VAR && varName == "bsscfg:ssid")
+        {
+            var v = varName.Length + 1;
+            if (payload.Length >= v + 8)
+            {
+                var slen = (int)Get32(payload, v + 4);
+                if (slen is >= 0 and <= 32 && payload.Length >= v + 8 + slen)
+                    ApSsid = Encoding.UTF8.GetString(payload, v + 8, slen);
+            }
+        }
         // AP bring-up: cyw43_ll_wifi_ap_set_up sends iovar "bss" = u32(bsscfg idx) u32(up). When the
         // AP bsscfg (idx 1) is set up, the AP interface link must come up so lwIP runs the AP netif
         // (and its DHCP server). Emit EV_LINK(up, interface=AP).
@@ -180,10 +193,18 @@ public sealed class Sdpcm
                 OnApUp?.Invoke(up != 0);
             }
         }
+        // Any other iovar SET is accepted (ACKed above) but its effect is not modelled — usually benign
+        // radio/config (ampdu, mfp, country, …), but recorded so the unmodelled surface stays visible.
+        else if (cmd == WLC_SET_VAR && varName.Length > 0)
+            EmuStrict.Note("cyw43.setvar.ignored", varName);
     }
 
     /// <summary>Diagnostics/notification: the AP interface went up (true) or down (false).</summary>
     public Action<bool>? OnApUp;
+
+    /// <summary>The SSID this chip's guest configured for its own SoftAP (from the "bsscfg:ssid" iovar),
+    /// or null if the guest never brought up an AP. Used by the virtual air to advertise the guest-AP.</summary>
+    public string? ApSsid { get; private set; }
 
     /// <summary>Drive the STA association state machine for a join request. For a visible open network
     /// the chip reports the success chain the host's join state machine needs to reach JOIN_STATE_ALL:
@@ -292,7 +313,16 @@ public sealed class Sdpcm
                 case "ver":
                     WriteString(buf, "wl0: RP2040Sharp virtual CYW43439 (emulated)");
                     break;
-                // bsscfg:event_msgs / mcast_list / others → already zeroed (count 0)
+                // Intentionally zeroed (count 0). clmload_status=0 is DLOAD_STATUS_SUCCESS, which the
+                // firmware needs after streaming the CLM blob; the event/mcast lists are legitimately empty.
+                // Anything else the firmware reads back is an UNMODELLED iovar getting bogus zeros.
+                case "bsscfg:event_msgs":
+                case "mcast_list":
+                case "clmload_status":
+                    break;
+                default:
+                    EmuStrict.Note("cyw43.getvar.unhandled", varName);
+                    break;
             }
         }
         return buf;
