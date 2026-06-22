@@ -42,6 +42,14 @@ namespace RP2040.Peripherals;
 /// machine.Run(1_000_000);
 /// </code>
 /// </summary>
+public enum RP2040BootromRevision
+{
+    /// <summary>Bootrom version 2 (RP2040 B0/B1 silicon). Default.</summary>
+    B1,
+    /// <summary>Bootrom version 3 (RP2040 B2 silicon). Verified by HIL against a real B2 Pico.</summary>
+    B2,
+}
+
 public sealed class RP2040Machine : IDisposable
 {
     public const uint CLK_HZ = 125_000_000;
@@ -99,8 +107,12 @@ public sealed class RP2040Machine : IDisposable
     private bool _core1Launched;
     private int  _activeCoreId;   // 0 = Core0, 1 = Core1 (set before each Run slice)
 
-    public RP2040Machine(uint flashSize = 2 * 1024 * 1024)
+    private readonly RP2040BootromRevision _bootromRevision;
+
+    public RP2040Machine(uint flashSize = 2 * 1024 * 1024,
+                         RP2040BootromRevision bootrom = RP2040BootromRevision.B1)
     {
+        _bootromRevision = bootrom;
         Bus = new BusInterconnect(flashSize);
         Cpu  = new CortexM0Plus(Bus) { CoreId = 0 };
         Cpu1 = new CortexM0Plus(Bus) { CoreId = 1 };
@@ -362,7 +374,7 @@ public sealed class RP2040Machine : IDisposable
         // flash_range_erase and flash_range_program are intercepted by C# native hooks.
         if (*(uint*)Bus.PtrBootRom == 0 && *(uint*)(Bus.PtrBootRom + 4) == 0)
         {
-            LoadRealBootRom(Bus.PtrBootRom);
+            LoadRealBootRom(Bus.PtrBootRom, _bootromRevision);
 
             if (TryFindVectorTable(Bus.PtrFlash, (int)image.Length, out var sp, out var resetPc,
                     out var vectorTableOffset))
@@ -638,30 +650,42 @@ public sealed class RP2040Machine : IDisposable
     /// memory, then patches flash hardware-accessing functions to BX LR so they return
     /// without touching SSI/QSPI registers that are not fully emulated.
     /// </summary>
-    private static unsafe void LoadRealBootRom(byte* rom)
+    private static unsafe void LoadRealBootRom(byte* rom, RP2040BootromRevision revision)
     {
-        // Load binary from embedded resource
+        // Load the BootROM for the requested silicon revision. B1 (version 2) is the default; B2
+        // (version 3) is the bootrom on later RP2040 silicon (verified by HIL against a real B2 chip).
+        var resource = revision switch
+        {
+            RP2040BootromRevision.B2 => "RP2040Sharp.bootrom_b2.bin",
+            _                        => "RP2040Sharp.bootrom_b1.bin",
+        };
         var asm = System.Reflection.Assembly.GetExecutingAssembly();
-        using var stream = asm.GetManifestResourceStream("RP2040Sharp.bootrom_b1.bin")
+        using var stream = asm.GetManifestResourceStream(resource)
             ?? throw new InvalidOperationException(
-                "Embedded resource 'RP2040Sharp.bootrom_b1.bin' not found. " +
-                "Ensure bootrom_b1.bin is included as an EmbeddedResource in the project.");
+                $"Embedded resource '{resource}' not found. Ensure the matching bootrom .bin is included " +
+                "as an EmbeddedResource in the project.");
         stream.ReadExactly(new Span<byte>(rom, 16384));
 
-        // Patch flash hardware-accessing bootrom functions to 'BX LR' (0x4770).
-        // These functions talk directly to the SSI/QSPI peripheral, which is not
-        // fully emulated. They are called by MicroPython's LittleFS flash trampoline
-        // (which runs from SRAM) to set up/tear down XIP mode around erase/program ops.
-        // Making them no-ops is safe: our C# hooks handle the actual flash data.
-        //   0x24A0 = connect_internal_flash
-        //   0x23F4 = flash_exit_xip
-        //   0x2360 = flash_flush_cache
-        //   0x2330 = flash_enter_cmd_xip
+        // Patch the flash hardware-accessing bootrom functions to 'BX LR' (0x4770): they talk directly to
+        // the SSI/QSPI peripheral (not fully emulated) and are called by MicroPython's LittleFS flash
+        // trampoline to set up/tear down XIP around erase/program. Making them no-ops is safe — our C#
+        // hooks handle the actual flash data. The function ADDRESSES differ between bootrom revisions, so
+        // resolve them from the ROM function table instead of hardcoding (revision-agnostic; reproduces
+        // the historical B1 addresses 0x24A0/0x23F4/0x2360/0x2330 exactly).
         static void PatchBxLr(byte* p, int addr) { p[addr] = 0x70; p[addr + 1] = 0x47; }
-        PatchBxLr(rom, 0x24A0);
-        PatchBxLr(rom, 0x23F4);
-        PatchBxLr(rom, 0x2360);
-        PatchBxLr(rom, 0x2330);
+        static ushort U16(byte* p, int o) => (ushort)(p[o] | (p[o + 1] << 8));
+
+        // rom_func_table pointer lives at offset 0x14; the table is a list of (code:u16, addr:u16) pairs
+        // terminated by code 0. Codes are two ASCII chars: 'IF','EX','FC','CX' (see RP2040 datasheet §2.8.3).
+        foreach (var code in new ushort[] { 0x4649 /*IF*/, 0x5845 /*EX*/, 0x4346 /*FC*/, 0x5843 /*CX*/ })
+        {
+            for (int p = U16(rom, 0x14); p < 0x4000 && U16(rom, p) != 0; p += 4)
+            {
+                if (U16(rom, p) != code) continue;
+                PatchBxLr(rom, U16(rom, p + 2) & ~1); // table stores the Thumb (odd) address; patch the instruction
+                break;
+            }
+        }
     }
 
     /// 
