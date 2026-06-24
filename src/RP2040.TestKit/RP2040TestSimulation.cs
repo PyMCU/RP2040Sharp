@@ -103,6 +103,14 @@ public class RP2040TestSimulation : IDisposable
         return this;
     }
 
+    /// <summary>Attach a <see cref="PioProbe"/> to a PIO block (0 or 1) to capture its FIFO traffic.</summary>
+    public RP2040TestSimulation AddPioProbe(int pioIndex, out PioProbe probe)
+    {
+        var pio = pioIndex == 0 ? Machine.Pio0 : Machine.Pio1;
+        probe = new PioProbe(pio, () => Machine.InstructionCount);
+        return this;
+    }
+
     /// <summary>Lazily-created CDC-ACM host driver bound to the device USB peripheral.</summary>
     public UsbCdcHost UsbCdcHost => _usbCdcHost ??= new UsbCdcHost(Machine.Usb);
     private UsbCdcHost? _usbCdcHost;

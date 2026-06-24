@@ -84,6 +84,13 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     /// DREQ-paced DMA draining that SM can re-arm. (smIndex, value).</summary>
     public Action<int, uint>? OnRxPush { get; set; }
 
+    /// <summary>Raised when the firmware pushes a word into a TX FIFO (a write to TXFx). (smIndex, value).
+    /// Used by test probes to observe the data crossing the SM boundary.</summary>
+    public Action<int, uint>? OnTxPush { get; set; }
+    /// <summary>Raised when the firmware pulls a word out of an RX FIFO (a read from RXFx). (smIndex, value).
+    /// Used by test probes to observe the data crossing the SM boundary.</summary>
+    public Action<int, uint>? OnRxPull { get; set; }
+
     // FIFO helpers that notify the DREQ-resume hooks. Over-notifying is safe: ResumeDreq is
     // reentrancy-guarded and a no-op unless a channel is stalled on that exact DREQ with the source ready.
     private void RxEnqueue(PioStateMachine sm, uint value) { sm.RxFifo.Enqueue(value); OnRxPush?.Invoke(sm.SmIndex, value); }
@@ -169,6 +176,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             // rp2040js: readFIFO() → checkWait().
             if (sm.Stalled)
                 CheckSmWait(sm, txEvent: false);
+            OnRxPull?.Invoke(smIdx, v);
             return v;
         }
 
@@ -221,6 +229,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             if (sm.TxFifo.Count < sm.TxDepth)
             {
                 sm.TxFifo.Enqueue(value);
+                OnTxPush?.Invoke(smIdx, value);
                 // Clear TXSTALL for this SM now that TX FIFO has data
                 _fdebug &= ~(1u << (24 + smIdx));
                 // Wake a SM that was stalled waiting for data in the TX FIFO (PULL block / autopull).
