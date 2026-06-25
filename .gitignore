@@ -33,3 +33,5 @@ TestResults/
 # --- OS Generated Files ---
 .DS_Store
 Thumbs.db
+# Local Claude Code settings
+.claude/
