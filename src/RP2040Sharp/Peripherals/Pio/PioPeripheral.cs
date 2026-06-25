@@ -105,6 +105,13 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     /// <summary>Write physical GPIO pin directions: (dirValue, pinMask).</summary>
     public Action<uint, uint>? WriteGpioDirs { get; set; }
 
+    /// <summary>
+    /// Whether the block is held in reset. On real RP2040 a PIO powers up clock-gated: register reads
+    /// return 0 and writes are no-ops until firmware clears its RESETS bit. The full machine starts the
+    /// PIO in reset and clears this when RESETS releases the block; isolated unit tests leave it false.
+    /// </summary>
+    public bool InReset;
+
     public PioPeripheral(CortexM0Plus cpu, uint blockIndex)
     {
         _cpu = cpu;
@@ -148,6 +155,10 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
     public uint ReadWord(uint address)
     {
+        // Held in reset: the block is clock-gated, every register reads back 0.
+        if (InReset)
+            return 0;
+
         // Strip the base (top 20 bits may vary between PIO0/1)
         var off = address & 0xFFFFF;
 
@@ -208,6 +219,10 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
     public void WriteWord(uint address, uint value)
     {
+        // Held in reset: the block is clock-gated, register writes are silently dropped.
+        if (InReset)
+            return;
+
         var off = address & 0xFFFFF;
 
         if (off >= REG_INSTR_MEM_BASE && off < REG_INSTR_MEM_BASE + INSTR_COUNT * 4)

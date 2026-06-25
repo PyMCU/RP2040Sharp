@@ -274,6 +274,21 @@ public sealed class RP2040Machine : IDisposable
         ahb.Register(0x50200000, Pio0);
         ahb.Register(0x50300000, Pio1);
 
+        // PIO blocks power up held in reset (RESETS bits 10/11). Start them gated and release on the
+        // RESETS transition, so firmware that drives PIO registers without first clearing the reset bit
+        // gets silent no-ops exactly like silicon (this is what masked the real Pico bug).
+        Pio0.InReset = Pio1.InReset = true;
+        Resets.OnUnreset += released =>
+        {
+            if ((released & (1u << 10)) != 0) Pio0.InReset = false;
+            if ((released & (1u << 11)) != 0) Pio1.InReset = false;
+        };
+        Resets.OnReset += asserted =>
+        {
+            if ((asserted & (1u << 10)) != 0) Pio0.InReset = true;
+            if ((asserted & (1u << 11)) != 0) Pio1.InReset = true;
+        };
+
         // ── GPIO pins ─────────────────────────────────────────────────────
         var pins = new GpioPin[30];
         for (var i = 0; i < 30; i++)
