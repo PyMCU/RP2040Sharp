@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1-beta.4] - 2026-06-25
+
+### Changed
+
+- **`RP2040Sharp.Wireless`: renamed the assembly and namespaces** to match the package id.
+  The DLL is now `RP2040Sharp.Wireless.dll` and the namespaces are
+  `RP2040Sharp.Wireless.Ble` / `RP2040Sharp.Wireless.Cyw43` (were `RP2040.Wireless.*`).
+  **Breaking for `RP2040Sharp.Wireless` consumers:** update `using RP2040.Wireless.*` to
+  `using RP2040Sharp.Wireless.*`.
+
 ## [1.0.1-beta.3] - 2026-06-25
 
 Re-cut of `1.0.1-beta.2`, which only partially published (nuget.org rejects BUSL-1.1 as a
@@ -130,7 +140,8 @@ First public release candidate. A high-performance RP2040 emulator in modern C#
 - Flash programming uses C# hooks rather than the SSI XIP hardware path.
 - USB host support is CDC-only (sufficient for the MicroPython REPL).
 
-[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.3...HEAD
+[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.4...HEAD
+[1.0.1-beta.4]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.3...v1.0.1-beta.4
 [1.0.1-beta.3]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.2...v1.0.1-beta.3
 [1.0.1-beta.2]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.1...v1.0.1-beta.2
 [1.0.0]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.0-rc.2...v1.0.0
