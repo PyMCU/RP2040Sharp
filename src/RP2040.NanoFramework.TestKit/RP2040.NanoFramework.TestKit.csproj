@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>RP2040Sharp.TestKit.NanoFramework</PackageId>
+    <Description>Boot a deployed .NET nanoFramework app on the RP2040Sharp emulator: firmware
+      discovery, deployment assembly from .pe metadata, and a native-checksum compatibility guard.</Description>
+    <IsPackable>true</IsPackable>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RP2040Sharp\RP2040Sharp.csproj" />
+    <ProjectReference Include="..\RP2040.TestKit\RP2040.TestKit.csproj" />
+  </ItemGroup>
+
+</Project>
