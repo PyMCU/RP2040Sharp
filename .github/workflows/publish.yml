@@ -66,6 +66,22 @@ jobs:
           --no-build
           --output ./nupkgs
 
+      # ── BUSL-1.1 package: CYW43439 Wi-Fi + BLE virtualization ───────────────
+      - name: Pack RP2040.Wireless
+        run: >
+          dotnet pack src/RP2040.Wireless/RP2040.Wireless.csproj
+          -c Release
+          --no-build
+          --output ./nupkgs
+
+      # ── BUSL-1.1 package: bundles the NanoSymbols generator as an analyzer ───
+      - name: Pack RP2040Sharp.TestKit.NanoFramework
+        run: >
+          dotnet pack src/RP2040.NanoFramework.TestKit/RP2040.NanoFramework.TestKit.csproj
+          -c Release
+          --no-build
+          --output ./nupkgs
+
       # ── Push to nuget.org (tags, or a manual push_public run) ───────────────
       - name: Push to nuget.org
         env:

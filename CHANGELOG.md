@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1-beta.2] - 2026-06-25
+
+Third prerelease of the `1.0.1` line. Ships two new **BUSL-1.1** packages and the CI
+wiring to publish them, on top of the CYW43439 wireless stack, a second bootrom revision,
+and a nanoFramework integration-test harness landed since `1.0.1-beta.1`.
+
+No breaking changes to the MIT core — `RP2040Sharp` and `RP2040Sharp.TestKit` remain MIT.
+
+### Added
+
+- **`RP2040.Wireless` (BUSL-1.1)** — firmware-agnostic CYW43439 Wi-Fi + Bluetooth LE
+  virtualization for the Raspberry Pi Pico W (gSPI/PIO, SDIO backplane, WHD/SDPCM, BT HCI),
+  now packaged and published to nuget.org.
+- **`RP2040Sharp.TestKit.NanoFramework` (BUSL-1.1)** — boot a deployed .NET nanoFramework
+  app on the emulator and assert against it: managed static/instance fields by name,
+  run-until-managed-method, and a bundled **NanoSymbols** source generator (shipped as an
+  analyzer with a `buildTransitive` targets file) that emits strongly-typed symbols for the
+  app's methods and static fields.
+- **B2 bootrom + revision selection**, **PIO FIFO probe**, and an emulator **strict mode**
+  that surfaces silent accuracy gaps.
+
+### Changed
+
+- `publish.yml` now packs and publishes the two BUSL-1.1 packages alongside the MIT core.
+
+### Fixed
+
+- **SSI direct-command flash RX** so the bootrom/CLR flash-access path works.
+- **USB CDC** OUT delivery moved to a push model; `EP_ABORT` no longer drops deferred
+  completions.
+
 ## [1.0.0] - 2026-06-06
 
 First stable release. Promotes `1.0.0-rc.2` after the TestKit gained CI guardrails for
@@ -81,7 +112,8 @@ First public release candidate. A high-performance RP2040 emulator in modern C#
 - Flash programming uses C# hooks rather than the SSI XIP hardware path.
 - USB host support is CDC-only (sufficient for the MicroPython REPL).
 
-[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.2...HEAD
+[1.0.1-beta.2]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.1...v1.0.1-beta.2
 [1.0.0]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.0-rc.2...v1.0.0
 [1.0.0-rc.2]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.0-rc.1...v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/PyMCU/RP2040Sharp/releases/tag/v1.0.0-rc.1
