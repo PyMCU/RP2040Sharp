@@ -99,6 +99,61 @@ public sealed class NanoClrHarness : IDisposable
         return watch.Hit;
     }
 
+    private ClrInspector? _inspector;
+
+    /// <summary>Reads managed CLR state out of the emulator (needs <c>g_CLR_RT_TypeSystem</c> in the manifest).</summary>
+    public ClrInspector Clr => _inspector ??= new ClrInspector(Pico.Rp2040, Firmware.ResolveSymbol("g_CLR_RT_TypeSystem"));
+
+    /// <summary>Reads a managed <c>static int</c> field by name (the assembly must already be loaded).</summary>
+    public int ReadStaticInt32(string assembly, string type, string field)
+    {
+        uint asm = Clr.FindAssembly(assembly);
+        if (asm == 0)
+        {
+            throw new InvalidOperationException($"Assembly '{assembly}' is not loaded yet.");
+        }
+
+        if (!Clr.TryResolveStaticSlot(asm, type, field, out int slot))
+        {
+            throw new InvalidOperationException($"Static field '{type}.{field}' not found in '{assembly}'.");
+        }
+
+        return Clr.ReadStaticInt32(asm, slot);
+    }
+
+    /// <summary>
+    /// Runs the CLR until a managed <c>static int</c> field satisfies <paramref name="predicate"/>.
+    /// The assembly is loaded and the field resolved lazily (once the CLR has deployed it), then its
+    /// value is read at each slice boundary. Returns false if the budget is exhausted first.
+    /// </summary>
+    public bool RunUntilStatic(
+        string assembly,
+        string type,
+        string field,
+        Func<int, bool> predicate,
+        long maxInstructions = 200_000_000,
+        int slice = 100_000)
+    {
+        // Resolve fresh each time: the CLR may relocate the assembly object and (re)allocate its
+        // statics during load, so a cached pointer/slot can go stale.
+        bool Satisfied()
+        {
+            uint asm = Clr.FindAssembly(assembly);
+            return asm != 0
+                && Clr.TryResolveStaticSlot(asm, type, field, out int slot)
+                && predicate(Clr.ReadStaticInt32(asm, slot));
+        }
+
+        long ran = 0;
+        while (ran < maxInstructions && !Satisfied())
+        {
+            Pico.RunInstructions(slice);
+            ran += slice;
+        }
+
+        return Satisfied();
+    }
+
     public void Dispose() => Pico.Dispose();
 
     // Stops at the first instruction whose PC equals the target (the profiling observer sees every
