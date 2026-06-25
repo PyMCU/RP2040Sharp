@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using NanoFramework.Clr;
 using RP2040.Core.Cpu;
 using RP2040.TestKit.Boards;
 
@@ -175,7 +177,84 @@ public sealed class NanoClrHarness : IDisposable
     private ClrInspector? _inspector;
 
     /// <summary>Reads managed CLR state out of the emulator (needs <c>g_CLR_RT_TypeSystem</c> in the manifest).</summary>
-    public ClrInspector Clr => _inspector ??= new ClrInspector(Pico.Rp2040, Firmware.ResolveSymbol("g_CLR_RT_TypeSystem"));
+    public ClrInspector Clr => _inspector ??=
+        new ClrInspector(new Rp2040ClrMemory(Pico.Rp2040), Firmware.ResolveSymbol("g_CLR_RT_TypeSystem"));
+
+    // ---- profiling: heap (dotMemory-style) + call counts (dotTrace-style) ----
+
+    /// <summary>
+    /// Snapshots the managed heap — used/free bytes and a per-kind object breakdown — for memory
+    /// benchmarking. Capture two and call <c>after.Since(before)</c> to see what an operation allocated.
+    /// Needs <c>g_CLR_RT_ExecutionEngine</c> in the firmware manifest; use the overload otherwise.
+    /// </summary>
+    public ClrInspector.HeapSnapshot CaptureHeap() => Clr.CaptureHeap(Firmware.ResolveSymbol("g_CLR_RT_ExecutionEngine"));
+
+    /// <summary>Snapshots the managed heap using an explicit <c>g_CLR_RT_ExecutionEngine</c> address.</summary>
+    public ClrInspector.HeapSnapshot CaptureHeap(uint executionEngineAddress) => Clr.CaptureHeap(executionEngineAddress);
+
+    /// <summary>A call-count profile: total instructions/cycles over a run and how often each managed method was entered.</summary>
+    public sealed record CallProfile(long Instructions, long Cycles, IReadOnlyDictionary<string, int> CallCounts);
+
+    /// <summary>
+    /// Runs the CLR (profiled) until <paramref name="until"/> holds, tallying every managed method entry
+    /// (each <c>Execute_IL</c>) by "Assembly!Method" and counting instructions/cycles — a dotTrace-style
+    /// "what ran, and how often". Needs <c>Execute_IL</c> in the manifest.
+    /// </summary>
+    public CallProfile ProfileCalls(Func<bool> until, long maxInstructions = 200_000_000)
+    {
+        uint executeIl = Firmware.ResolveSymbol("Execute_IL");
+        var prof = new CallProfiler(Pico.Cpu, Clr, executeIl);
+
+        long remaining = maxInstructions;
+        while (remaining > 0 && !until())
+        {
+            int chunk = (int)Math.Min(remaining, 1_000_000);
+            Pico.Rp2040.RunProfiled(chunk, prof);
+            remaining -= chunk;
+        }
+
+        return new CallProfile(prof.Instructions, prof.CycleSpan, prof.Calls);
+    }
+
+    // Tallies Execute_IL entries by method (the CLR_RT_StackFrame& is the call arg → R0 or R1) and
+    // counts executed instructions / cycle span over the profiled window.
+    private sealed class CallProfiler(CortexM0Plus cpu, ClrInspector clr, uint executeIl) : IProfilingObserver
+    {
+        private readonly Dictionary<string, int> _calls = new();
+        private long _firstCycle = -1;
+
+        public long Instructions { get; private set; }
+        public long CycleSpan { get; private set; }
+        public IReadOnlyDictionary<string, int> Calls => _calls;
+
+        public void OnInstruction(uint pc, ushort opcode, long cycles)
+        {
+            Instructions++;
+            if (_firstCycle < 0)
+            {
+                _firstCycle = cycles;
+            }
+
+            CycleSpan = cycles - _firstCycle;
+
+            if (pc != executeIl)
+            {
+                return;
+            }
+
+            string method = clr.MethodAt(cpu.Registers.R1);
+            if (method.Length == 0)
+            {
+                method = clr.MethodAt(cpu.Registers.R0);
+            }
+
+            if (method.Length != 0)
+            {
+                _calls.TryGetValue(method, out int n);
+                _calls[method] = n + 1;
+            }
+        }
+    }
 
     /// <summary>Reads a managed static field's cell (data type + raw value) by name (assembly must be loaded).</summary>
     public ClrInspector.HeapValue ReadStatic(string assembly, string field)
