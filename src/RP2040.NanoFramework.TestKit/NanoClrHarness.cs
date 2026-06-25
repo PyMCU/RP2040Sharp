@@ -104,8 +104,8 @@ public sealed class NanoClrHarness : IDisposable
     /// <summary>Reads managed CLR state out of the emulator (needs <c>g_CLR_RT_TypeSystem</c> in the manifest).</summary>
     public ClrInspector Clr => _inspector ??= new ClrInspector(Pico.Rp2040, Firmware.ResolveSymbol("g_CLR_RT_TypeSystem"));
 
-    /// <summary>Reads a managed <c>static int</c> field by name (the assembly must already be loaded).</summary>
-    public int ReadStaticInt32(string assembly, string type, string field)
+    /// <summary>Reads a managed static field's cell (data type + raw value) by name (assembly must be loaded).</summary>
+    public ClrInspector.HeapValue ReadStatic(string assembly, string field)
     {
         uint asm = Clr.FindAssembly(assembly);
         if (asm == 0)
@@ -113,24 +113,26 @@ public sealed class NanoClrHarness : IDisposable
             throw new InvalidOperationException($"Assembly '{assembly}' is not loaded yet.");
         }
 
-        if (!Clr.TryResolveStaticSlot(asm, type, field, out int slot))
+        if (!Clr.TryResolveStaticSlot(asm, field, out int slot))
         {
-            throw new InvalidOperationException($"Static field '{type}.{field}' not found in '{assembly}'.");
+            throw new InvalidOperationException($"Static field '{field}' not found/ready in '{assembly}'.");
         }
 
-        return Clr.ReadStaticInt32(asm, slot);
+        return Clr.ReadStatic(asm, slot);
     }
 
+    /// <summary>Reads a managed <c>static int</c> field by name (the assembly must already be loaded).</summary>
+    public int ReadStaticInt32(string assembly, string field) => ReadStatic(assembly, field).AsInt32;
+
     /// <summary>
-    /// Runs the CLR until a managed <c>static int</c> field satisfies <paramref name="predicate"/>.
-    /// The assembly is loaded and the field resolved lazily (once the CLR has deployed it), then its
-    /// value is read at each slice boundary. Returns false if the budget is exhausted first.
+    /// Runs the CLR until a managed static field satisfies <paramref name="predicate"/>. The assembly
+    /// is loaded and the field resolved lazily (once the CLR has deployed it), then read at each slice
+    /// boundary. Returns false if the budget is exhausted first.
     /// </summary>
     public bool RunUntilStatic(
         string assembly,
-        string type,
         string field,
-        Func<int, bool> predicate,
+        Func<ClrInspector.HeapValue, bool> predicate,
         long maxInstructions = 200_000_000,
         int slice = 100_000)
     {
@@ -140,8 +142,8 @@ public sealed class NanoClrHarness : IDisposable
         {
             uint asm = Clr.FindAssembly(assembly);
             return asm != 0
-                && Clr.TryResolveStaticSlot(asm, type, field, out int slot)
-                && predicate(Clr.ReadStaticInt32(asm, slot));
+                && Clr.TryResolveStaticSlot(asm, field, out int slot)
+                && predicate(Clr.ReadStatic(asm, slot));
         }
 
         long ran = 0;

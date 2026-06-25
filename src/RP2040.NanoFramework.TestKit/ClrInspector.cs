@@ -60,10 +60,11 @@ public sealed class ClrInspector
     }
 
     /// <summary>
-    /// Resolves the static-field slot (the cross-reference offset into <c>m_pStaticFields</c>) for
-    /// <paramref name="fieldName"/> of <paramref name="typeName"/> in assembly <paramref name="asm"/>.
+    /// Resolves the static-field slot (the cross-reference offset into <c>m_pStaticFields</c>) for the
+    /// static field named <paramref name="fieldName"/> in assembly <paramref name="asm"/>. Searches every
+    /// type's static fields; pass <paramref name="typeName"/> to disambiguate a repeated field name.
     /// </summary>
-    public bool TryResolveStaticSlot(uint asm, string typeName, string fieldName, out int slot)
+    public bool TryResolveStaticSlot(uint asm, string fieldName, out int slot, string? typeName = null)
     {
         slot = -1;
         uint header = Rd(asm + _l.ASM_Header);
@@ -85,7 +86,7 @@ public sealed class ClrInspector
         for (int t = 0; t < typeCount; t++)
         {
             uint td = typeDefTable + (uint)t * _l.TD_Size;
-            if (CStr(stringHeap + Rh(td + _l.TD_Name)) != typeName)
+            if (typeName != null && CStr(stringHeap + Rh(td + _l.TD_Name)) != typeName)
             {
                 continue;
             }
@@ -106,10 +107,22 @@ public sealed class ClrInspector
         return false;
     }
 
-    /// <summary>Reads a managed <c>static int</c> field as a 32-bit value.</summary>
-    public int ReadStaticInt32(uint asm, int slot)
+    /// <summary>A static field's stored cell: its nanoCLR data type and the raw 32 bits of value.</summary>
+    public readonly record struct HeapValue(byte DataType, uint Raw)
+    {
+        public int AsInt32 => (int)Raw;
+        public uint AsUInt32 => Raw;
+        public bool AsBoolean => Raw != 0;
+    }
+
+    /// <summary>Reads the static field's storage cell (its data type byte + the value's low 32 bits).</summary>
+    public HeapValue ReadStatic(uint asm, int slot)
     {
         uint heapBlock = Rd(asm + _l.ASM_StaticFields) + (uint)slot * _l.HB_Size;
-        return (int)Rd(heapBlock + _l.HB_Data);
+        byte dataType = Rb(heapBlock); // CLR_RT_HeapBlock.m_id.dataType @ 0
+        return new HeapValue(dataType, Rd(heapBlock + _l.HB_Data));
     }
+
+    /// <summary>Reads a managed <c>static int</c> field as a 32-bit value.</summary>
+    public int ReadStaticInt32(uint asm, int slot) => ReadStatic(asm, slot).AsInt32;
 }
