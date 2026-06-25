@@ -1,0 +1,120 @@
+using RP2040.Core.Cpu;
+using RP2040.TestKit.Boards;
+
+namespace RP2040.NanoFramework.TestKit;
+
+/// <summary>
+/// Boots a deployed nanoFramework app on the RP2040Sharp emulator and drives it to points of
+/// interest inside the running CLR — a generic condition (<see cref="RunUntil"/>) or a native CLR
+/// function located by symbol (<see cref="RunUntilNativeCall"/>) — so a test can assert on what the
+/// firmware is actually doing, not just on wall-clock slices.
+/// </summary>
+/// <remarks>
+/// Both run methods drive the emulator's hook-aware execution path (the one that services the
+/// bootrom/flash native hooks the firmware needs to boot). <see cref="RunUntilNativeCall"/> watches
+/// every executed instruction's PC through the profiling observer, so the crossing into the native
+/// function is detected exactly — never sampled past.
+/// </remarks>
+public sealed class NanoClrHarness : IDisposable
+{
+    /// <summary>The emulated Pico. Add probes (e.g. <c>AddPioProbe</c>) before running.</summary>
+    public PicoSimulation Pico { get; }
+
+    public NanoFirmware Firmware { get; }
+    public NanoApp App { get; }
+
+    /// <summary>The symbol last reached by <see cref="RunUntilNativeCall"/> (null if none).</summary>
+    public string? LastReachedSymbol { get; private set; }
+
+    /// <summary>The cycle count when <see cref="LastReachedSymbol"/> was reached (-1 if none).</summary>
+    public long LastReachedCycle { get; private set; } = -1;
+
+    private NanoClrHarness(PicoSimulation pico, NanoFirmware firmware, NanoApp app)
+    {
+        Pico = pico;
+        Firmware = firmware;
+        App = app;
+    }
+
+    /// <summary>
+    /// Creates the emulator and flashes booter + nanoCLR + deployment (after the checksum guard), but
+    /// does not run — wire up probes via <see cref="Pico"/>, then call a <c>RunUntil…</c> method.
+    /// </summary>
+    public static NanoClrHarness Boot(NanoFirmware firmware, NanoApp app, bool withUsbCdc = false)
+    {
+        var pico = new PicoSimulation(withUsbCdc: withUsbCdc);
+        firmware.BootInto(pico, app);
+        return new NanoClrHarness(pico, firmware, app);
+    }
+
+    /// <summary>The current CPU program counter.</summary>
+    public uint Pc => Pico.Cpu.Registers.PC;
+
+    public bool IsLockedUp => Pico.Cpu.IsLockedUp;
+
+    public long InstructionCount => Pico.InstructionCount;
+
+    /// <summary>
+    /// Runs the CLR in hook-aware slices until <paramref name="ready"/> holds (checked at slice
+    /// boundaries — apt for monotonic, observable state such as a probe's captured-word count).
+    /// Returns false if <paramref name="maxInstructions"/> is reached first.
+    /// </summary>
+    public bool RunUntil(Func<bool> ready, long maxInstructions = 200_000_000, int slice = 100_000)
+    {
+        long ran = 0;
+        while (ran < maxInstructions && !ready())
+        {
+            Pico.RunInstructions(slice);
+            ran += slice;
+        }
+
+        return ready();
+    }
+
+    /// <summary>
+    /// Runs the CLR until the CPU executes the native function <paramref name="symbol"/> (resolved
+    /// from the firmware manifest) — i.e. until managed code crosses into that InternalCall. Every
+    /// executed instruction's PC is watched, so the crossing is caught exactly. On success
+    /// <see cref="LastReachedSymbol"/>/<see cref="LastReachedCycle"/> record where and when.
+    /// </summary>
+    public bool RunUntilNativeCall(string symbol, long maxInstructions = 200_000_000)
+    {
+        uint target = Firmware.ResolveSymbol(symbol);
+        var watch = new PcWatch(target);
+
+        long remaining = maxInstructions;
+        while (remaining > 0 && !watch.Hit)
+        {
+            int chunk = (int)Math.Min(remaining, 1_000_000);
+            Pico.Rp2040.RunProfiled(chunk, watch);
+            remaining -= chunk;
+        }
+
+        if (watch.Hit)
+        {
+            LastReachedSymbol = symbol;
+            LastReachedCycle = watch.HitCycle;
+        }
+
+        return watch.Hit;
+    }
+
+    public void Dispose() => Pico.Dispose();
+
+    // Stops at the first instruction whose PC equals the target (the profiling observer sees every
+    // executed instruction's PC with the Thumb bit already stripped).
+    private sealed class PcWatch(uint target) : IProfilingObserver
+    {
+        public bool Hit { get; private set; }
+        public long HitCycle { get; private set; } = -1;
+
+        public void OnInstruction(uint pc, ushort opcode, long cycles)
+        {
+            if (!Hit && pc == target)
+            {
+                Hit = true;
+                HitCycle = cycles;
+            }
+        }
+    }
+}

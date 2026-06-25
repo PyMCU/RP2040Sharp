@@ -25,11 +25,57 @@ public sealed class NanoFirmware
     /// <summary>Native-methods checksums the firmware was built with, keyed by assembly name (from the manifest).</summary>
     public IReadOnlyDictionary<string, uint> ExpectedNativeChecksums { get; }
 
-    private NanoFirmware(byte[] booter, byte[] clr, IReadOnlyDictionary<string, uint> expected)
+    /// <summary>Selected native symbol addresses (name -&gt; address) from the manifest, for run-to-function.</summary>
+    public IReadOnlyDictionary<string, uint> Symbols { get; }
+
+    private NanoFirmware(
+        byte[] booter,
+        byte[] clr,
+        IReadOnlyDictionary<string, uint> expected,
+        IReadOnlyDictionary<string, uint> symbols)
     {
         NanoBooter = booter;
         NanoClr = clr;
         ExpectedNativeChecksums = expected;
+        Symbols = symbols;
+    }
+
+    /// <summary>Resolves a native symbol address by name (Thumb bit cleared). Throws if not in the manifest.</summary>
+    public uint ResolveSymbol(string name)
+    {
+        if (!Symbols.TryGetValue(name, out uint address))
+        {
+            throw new KeyNotFoundException(
+                $"Symbol '{name}' is not in the firmware manifest. Known: {string.Join(", ", Symbols.Keys)}.");
+        }
+
+        return address & ~1u;
+    }
+
+    /// <summary>The manifest symbol whose address most closely precedes <paramref name="pc"/> ("func+0xNN"),
+    /// or "0x........" if none. Curated symbols only — good for the points you run to, not full coverage.</summary>
+    public string SymbolizePc(uint pc)
+    {
+        pc &= ~1u;
+        string? best = null;
+        uint bestAddr = 0;
+        foreach (var (name, addr) in Symbols)
+        {
+            uint a = addr & ~1u;
+            if (a <= pc && a >= bestAddr)
+            {
+                best = name;
+                bestAddr = a;
+            }
+        }
+
+        if (best is null)
+        {
+            return $"0x{pc:X8}";
+        }
+
+        uint offset = pc - bestAddr;
+        return offset == 0 ? best : $"{best}+0x{offset:X}";
     }
 
     /// <summary>
@@ -46,8 +92,8 @@ public sealed class NanoFirmware
 
         byte[] booter = File.ReadAllBytes(FindOne(directory, "nanoBooter"));
         byte[] clr = File.ReadAllBytes(FindOne(directory, "nanoCLR"));
-        var expected = LoadManifest(Path.Combine(directory, "firmware.manifest.json"));
-        return new NanoFirmware(booter, clr, expected);
+        var (checksums, symbols) = LoadManifest(Path.Combine(directory, "firmware.manifest.json"));
+        return new NanoFirmware(booter, clr, checksums, symbols);
     }
 
     /// <summary>
@@ -86,24 +132,31 @@ public sealed class NanoFirmware
         };
     }
 
-    private static IReadOnlyDictionary<string, uint> LoadManifest(string manifestPath)
+    private static (IReadOnlyDictionary<string, uint> Checksums, IReadOnlyDictionary<string, uint> Symbols)
+        LoadManifest(string manifestPath)
     {
-        var map = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+        var checksums = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+        var symbols = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
         if (!File.Exists(manifestPath))
         {
-            return map; // optional: no manifest means no checksum guard
+            return (checksums, symbols); // optional: no manifest means no guard / no symbols
         }
 
         using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
-        if (doc.RootElement.TryGetProperty("nativeChecksums", out var checksums))
+        ReadHexMap(doc.RootElement, "nativeChecksums", checksums);
+        ReadHexMap(doc.RootElement, "symbols", symbols);
+        return (checksums, symbols);
+    }
+
+    private static void ReadHexMap(JsonElement root, string property, Dictionary<string, uint> into)
+    {
+        if (root.TryGetProperty(property, out var obj))
         {
-            foreach (var entry in checksums.EnumerateObject())
+            foreach (var entry in obj.EnumerateObject())
             {
-                map[entry.Name] = ParseHex(entry.Value.GetString());
+                into[entry.Name] = ParseHex(entry.Value.GetString());
             }
         }
-
-        return map;
     }
 
     private static uint ParseHex(string? value)
