@@ -37,11 +37,11 @@ jobs:
 
       # ── Restore ─────────────────────────────────────────────────────────────
       - name: Restore
-        run: dotnet restore RP2040.sln
+        run: dotnet restore RP2040Sharp.sln
 
       # ── Build ───────────────────────────────────────────────────────────────
       - name: Build
-        run: dotnet build RP2040.sln -c Release --no-restore /p:ContinuousIntegrationBuild=true
+        run: dotnet build RP2040Sharp.sln -c Release --no-restore /p:ContinuousIntegrationBuild=true
 
       # ── Test (unit only; integration tests download firmware) ───────────────
       - name: Test

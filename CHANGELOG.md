@@ -7,19 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.1-beta.2] - 2026-06-25
+## [1.0.1-beta.3] - 2026-06-25
 
-Third prerelease of the `1.0.1` line. Ships two new **BUSL-1.1** packages and the CI
-wiring to publish them, on top of the CYW43439 wireless stack, a second bootrom revision,
-and a nanoFramework integration-test harness landed since `1.0.1-beta.1`.
+Re-cut of `1.0.1-beta.2`, which only partially published (nuget.org rejects BUSL-1.1 as a
+license *expression*, and the Wireless package shipped under a package id outside the
+publisher's reserved prefix). This release ships the full **BUSL-1.1** package set with a
+clean licensing and naming model.
 
-No breaking changes to the MIT core — `RP2040Sharp` and `RP2040Sharp.TestKit` remain MIT.
+**Licensing model:** only the **`RP2040Sharp` emulator core stays MIT**. Everything else —
+`RP2040Sharp.TestKit`, `RP2040Sharp.Wireless`, and `RP2040Sharp.TestKit.NanoFramework` — is
+**BUSL-1.1**, shipped as a license *file* with a generous Additional Use Grant (free for
+individuals and for personal, educational, research, evaluation and open-source use;
+Commercial Use — enterprise CI/CD and revenue-generating products/services — needs a
+commercial license). Change Date 2030-06-25, converting to MIT.
 
 ### Added
 
-- **`RP2040.Wireless` (BUSL-1.1)** — firmware-agnostic CYW43439 Wi-Fi + Bluetooth LE
-  virtualization for the Raspberry Pi Pico W (gSPI/PIO, SDIO backplane, WHD/SDPCM, BT HCI),
-  now packaged and published to nuget.org.
+- **`RP2040Sharp.Wireless` (BUSL-1.1)** — firmware-agnostic CYW43439 Wi-Fi + Bluetooth LE
+  virtualization for the Raspberry Pi Pico W (gSPI/PIO, SDIO backplane, WHD/SDPCM, BT HCI).
 - **`RP2040Sharp.TestKit.NanoFramework` (BUSL-1.1)** — boot a deployed .NET nanoFramework
   app on the emulator and assert against it: managed static/instance fields by name,
   run-until-managed-method, and a bundled **NanoSymbols** source generator (shipped as an
@@ -30,13 +35,26 @@ No breaking changes to the MIT core — `RP2040Sharp` and `RP2040Sharp.TestKit` 
 
 ### Changed
 
-- `publish.yml` now packs and publishes the two BUSL-1.1 packages alongside the MIT core.
+- **`RP2040Sharp.TestKit` is now BUSL-1.1** (was MIT).
+- **Renamed the Wireless package** `RP2040.Wireless` → **`RP2040Sharp.Wireless`** for a
+  consistent `RP2040Sharp.*` id prefix.
+- **Renamed the solution** `RP2040.sln` → `RP2040Sharp.sln`.
+- BUSL packages ship the license as a **file** (`LICENSE-BUSL.txt`) instead of a license
+  expression, so nuget.org accepts them.
+- `publish.yml` packs and publishes all three BUSL-1.1 packages alongside the MIT core.
 
 ### Fixed
 
 - **SSI direct-command flash RX** so the bootrom/CLR flash-access path works.
 - **USB CDC** OUT delivery moved to a push model; `EP_ABORT` no longer drops deferred
   completions.
+
+## [1.0.1-beta.2] - 2026-06-25 [YANKED]
+
+Partial release — superseded by `1.0.1-beta.3`. `RP2040Sharp` (MIT),
+`RP2040Sharp.TestKit.NanoFramework` (BUSL-1.1) and `RP2040Sharp.TestKit` (MIT) reached
+nuget.org; the Wireless package failed to publish and `RP2040Sharp.TestKit` shipped under
+the wrong (MIT) license. See `1.0.1-beta.3` for the corrected set.
 
 ## [1.0.0] - 2026-06-06
 
@@ -112,7 +130,8 @@ First public release candidate. A high-performance RP2040 emulator in modern C#
 - Flash programming uses C# hooks rather than the SSI XIP hardware path.
 - USB host support is CDC-only (sufficient for the MicroPython REPL).
 
-[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.2...HEAD
+[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.3...HEAD
+[1.0.1-beta.3]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.2...v1.0.1-beta.3
 [1.0.1-beta.2]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.1...v1.0.1-beta.2
 [1.0.0]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.0-rc.2...v1.0.0
 [1.0.0-rc.2]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.0-rc.1...v1.0.0-rc.2

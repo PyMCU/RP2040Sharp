@@ -5,9 +5,9 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
-    <PackageId>RP2040.Wireless</PackageId>
-    <Product>RP2040.Wireless</Product>
-    <Title>RP2040.Wireless — CYW43439 Wi-Fi + BLE emulation for the Raspberry Pi Pico W</Title>
+    <PackageId>RP2040Sharp.Wireless</PackageId>
+    <Product>RP2040Sharp.Wireless</Product>
+    <Title>RP2040Sharp.Wireless — CYW43439 Wi-Fi + BLE emulation for the Raspberry Pi Pico W</Title>
     <Description>
       A firmware-agnostic emulation of the Infineon CYW43439 Wi-Fi + Bluetooth LE combo chip as wired on
       the Raspberry Pi Pico W: the gSPI bus (bit-banged through PIO), the SDIO backplane and firmware
