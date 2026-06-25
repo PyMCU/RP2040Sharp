@@ -19,8 +19,11 @@
     <PackageTags>rp2040;picow;cyw43439;wifi;ble;bluetooth;emulator;sdpcm;whd;hci;virtualization</PackageTags>
 
     <!-- Specialized work: Business Source License 1.1 (converts to MIT on the Change Date).
-         Overrides the MIT default inherited from Directory.Build.props. -->
-    <PackageLicenseExpression>BUSL-1.1</PackageLicenseExpression>
+         nuget.org rejects BUSL-1.1 as a license *expression* (it only accepts OSI/FSF-approved
+         SPDX ids), so we ship the license as a *file* and clear the MIT expression inherited
+         from Directory.Build.props. -->
+    <PackageLicenseExpression></PackageLicenseExpression>
+    <PackageLicenseFile>LICENSE-BUSL.txt</PackageLicenseFile>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
@@ -28,5 +31,9 @@
   <ItemGroup>
     <!-- BUSL extension depends only on the MIT core; the core never depends back. -->
     <ProjectReference Include="..\RP2040Sharp\RP2040Sharp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSE-BUSL.txt" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
 </Project>

@@ -16,8 +16,11 @@
     <Nullable>enable</Nullable>
 
     <!-- Specialized work: Business Source License 1.1 (converts to MIT on the Change Date).
-         Overrides the MIT default inherited from Directory.Build.props. -->
-    <PackageLicenseExpression>BUSL-1.1</PackageLicenseExpression>
+         nuget.org rejects BUSL-1.1 as a license *expression* (it only accepts OSI/FSF-approved
+         SPDX ids), so we ship the license as a *file* and clear the MIT expression inherited
+         from Directory.Build.props. -->
+    <PackageLicenseExpression></PackageLicenseExpression>
+    <PackageLicenseFile>LICENSE-BUSL.txt</PackageLicenseFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -30,6 +33,7 @@
 
   <!-- NuGet consumers get the generator (analyzer) and the wiring targets automatically. -->
   <ItemGroup>
+    <None Include="..\..\LICENSE-BUSL.txt" Pack="true" PackagePath="" Visible="false" />
     <None Include="..\RP2040.NanoFramework.TestKit.SourceGen\bin\$(Configuration)\netstandard2.0\RP2040.NanoFramework.TestKit.SourceGen.dll"
           Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="build\RP2040Sharp.TestKit.NanoFramework.targets"
