@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>RP2040Sharp.TestKit.NanoFramework</PackageId>
+    <Product>RP2040Sharp.TestKit.NanoFramework</Product>
+    <Title>RP2040Sharp.TestKit.NanoFramework — boot &amp; assert deployed .NET nanoFramework apps on the RP2040 emulator</Title>
+    <Description>Boot a deployed .NET nanoFramework app on the RP2040Sharp emulator: firmware
+      discovery, deployment assembly from .pe metadata, and a native-checksum compatibility guard. Run your
+      real deployed C# on the emulated chip and assert against it from xUnit — managed static and instance
+      fields by name, run-until-managed-method, and a NanoSymbols source generator that emits strongly-typed
+      symbols for your app's methods and static fields.</Description>
+    <PackageTags>rp2040;nanoframework;testkit;emulator;integration-testing;clr;xunit</PackageTags>
+    <IsPackable>true</IsPackable>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <!-- Specialized work: Business Source License 1.1 (converts to MIT on the Change Date).
+         Overrides the MIT default inherited from Directory.Build.props. -->
+    <PackageLicenseExpression>BUSL-1.1</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RP2040Sharp\RP2040Sharp.csproj" />
+    <ProjectReference Include="..\RP2040.TestKit\RP2040.TestKit.csproj" />
+    <!-- Build the source generator alongside us; not a compile reference, only packaged as an analyzer. -->
+    <ProjectReference Include="..\RP2040.NanoFramework.TestKit.SourceGen\RP2040.NanoFramework.TestKit.SourceGen.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- NuGet consumers get the generator (analyzer) and the wiring targets automatically. -->
+  <ItemGroup>
+    <None Include="..\RP2040.NanoFramework.TestKit.SourceGen\bin\$(Configuration)\netstandard2.0\RP2040.NanoFramework.TestKit.SourceGen.dll"
+          Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="build\RP2040Sharp.TestKit.NanoFramework.targets"
+          Pack="true" PackagePath="buildTransitive" Visible="false" />
+  </ItemGroup>
+
+</Project>

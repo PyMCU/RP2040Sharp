@@ -1,3 +1,4 @@
+using RP2040.Core;
 using RP2040.Core.Cpu;
 using RP2040.Core.Memory;
 
@@ -68,6 +69,33 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     private uint _irq1Inte;
     private uint _irq1Intf;
 
+    // IRQ-state caching: only re-poke the NVIC when the computed IRQ lines actually change, or while
+    // the target core sleeps (so the wake heartbeat survives). Removes the per-tick NVIC churn that
+    // otherwise dominates fine-grained stepping.
+    private bool _lastIrq0, _lastIrq1, _irqStateKnown;
+    /// <summary>Returns whether the core that fields PIO interrupts is currently sleeping (WFE/WFI). A
+    /// busy core re-checks interrupts on its own, so the per-tick recompute is only needed while it sleeps.</summary>
+    public Func<bool>? CoreWaiting;
+
+    /// <summary>Raised when a state machine frees a TX FIFO slot (explicit PULL or autopull), so a
+    /// DREQ-paced DMA feeding that SM can re-arm. Mirrors <see cref="OnRxPush"/> for the RX direction.</summary>
+    public Action<int>? OnTxConsumed { get; set; }
+    /// <summary>Raised when a state machine pushes a word into the RX FIFO (PUSH or autopush), so a
+    /// DREQ-paced DMA draining that SM can re-arm. (smIndex, value).</summary>
+    public Action<int, uint>? OnRxPush { get; set; }
+
+    /// <summary>Raised when the firmware pushes a word into a TX FIFO (a write to TXFx). (smIndex, value).
+    /// Used by test probes to observe the data crossing the SM boundary.</summary>
+    public Action<int, uint>? OnTxPush { get; set; }
+    /// <summary>Raised when the firmware pulls a word out of an RX FIFO (a read from RXFx). (smIndex, value).
+    /// Used by test probes to observe the data crossing the SM boundary.</summary>
+    public Action<int, uint>? OnRxPull { get; set; }
+
+    // FIFO helpers that notify the DREQ-resume hooks. Over-notifying is safe: ResumeDreq is
+    // reentrancy-guarded and a no-op unless a channel is stalled on that exact DREQ with the source ready.
+    private void RxEnqueue(PioStateMachine sm, uint value) { sm.RxFifo.Enqueue(value); OnRxPush?.Invoke(sm.SmIndex, value); }
+    private uint TxDequeue(PioStateMachine sm) { var v = sm.TxFifo.Dequeue(); OnTxConsumed?.Invoke(sm.SmIndex); return v; }
+
     public uint Size => 0x100000;  // up to 1 MB address space per block
 
     /// <summary>Read current physical GPIO input levels (used by WAIT GPIO, IN PINS).</summary>
@@ -76,6 +104,13 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     public Action<uint, uint>? WriteGpioPins { get; set; }
     /// <summary>Write physical GPIO pin directions: (dirValue, pinMask).</summary>
     public Action<uint, uint>? WriteGpioDirs { get; set; }
+
+    /// <summary>
+    /// Whether the block is held in reset. On real RP2040 a PIO powers up clock-gated: register reads
+    /// return 0 and writes are no-ops until firmware clears its RESETS bit. The full machine starts the
+    /// PIO in reset and clears this when RESETS releases the block; isolated unit tests leave it false.
+    /// </summary>
+    public bool InReset;
 
     public PioPeripheral(CortexM0Plus cpu, uint blockIndex)
     {
@@ -120,6 +155,10 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
     public uint ReadWord(uint address)
     {
+        // Held in reset: the block is clock-gated, every register reads back 0.
+        if (InReset)
+            return 0;
+
         // Strip the base (top 20 bits may vary between PIO0/1)
         var off = address & 0xFFFFF;
 
@@ -148,6 +187,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             // rp2040js: readFIFO() → checkWait().
             if (sm.Stalled)
                 CheckSmWait(sm, txEvent: false);
+            OnRxPull?.Invoke(smIdx, v);
             return v;
         }
 
@@ -179,6 +219,10 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
     public void WriteWord(uint address, uint value)
     {
+        // Held in reset: the block is clock-gated, register writes are silently dropped.
+        if (InReset)
+            return;
+
         var off = address & 0xFFFFF;
 
         if (off >= REG_INSTR_MEM_BASE && off < REG_INSTR_MEM_BASE + INSTR_COUNT * 4)
@@ -200,6 +244,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             if (sm.TxFifo.Count < sm.TxDepth)
             {
                 sm.TxFifo.Enqueue(value);
+                OnTxPush?.Invoke(smIdx, value);
                 // Clear TXSTALL for this SM now that TX FIFO has data
                 _fdebug &= ~(1u << (24 + smIdx));
                 // Wake a SM that was stalled waiting for data in the TX FIFO (PULL block / autopull).
@@ -279,7 +324,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             if (((instr >> 13) & 7) == OP_PUSH_PULL)
             {
                 // Blocking PULL: its sole effect is to load the OSR — do it and step past it.
-                sm.OSR = sm.TxFifo.Dequeue();
+                sm.OSR = TxDequeue(sm);
                 sm.OsrCount = 32;
                 sm.Stalled = false;
                 AdvanceSmPc(sm);
@@ -299,7 +344,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             {
                 // Deferred autopush: the ISR already holds the captured data; flush it and
                 // step past the IN that stalled.
-                sm.RxFifo.Enqueue(sm.ISR);
+                RxEnqueue(sm, sm.ISR);
                 sm.ISR = 0; sm.IsrCount = 0;
                 sm.AutopushPending = false;
                 sm.Stalled = false;
@@ -310,7 +355,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             if (((instr >> 13) & 7) == OP_PUSH_PULL && (instr & 0x80) == 0)
             {
                 // Blocking PUSH: flush the ISR and step past it.
-                sm.RxFifo.Enqueue(sm.ISR);
+                RxEnqueue(sm, sm.ISR);
                 sm.ISR = 0; sm.IsrCount = 0;
                 sm.Stalled = false;
                 AdvanceSmPc(sm);
@@ -445,6 +490,16 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         var intr = BuildIntr();
         var irq0Active = ((intr | _irq0Intf) & _irq0Inte) != 0;
         var irq1Active = ((intr | _irq1Intf) & _irq1Inte) != 0;
+
+        // Re-poke the NVIC only when the IRQ state actually changed, or — to preserve the wake
+        // heartbeat — while the target core sleeps. A busy core re-checks interrupts on its own, so
+        // skipping the unchanged-state recompute removes the per-tick NVIC churn that otherwise
+        // dominated fine-grained stepping, with no change in observed interrupt behaviour.
+        var changed = !_irqStateKnown || irq0Active != _lastIrq0 || irq1Active != _lastIrq1;
+        if (!changed && CoreWaiting != null && !CoreWaiting()) return;
+        _lastIrq0 = irq0Active; _lastIrq1 = irq1Active; _irqStateKnown = true;
+
+        // PIO0_IRQ0=7, PIO0_IRQ1=8, PIO1_IRQ0=9, PIO1_IRQ1=10
         _cpu.SetInterrupt((int)(7 + _blockIndex * 2),     irq0Active);
         _cpu.SetInterrupt((int)(7 + _blockIndex * 2 + 1), irq1Active);
     }
@@ -515,7 +570,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         {
             if (sm.RxFifo.Count < sm.RxDepth)
             {
-                sm.RxFifo.Enqueue(sm.ISR);
+                RxEnqueue(sm, sm.ISR);
                 sm.ISR = 0; sm.IsrCount = 0;
                 sm.AutopushPending = false;
                 sm.Stalled = false;
@@ -680,7 +735,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             0 => (((ReadGpioIn?.Invoke() ?? sm.GpioPins) >> (int)index) & 1) == polarity,  // GPIO (absolute)
             1 => (((ReadGpioIn?.Invoke() ?? sm.GpioPins) >> (int)((index + sm.InBase) & 0x1F)) & 1) == polarity,  // PIN relative to IN_BASE
             2 => ((_irq >> irqFlagIdx) & 1) == polarity,   // IRQ flag
-            _ => true,
+            _ => EmuStrict.NoteRet ("pio.wait.src-reserved", $"src={source}", true),  // 3 = reserved
         };
 
         sm.Stalled = !condition;
@@ -703,7 +758,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             3 => 0,             // NULL
             6 => sm.ISR,
             7 => sm.OSR,
-            _ => 0,
+            _ => EmuStrict.NoteRet ("pio.in.src-reserved", $"src={source}", 0u),  // 4,5 = reserved
         };
 
         if (sm.IsrShiftRight)
@@ -723,7 +778,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         {
             if (sm.RxFifo.Count < sm.RxDepth)
             {
-                sm.RxFifo.Enqueue(sm.ISR);
+                RxEnqueue(sm, sm.ISR);
                 sm.ISR = 0; sm.IsrCount = 0;
             }
             else
@@ -757,7 +812,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 _fdebug |= 1u << (24 + sm.SmIndex);  // TXSTALL
                 return;
             }
-            sm.OSR = sm.TxFifo.Dequeue();
+            sm.OSR = TxDequeue(sm);
             sm.OsrCount = 32;
         }
 
@@ -831,7 +886,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             if (!block) { sm.ISR = 0; sm.IsrCount = 0; }
             return;
         }
-        sm.RxFifo.Enqueue(sm.ISR);
+        RxEnqueue(sm, sm.ISR);
         sm.ISR = 0;
         sm.IsrCount = 0;
         sm.Stalled = false;
@@ -861,7 +916,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         }
         else
         {
-            sm.OSR = sm.TxFifo.Dequeue();
+            sm.OSR = TxDequeue(sm);
         }
         sm.OsrCount = 32;
         sm.Stalled = false;
@@ -883,13 +938,14 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             5 => ComputeStatus(sm),
             6 => sm.ISR,
             7 => sm.OSR,
-            _ => 0,
+            _ => EmuStrict.NoteRet ("pio.mov.src-reserved", $"src={source}", 0u),  // 4 = reserved
         };
 
         data = op switch
         {
             1 => ~data,
             2 => BitReverse(data),
+            3 => EmuStrict.NoteRet ("pio.mov.op-reserved", "op=3", data),  // 3 = reserved
             _ => data,
         };
 
@@ -916,6 +972,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 // MOV OSR: rp2040js §setMovDestination / TRM §3.4.3 —
                 // "The OSR shift count is set to 0 (full, i.e. 32 bits remain)."
                 sm.OSR = data; sm.OsrCount = 32; break;
+            default: EmuStrict.Note ("pio.mov.dest-reserved", $"dest={dest}"); break;  // 3 = reserved
         }
         sm.Stalled = false;
     }

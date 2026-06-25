@@ -18,14 +18,20 @@ public sealed class ResetsPeripheral : IMemoryMappedDevice
     private const uint ALL_BITS = 0x01FFFFFF;
     private const uint USBCTRL_BIT = 1u << 24;
 
-    // Start with nothing in reset so RESET_DONE = ALL_BITS from power-on.
-    // Firmware reset/unreset sequences will still work correctly because after
-    // firmware writes RESET then clears it, RESET_DONE returns that bit set.
-    private uint _reset = 0;
+    // PIO blocks (bits 10=PIO0, 11=PIO1) power up HELD IN RESET on real silicon — firmware must clear
+    // their bit (and poll RESET_DONE) before the block responds. Modelling this lets the emulator catch
+    // firmware that drives PIO registers without first un-resetting it (a silent no-op on hardware).
+    // Other subsystems stay out of reset from power-on so unrelated firmware isn't forced to un-reset
+    // them (lenient, matching prior behaviour).
+    private const uint PIO_RESET_BITS = (1u << 10) | (1u << 11);
+    private uint _reset = PIO_RESET_BITS;
     private uint _wdsel;
 
-    /// <summary>Fired when a peripheral is released from reset (bit was set, now cleared).</summary>
+    /// <summary>Fired when subsystems are released from reset (their bit went set → clear).</summary>
     public Action<uint>? OnUnreset;
+
+    /// <summary>Fired when subsystems are put into reset (their bit went clear → set).</summary>
+    public Action<uint>? OnReset;
 
     public uint Size => 0x1000;
 
@@ -50,9 +56,11 @@ public sealed class ResetsPeripheral : IMemoryMappedDevice
             case RESET:
                 var prev = _reset;
                 _reset = value & ALL_BITS;
-                // Fire OnUnreset for any bits that transitioned from set to clear
+                // Fire OnUnreset for any bits that transitioned from set to clear (and OnReset for the reverse).
                 var released = prev & ~_reset;
                 if (released != 0) OnUnreset?.Invoke(released);
+                var asserted = ~prev & _reset;
+                if (asserted != 0) OnReset?.Invoke(asserted);
                 break;
             case WDSEL: _wdsel = value & ALL_BITS; break;
         }

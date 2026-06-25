@@ -42,6 +42,14 @@ namespace RP2040.Peripherals;
 /// machine.Run(1_000_000);
 /// </code>
 /// </summary>
+public enum RP2040BootromRevision
+{
+    /// <summary>Bootrom version 2 (RP2040 B0/B1 silicon). Default.</summary>
+    B1,
+    /// <summary>Bootrom version 3 (RP2040 B2 silicon). Verified by HIL against a real B2 Pico.</summary>
+    B2,
+}
+
 public sealed class RP2040Machine : IDisposable
 {
     public const uint CLK_HZ = 125_000_000;
@@ -99,8 +107,12 @@ public sealed class RP2040Machine : IDisposable
     private bool _core1Launched;
     private int  _activeCoreId;   // 0 = Core0, 1 = Core1 (set before each Run slice)
 
-    public RP2040Machine(uint flashSize = 2 * 1024 * 1024)
+    private readonly RP2040BootromRevision _bootromRevision;
+
+    public RP2040Machine(uint flashSize = 2 * 1024 * 1024,
+                         RP2040BootromRevision bootrom = RP2040BootromRevision.B1)
     {
+        _bootromRevision = bootrom;
         Bus = new BusInterconnect(flashSize);
         Cpu  = new CortexM0Plus(Bus) { CoreId = 0 };
         Cpu1 = new CortexM0Plus(Bus) { CoreId = 1 };
@@ -262,6 +274,21 @@ public sealed class RP2040Machine : IDisposable
         ahb.Register(0x50200000, Pio0);
         ahb.Register(0x50300000, Pio1);
 
+        // PIO blocks power up held in reset (RESETS bits 10/11). Start them gated and release on the
+        // RESETS transition, so firmware that drives PIO registers without first clearing the reset bit
+        // gets silent no-ops exactly like silicon (this is what masked the real Pico bug).
+        Pio0.InReset = Pio1.InReset = true;
+        Resets.OnUnreset += released =>
+        {
+            if ((released & (1u << 10)) != 0) Pio0.InReset = false;
+            if ((released & (1u << 11)) != 0) Pio1.InReset = false;
+        };
+        Resets.OnReset += asserted =>
+        {
+            if ((asserted & (1u << 10)) != 0) Pio0.InReset = true;
+            if ((asserted & (1u << 11)) != 0) Pio1.InReset = true;
+        };
+
         // ── GPIO pins ─────────────────────────────────────────────────────
         var pins = new GpioPin[30];
         for (var i = 0; i < 30; i++)
@@ -284,6 +311,15 @@ public sealed class RP2040Machine : IDisposable
             Dma.RegisterDreq( 8 + sm, () => Pio1.TxFifoNotFull(sm));
             Dma.RegisterDreq(12 + sm, () => !Pio1.RxFifoEmpty(sm));
         }
+        // Re-arm a DREQ-paced DMA the instant the SM frees a TX slot or produces an RX word — otherwise
+        // a paced transfer (e.g. a CYW43 firmware download over the PIO gSPI) stalls BUSY forever.
+        Pio0.OnTxConsumed += sm => Dma.ResumeDreq(0 + sm);
+        Pio0.OnRxPush     += (sm, _) => Dma.ResumeDreq(4 + sm);
+        Pio1.OnTxConsumed += sm => Dma.ResumeDreq(8 + sm);
+        Pio1.OnRxPush     += (sm, _) => Dma.ResumeDreq(12 + sm);
+        // Gate the PIO's per-tick NVIC recompute to the window where core 0 sleeps (a busy core
+        // re-checks interrupts itself), removing the churn that dominated fine-grained stepping.
+        Pio0.CoreWaiting = Pio1.CoreWaiting = () => Core0Waiting;
         // SPI0 TX(16), RX(17), SPI1 TX(18), RX(19)
         Dma.RegisterDreq(16, () => true);              // SPI0 TX always ready
         Dma.RegisterDreq(17, () => Spi0.RxDataAvailable);
@@ -301,10 +337,13 @@ public sealed class RP2040Machine : IDisposable
         // Shared helpers: read physical GPIO levels; update SIO output and notify IoBank0
         uint ReadGpio() => Sio.GpioIn | Sio.GpioOut;
 
-        void ApplyPins(uint value, uint mask)
+        void ApplyPins(int block, uint value, uint mask)
         {
             // PIO output: update SIO GpioIn so physical level is visible to CPU reads
             Sio.GpioIn = (Sio.GpioIn & ~mask) | (value & mask);
+            // Route to the GPIO function mux so a pad muxed to PIO reflects the SM output
+            // (the level a circuit host reads via IoBank0.GetPadOutputLevel).
+            IoBank0.SetPioOut(block, value, mask);
             // Notify IoBank0 for edge/level interrupt detection on each changed pin
             for (var pin = 0; pin < 30; pin++)
                 if ((mask & (1u << pin)) != 0)
@@ -312,12 +351,25 @@ public sealed class RP2040Machine : IDisposable
         }
 
         Pio0.ReadGpioIn    = ReadGpio;
-        Pio0.WriteGpioPins = ApplyPins;
-        Pio0.WriteGpioDirs = (value, mask) => { /* dir changes tracked in SM only */ };
+        Pio0.WriteGpioPins = (value, mask) => ApplyPins(0, value, mask);
+        Pio0.WriteGpioDirs = (value, mask) => IoBank0.SetPioDirs(0, value, mask);
 
         Pio1.ReadGpioIn    = ReadGpio;
-        Pio1.WriteGpioPins = ApplyPins;
-        Pio1.WriteGpioDirs = (value, mask) => { };
+        Pio1.WriteGpioPins = (value, mask) => ApplyPins(1, value, mask);
+        Pio1.WriteGpioDirs = (value, mask) => IoBank0.SetPioDirs(1, value, mask);
+    }
+
+    /// <summary>
+    /// Writes bytes directly into the existing Flash backing store at <paramref name="offset"/>
+    /// (relative to 0x10000000), without re-loading the whole image. Lets a host edit a filesystem
+    /// region in place — e.g. stage a new code.py — then call <see cref="Reset"/> to re-run, instead
+    /// of allocating and re-loading a fresh multi-MB flash image on every change.
+    /// </summary>
+    public unsafe void WriteFlash(int offset, ReadOnlySpan<byte> data)
+    {
+        if (offset < 0 || offset + data.Length > Bus.FlashSize)
+            throw new ArgumentOutOfRangeException(nameof(offset), "Write would fall outside the flash region");
+        data.CopyTo(new Span<byte>(Bus.PtrFlash + offset, data.Length));
     }
 
     /// <summary>Load a binary image into Flash starting at 0x10000000.</summary>
@@ -337,7 +389,7 @@ public sealed class RP2040Machine : IDisposable
         // flash_range_erase and flash_range_program are intercepted by C# native hooks.
         if (*(uint*)Bus.PtrBootRom == 0 && *(uint*)(Bus.PtrBootRom + 4) == 0)
         {
-            LoadRealBootRom(Bus.PtrBootRom);
+            LoadRealBootRom(Bus.PtrBootRom, _bootromRevision);
 
             if (TryFindVectorTable(Bus.PtrFlash, (int)image.Length, out var sp, out var resetPc,
                     out var vectorTableOffset))
@@ -613,30 +665,42 @@ public sealed class RP2040Machine : IDisposable
     /// memory, then patches flash hardware-accessing functions to BX LR so they return
     /// without touching SSI/QSPI registers that are not fully emulated.
     /// </summary>
-    private static unsafe void LoadRealBootRom(byte* rom)
+    private static unsafe void LoadRealBootRom(byte* rom, RP2040BootromRevision revision)
     {
-        // Load binary from embedded resource
+        // Load the BootROM for the requested silicon revision. B1 (version 2) is the default; B2
+        // (version 3) is the bootrom on later RP2040 silicon (verified by HIL against a real B2 chip).
+        var resource = revision switch
+        {
+            RP2040BootromRevision.B2 => "RP2040Sharp.bootrom_b2.bin",
+            _                        => "RP2040Sharp.bootrom_b1.bin",
+        };
         var asm = System.Reflection.Assembly.GetExecutingAssembly();
-        using var stream = asm.GetManifestResourceStream("RP2040Sharp.bootrom_b1.bin")
+        using var stream = asm.GetManifestResourceStream(resource)
             ?? throw new InvalidOperationException(
-                "Embedded resource 'RP2040Sharp.bootrom_b1.bin' not found. " +
-                "Ensure bootrom_b1.bin is included as an EmbeddedResource in the project.");
+                $"Embedded resource '{resource}' not found. Ensure the matching bootrom .bin is included " +
+                "as an EmbeddedResource in the project.");
         stream.ReadExactly(new Span<byte>(rom, 16384));
 
-        // Patch flash hardware-accessing bootrom functions to 'BX LR' (0x4770).
-        // These functions talk directly to the SSI/QSPI peripheral, which is not
-        // fully emulated. They are called by MicroPython's LittleFS flash trampoline
-        // (which runs from SRAM) to set up/tear down XIP mode around erase/program ops.
-        // Making them no-ops is safe: our C# hooks handle the actual flash data.
-        //   0x24A0 = connect_internal_flash
-        //   0x23F4 = flash_exit_xip
-        //   0x2360 = flash_flush_cache
-        //   0x2330 = flash_enter_cmd_xip
+        // Patch the flash hardware-accessing bootrom functions to 'BX LR' (0x4770): they talk directly to
+        // the SSI/QSPI peripheral (not fully emulated) and are called by MicroPython's LittleFS flash
+        // trampoline to set up/tear down XIP around erase/program. Making them no-ops is safe — our C#
+        // hooks handle the actual flash data. The function ADDRESSES differ between bootrom revisions, so
+        // resolve them from the ROM function table instead of hardcoding (revision-agnostic; reproduces
+        // the historical B1 addresses 0x24A0/0x23F4/0x2360/0x2330 exactly).
         static void PatchBxLr(byte* p, int addr) { p[addr] = 0x70; p[addr + 1] = 0x47; }
-        PatchBxLr(rom, 0x24A0);
-        PatchBxLr(rom, 0x23F4);
-        PatchBxLr(rom, 0x2360);
-        PatchBxLr(rom, 0x2330);
+        static ushort U16(byte* p, int o) => (ushort)(p[o] | (p[o + 1] << 8));
+
+        // rom_func_table pointer lives at offset 0x14; the table is a list of (code:u16, addr:u16) pairs
+        // terminated by code 0. Codes are two ASCII chars: 'IF','EX','FC','CX' (see RP2040 datasheet §2.8.3).
+        foreach (var code in new ushort[] { 0x4649 /*IF*/, 0x5845 /*EX*/, 0x4346 /*FC*/, 0x5843 /*CX*/ })
+        {
+            for (int p = U16(rom, 0x14); p < 0x4000 && U16(rom, p) != 0; p += 4)
+            {
+                if (U16(rom, p) != code) continue;
+                PatchBxLr(rom, U16(rom, p + 2) & ~1); // table stores the Thumb (odd) address; patch the instruction
+                break;
+            }
+        }
     }
 
     /// 
@@ -792,6 +856,10 @@ public sealed class RP2040Machine : IDisposable
     /// <summary>Total instructions executed by Core 0 since reset.</summary>
     public long InstructionCount => Cpu.Cycles;
 
+    /// <summary>True while core 0 is parked in WFI/WFE waiting for an event. Lets a test harness coarsen
+    /// the run quantum while idle, and gates the PIO's per-tick NVIC recompute to the sleeping window.</summary>
+    public bool Core0Waiting => Cpu.Registers.Waiting;
+
     /// <summary>True once Core 1 has been launched via the SIO FIFO multicore handshake.</summary>
     public bool Core1Launched => _core1Launched;
 
@@ -830,6 +898,28 @@ public sealed class RP2040Machine : IDisposable
 
         LastElapsedCycles = delta;
 
+        foreach (var t in _tickables)
+            t.Tick(delta);
+    }
+
+    /// <summary>Diagnostic sibling of <see cref="Run"/> that drives core 0 through the per-instruction
+    /// profiling path (<see cref="CortexM0Plus.RunProfiled"/>), then ticks peripherals. Core 1, if
+    /// launched, runs unobserved. For boot/fault tracing only — not throughput-sensitive.</summary>
+    public void RunProfiled(int instructions, Core.Cpu.IProfilingObserver observer)
+    {
+        _activeCoreId = 0;
+        var before0 = Cpu.Cycles;
+        Cpu.RunProfiled(instructions, observer);
+        var delta = Cpu.Cycles - before0;
+        if (_core1Launched)
+        {
+            _activeCoreId = 1;
+            var before1 = Cpu1.Cycles;
+            Cpu1.Run(instructions);
+            _activeCoreId = 0;
+            delta = Math.Max(delta, (int)(Cpu1.Cycles - before1));
+        }
+        LastElapsedCycles = delta;
         foreach (var t in _tickables)
             t.Tick(delta);
     }

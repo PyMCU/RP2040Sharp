@@ -1,0 +1,55 @@
+<Project>
+
+  <!--
+    nanoFramework symbols generation wiring (RP2040Sharp.TestKit.NanoFramework).
+
+    A consumer adds ONE line:
+      <ItemGroup>
+        <NanoFrameworkApp Include="../app/Showcase.nfproj" />
+      </ItemGroup>
+
+    This:
+      1) hands the app's built managed assembly (bin/<cfg>/<name>.exe) to the NanoSymbols source generator,
+      2) builds that .nfproj before compilation so the .exe is fresh,
+      3) the generator emits a strongly-typed symbols class ("<AssemblyName>Symbols") with the app's
+         methods ("Assembly!Method") and static fields (simple names).
+
+    Tunables (properties):
+      $(NanoFrameworkAppConfiguration)  default Release — the app build/output configuration.
+      $(NanoSymbolsNamespace)           default $(RootNamespace) — namespace of the generated class.
+      $(NanoSymbolsClassName)           default "" — class name ("" → "<AssemblyName>Symbols").
+  -->
+
+  <PropertyGroup>
+    <NanoFrameworkAppConfiguration Condition="'$(NanoFrameworkAppConfiguration)' == ''">Release</NanoFrameworkAppConfiguration>
+    <NanoSymbolsNamespace Condition="'$(NanoSymbolsNamespace)' == ''">$(RootNamespace)</NanoSymbolsNamespace>
+  </PropertyGroup>
+
+  <!-- Expose the per-file metadata to the source generator. -->
+  <ItemGroup>
+    <CompilerVisibleItemMetadata Include="AdditionalFiles" MetadataName="NanoSymbols" />
+    <CompilerVisibleItemMetadata Include="AdditionalFiles" MetadataName="NanoSymbolsNamespace" />
+    <CompilerVisibleItemMetadata Include="AdditionalFiles" MetadataName="NanoSymbolsClass" />
+  </ItemGroup>
+
+  <!-- Declare the app assembly as an AdditionalFile at EVALUATION time (not inside a target) so its metadata
+       reaches the generated analyzer config that the source generator reads. The file itself is produced by
+       the build target below before the compiler reads it. -->
+  <ItemGroup Condition="'@(NanoFrameworkApp)' != ''">
+    <AdditionalFiles Include="@(NanoFrameworkApp->'%(RootDir)%(Directory)bin\$(NanoFrameworkAppConfiguration)\%(Filename).exe')"
+                     NanoSymbols="true"
+                     NanoSymbolsNamespace="$(NanoSymbolsNamespace)"
+                     NanoSymbolsClass="$(NanoSymbolsClassName)" />
+  </ItemGroup>
+
+  <!-- Build each nanoFramework app before compiling (and before the editor-config/compile steps read the
+       AdditionalFile), so its .pe/.exe output is current. -->
+  <Target Name="_NanoFrameworkBuildApps"
+          BeforeTargets="BeforeCompile;CoreCompile"
+          Condition="'@(NanoFrameworkApp)' != ''">
+    <MSBuild Projects="@(NanoFrameworkApp)"
+             Targets="Build"
+             Properties="Configuration=$(NanoFrameworkAppConfiguration)" />
+  </Target>
+
+</Project>

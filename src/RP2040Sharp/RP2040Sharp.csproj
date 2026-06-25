@@ -13,5 +13,6 @@
 
   <ItemGroup>
     <EmbeddedResource Include="bootrom_b1.bin" />
+    <EmbeddedResource Include="bootrom_b2.bin" />
   </ItemGroup>
 </Project>
