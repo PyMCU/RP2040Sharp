@@ -126,6 +126,73 @@ public sealed class ClrInspector
     /// <summary>Reads a managed <c>static int</c> field as a 32-bit value.</summary>
     public int ReadStaticInt32(uint asm, int slot) => ReadStatic(asm, slot).AsInt32;
 
+    /// <summary>Reads a managed <c>static long</c> field as a 64-bit value (the cell's 8 data bytes).</summary>
+    public long ReadStaticInt64(uint asm, int slot)
+    {
+        uint hb = Rd(asm + _l.ASM_StaticFields) + (uint)slot * _l.HB_Size;
+        ulong lo = Rd(hb + _l.HB_Data);
+        ulong hi = Rd(hb + _l.HB_Data + 4);
+        return (long)(lo | (hi << 32));
+    }
+
+    // ---- instance fields (by name) ------------------------------------
+
+    /// <summary>
+    /// Resolves the instance-field slot for <paramref name="fieldName"/> of <paramref name="typeName"/>
+    /// (the offset, in heap blocks, of the field within an object of that type).
+    /// </summary>
+    public bool TryResolveInstanceSlot(uint asm, string typeName, string fieldName, out int slot)
+    {
+        slot = -1;
+        uint header = Rd(asm + _l.ASM_Header);
+        uint sot = header + _l.SOT;
+        uint typeDefTable = header + Rd(sot + (uint)_l.TBL_TypeDef * 4);
+        uint fieldDefTable = header + Rd(sot + (uint)_l.TBL_FieldDef * 4);
+        uint stringHeap = header + Rd(sot + (uint)_l.TBL_Strings * 4);
+        uint xref = Rd(asm + _l.ASM_XrefFieldDef);
+        if (xref == 0)
+        {
+            return false;
+        }
+
+        uint typeDefBytes = Rd(sot + (uint)(_l.TBL_TypeDef + 1) * 4) - Rd(sot + (uint)_l.TBL_TypeDef * 4);
+        int typeCount = (int)(typeDefBytes / _l.TD_Size);
+
+        for (int t = 0; t < typeCount; t++)
+        {
+            uint td = typeDefTable + (uint)t * _l.TD_Size;
+            if (CStr(stringHeap + Rh(td + _l.TD_Name)) != typeName)
+            {
+                continue;
+            }
+
+            int first = Rh(td + _l.TD_IFieldsFirst);
+            int num = Rb(td + _l.TD_IFieldsNum);
+            for (int fi = first; fi < first + num; fi++)
+            {
+                uint fd = fieldDefTable + (uint)fi * _l.FD_Size;
+                if (CStr(stringHeap + Rh(fd + _l.FD_Name)) == fieldName)
+                {
+                    slot = Rh(xref + (uint)fi * 2);
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Reads instance field <paramref name="slot"/> of the object at <paramref name="obj"/>. The slot is
+    /// the field's cross-reference m_offset, which already counts past the object header (the nanoCLR does
+    /// <c>res = Dereference(); res += m_offset</c>), so it is <em>not</em> additionally offset by the header.
+    /// </summary>
+    public HeapValue ReadInstance(uint obj, int slot)
+    {
+        uint hb = obj + (uint)slot * _l.HB_Size;
+        return new HeapValue(Rb(hb), Rd(hb + _l.HB_Data));
+    }
+
     // ---- methods (stack frames) ---------------------------------------
 
     private uint StringHeapOf(uint asm)

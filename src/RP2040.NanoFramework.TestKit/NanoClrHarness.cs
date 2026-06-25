@@ -197,6 +197,49 @@ public sealed class NanoClrHarness : IDisposable
     /// <summary>Reads a managed <c>static int</c> field by name (the assembly must already be loaded).</summary>
     public int ReadStaticInt32(string assembly, string field) => ReadStatic(assembly, field).AsInt32;
 
+    /// <summary>Reads a managed <c>static long</c> field by name (its full 64-bit value).</summary>
+    public long ReadStaticInt64(string assembly, string field)
+    {
+        uint asm = Clr.FindAssembly(assembly);
+        if (asm == 0 || !Clr.TryResolveStaticSlot(asm, field, out int slot))
+        {
+            throw new InvalidOperationException($"Static field '{field}' not found/ready in '{assembly}'.");
+        }
+
+        return Clr.ReadStaticInt64(asm, slot);
+    }
+
+    /// <summary>
+    /// Reads an instance field by name from the object held in a static reference field — e.g. the
+    /// <paramref name="instanceField"/> of type <paramref name="typeName"/> on the object in
+    /// <paramref name="staticObjectField"/>.
+    /// </summary>
+    public ClrInspector.HeapValue ReadInstance(string assembly, string staticObjectField, string typeName, string instanceField)
+    {
+        uint asm = Clr.FindAssembly(assembly);
+        if (asm == 0 || !Clr.TryResolveStaticSlot(asm, staticObjectField, out int objSlot))
+        {
+            throw new InvalidOperationException($"Static field '{staticObjectField}' not found/ready in '{assembly}'.");
+        }
+
+        uint obj = Clr.ReadStatic(asm, objSlot).Raw; // the static cell holds the object reference
+        if (obj == 0)
+        {
+            throw new InvalidOperationException($"Static object '{staticObjectField}' is null.");
+        }
+
+        if (!Clr.TryResolveInstanceSlot(asm, typeName, instanceField, out int fieldSlot))
+        {
+            throw new InvalidOperationException($"Instance field '{typeName}.{instanceField}' not found in '{assembly}'.");
+        }
+
+        return Clr.ReadInstance(obj, fieldSlot);
+    }
+
+    /// <summary>Reads an <c>int</c> instance field by name from the object in a static reference field.</summary>
+    public int ReadInstanceInt32(string assembly, string staticObjectField, string typeName, string instanceField)
+        => ReadInstance(assembly, staticObjectField, typeName, instanceField).AsInt32;
+
     /// <summary>
     /// Runs the CLR until a managed static field satisfies <paramref name="predicate"/>. The assembly
     /// is loaded and the field resolved lazily (once the CLR has deployed it), then read at each slice

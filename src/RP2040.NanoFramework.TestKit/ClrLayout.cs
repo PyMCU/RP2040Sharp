@@ -35,6 +35,8 @@ public sealed record ClrLayout
     public uint TD_Name { get; init; }             // CLR_STRING (offset into the string heap)
     public uint TD_SFieldsFirst { get; init; }     // first static FieldDef index
     public uint TD_SFieldsNum { get; init; }       // static field count (1 byte)
+    public uint TD_IFieldsFirst { get; init; }     // first instance FieldDef index
+    public uint TD_IFieldsNum { get; init; }       // instance field count (1 byte)
 
     // CLR_RECORD_FIELDDEF
     public uint FD_Size { get; init; }
@@ -78,6 +80,8 @@ public sealed record ClrLayout
         TD_Name = 0,
         TD_SFieldsFirst = 16,
         TD_SFieldsNum = 20,
+        TD_IFieldsFirst = 18,
+        TD_IFieldsNum = 21,
         FD_Size = 8,
         FD_Name = 0,
         TBL_MethodDef = 6,
