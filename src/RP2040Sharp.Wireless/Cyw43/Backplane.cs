@@ -3,7 +3,7 @@
 
 using System.Collections.Generic;
 
-namespace RP2040.Wireless.Cyw43;
+namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
 /// The CYW43439's internal address space as reached through the SDIO/gSPI F1 backplane window:

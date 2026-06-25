@@ -3,7 +3,7 @@
 
 using System.Collections.Generic;
 
-namespace RP2040.Wireless.Cyw43;
+namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
 /// A pure layer-2 switch joining several emulated CYW43439 stations on one virtual air — no gateway

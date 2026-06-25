@@ -2,9 +2,9 @@
 // Copyright (c) 2024-2026 Iván Montiel Cardona
 
 using RP2040.Peripherals.Gpio;
-using RP2040.Wireless.Ble;
+using RP2040Sharp.Wireless.Ble;
 
-namespace RP2040.Wireless.Cyw43;
+namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
 /// Emulated Infineon CYW43439 Wi-Fi chip, modelled at its host-visible gSPI register/protocol

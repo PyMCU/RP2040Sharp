@@ -2,9 +2,9 @@
 // Copyright (c) 2024-2026 Iván Montiel Cardona
 
 using System;
-using RP2040.Wireless.Cyw43;
+using RP2040Sharp.Wireless.Cyw43;
 
-namespace RP2040.Wireless.Ble;
+namespace RP2040Sharp.Wireless.Ble;
 
 /// <summary>
 /// The CYW43439's Bluetooth "shared bus": HCI transported over the same gSPI/SDIO backplane as Wi-Fi,

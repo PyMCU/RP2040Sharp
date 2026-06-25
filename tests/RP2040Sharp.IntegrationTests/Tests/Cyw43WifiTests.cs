@@ -2,7 +2,7 @@ using System.Text;
 using FluentAssertions;
 using RP2040.Peripherals.Usb;
 using RP2040.TestKit;
-using RP2040.Wireless.Cyw43;
+using RP2040Sharp.Wireless.Cyw43;
 using RP2040Sharp.IntegrationTests.Infrastructure;
 using Xunit;
 using Xunit.Abstractions;

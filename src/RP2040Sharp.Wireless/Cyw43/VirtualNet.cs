@@ -4,7 +4,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace RP2040.Wireless.Cyw43;
+namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
 /// A minimal virtual network behind the emulated radio: an L2/L3 gateway that answers ARP and serves

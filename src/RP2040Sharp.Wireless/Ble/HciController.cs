@@ -4,7 +4,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace RP2040.Wireless.Ble;
+namespace RP2040Sharp.Wireless.Ble;
 
 /// <summary>
 /// An emulated Bluetooth LE controller at the HCI boundary — the chip side of the host's HCI stack

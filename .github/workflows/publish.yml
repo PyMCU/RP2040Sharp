@@ -67,9 +67,9 @@ jobs:
           --output ./nupkgs
 
       # ── BUSL-1.1 package: CYW43439 Wi-Fi + BLE virtualization ───────────────
-      - name: Pack RP2040.Wireless
+      - name: Pack RP2040Sharp.Wireless
         run: >
-          dotnet pack src/RP2040.Wireless/RP2040.Wireless.csproj
+          dotnet pack src/RP2040Sharp.Wireless/RP2040Sharp.Wireless.csproj
           -c Release
           --no-build
           --output ./nupkgs

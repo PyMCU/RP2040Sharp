@@ -18,7 +18,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040Sharp.Demo.CircuitPyt
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040Sharp.Runner", "src\RP2040Sharp.Runner\RP2040Sharp.Runner.csproj", "{2C4890EB-07AD-4197-BE40-6268A2C1DD94}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040.Wireless", "src\RP2040.Wireless\RP2040.Wireless.csproj", "{62DDE19A-912F-4A89-BC09-747DE5E05345}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040Sharp.Wireless", "src\RP2040Sharp.Wireless\RP2040Sharp.Wireless.csproj", "{62DDE19A-912F-4A89-BC09-747DE5E05345}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040.NanoFramework.TestKit", "src\RP2040.NanoFramework.TestKit\RP2040.NanoFramework.TestKit.csproj", "{F81F075C-6A42-40ED-8061-2272EC8C3B3E}"
 EndProject

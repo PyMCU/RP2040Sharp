@@ -3,7 +3,7 @@
 
 using System.Collections.Generic;
 
-namespace RP2040.Wireless.Ble;
+namespace RP2040Sharp.Wireless.Ble;
 
 /// <summary>
 /// The virtual BLE air linking several emulated controllers (each a Pico 2 W). It carries the link

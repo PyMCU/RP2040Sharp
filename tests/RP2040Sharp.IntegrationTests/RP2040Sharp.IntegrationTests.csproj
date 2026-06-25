@@ -24,7 +24,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\RP2040.TestKit\RP2040.TestKit.csproj" />
-    <ProjectReference Include="..\..\src\RP2040.Wireless\RP2040.Wireless.csproj" />
+    <ProjectReference Include="..\..\src\RP2040Sharp.Wireless\RP2040Sharp.Wireless.csproj" />
   </ItemGroup>
 
   <!-- Embed Python scripts as embedded resources so tests can access them regardless of CWD -->

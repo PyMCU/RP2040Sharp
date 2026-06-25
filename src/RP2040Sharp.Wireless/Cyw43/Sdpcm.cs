@@ -6,7 +6,7 @@ using System.Collections.Generic;
 using System.Text;
 using RP2040.Core;
 
-namespace RP2040.Wireless.Cyw43;
+namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
 /// SDPCM (Synchronous Data Packet Control Mechanism) transport for the CYW43439's WLAN function

@@ -3,7 +3,7 @@
 
 using RP2040.Peripherals.Gpio;
 
-namespace RP2040.Wireless.Cyw43;
+namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
 /// Pin-level gSPI slave for the CYW43439 as wired on the Pico 2 W: CLK (GPIO29), DATA (GPIO24,

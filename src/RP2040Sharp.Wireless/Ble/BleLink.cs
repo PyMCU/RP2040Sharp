@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2024-2026 Iván Montiel Cardona
 
-namespace RP2040.Wireless.Ble;
+namespace RP2040Sharp.Wireless.Ble;
 
 /// <summary>
 /// An established LE connection between two emulated controllers. Each side has its own connection
