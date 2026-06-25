@@ -40,6 +40,21 @@ public sealed record ClrLayout
     public uint FD_Size { get; init; }
     public uint FD_Name { get; init; }             // CLR_STRING
 
+    // CLR_RECORD_METHODDEF
+    public int TBL_MethodDef { get; init; }
+    public uint MD_Size { get; init; }
+    public uint MD_Name { get; init; }             // CLR_STRING
+
+    // CLR_RT_StackFrame.m_call (CLR_RT_MethodDef_Instance)
+    public uint SF_CallAssm { get; init; }         // m_call.m_assm (CLR_RT_Assembly*)
+    public uint SF_CallTarget { get; init; }       // m_call.m_target (CLR_RECORD_METHODDEF*)
+
+    // Instance object / array layout (object data is a CLR_RT_HeapBlock[]; arrays add a header)
+    public uint OBJ_FieldsOff { get; init; }       // object pointer -> first instance field
+    public uint ARR_NumElems { get; init; }        // CLR_RT_HeapBlock_Array.m_numOfElements
+    public uint ARR_SizeElem { get; init; }        // .m_sizeOfElement
+    public uint ARR_DataOff { get; init; }         // first element
+
     // CLR_RT_Assembly.m_pTablesSize[16] — per-table record counts.
     public uint ASM_TablesSize { get; init; }
 
@@ -65,5 +80,14 @@ public sealed record ClrLayout
         TD_SFieldsNum = 20,
         FD_Size = 8,
         FD_Name = 0,
+        TBL_MethodDef = 6,
+        MD_Size = 16,
+        MD_Name = 0,
+        SF_CallAssm = 44,
+        SF_CallTarget = 48,
+        OBJ_FieldsOff = 12,
+        ARR_NumElems = 12,
+        ARR_SizeElem = 17,
+        ARR_DataOff = 20,
     };
 }

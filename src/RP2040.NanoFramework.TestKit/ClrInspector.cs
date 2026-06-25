@@ -125,4 +125,44 @@ public sealed class ClrInspector
 
     /// <summary>Reads a managed <c>static int</c> field as a 32-bit value.</summary>
     public int ReadStaticInt32(uint asm, int slot) => ReadStatic(asm, slot).AsInt32;
+
+    // ---- methods (stack frames) ---------------------------------------
+
+    private uint StringHeapOf(uint asm)
+    {
+        uint header = Rd(asm + _l.ASM_Header);
+        return header + Rd(header + _l.SOT + (uint)_l.TBL_Strings * 4);
+    }
+
+    /// <summary>
+    /// The managed method a <c>CLR_RT_StackFrame</c> is running, as "Assembly!Method"
+    /// (m_call.m_assm.m_szName + m_call.m_target's name). "" if <paramref name="stackFrame"/> is not one.
+    /// </summary>
+    public string MethodAt(uint stackFrame)
+    {
+        uint asm = Rd(stackFrame + _l.SF_CallAssm);
+        if (asm == 0)
+        {
+            return string.Empty;
+        }
+
+        uint namePtr = Rd(asm + _l.ASM_Name);
+        uint md = Rd(stackFrame + _l.SF_CallTarget);
+        if (namePtr == 0 || md == 0)
+        {
+            return string.Empty;
+        }
+
+        string asmName = CStr(namePtr);
+        string method = CStr(StringHeapOf(asm) + Rh(md + _l.MD_Name));
+        return asmName + "!" + method;
+    }
+
+    // ---- instance heap objects (arrays) -------------------------------
+
+    /// <summary>Element count of a managed array object (its <c>CLR_RT_HeapBlock_Array</c> header).</summary>
+    public uint ReadArrayLength(uint arrayObject) => Rd(arrayObject + _l.ARR_NumElems);
+
+    /// <summary>Reads element <paramref name="index"/> of a managed <c>int[]</c> object.</summary>
+    public int ReadArrayInt32(uint arrayObject, int index) => (int)Rd(arrayObject + _l.ARR_DataOff + (uint)index * 4);
 }

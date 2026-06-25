@@ -99,6 +99,79 @@ public sealed class NanoClrHarness : IDisposable
         return watch.Hit;
     }
 
+    /// <summary>
+    /// Runs the CLR until a managed method executes — i.e. until <c>CLR_RT_Thread::Execute_IL</c> is
+    /// entered for a stack frame whose method is <paramref name="methodFqn"/> ("Assembly!Method", e.g.
+    /// a generated <c>AppSymbols.Methods.Main</c>). Needs <c>Execute_IL</c> in the firmware manifest.
+    /// </summary>
+    public bool RunUntilManagedMethod(string methodFqn, long maxInstructions = 200_000_000)
+    {
+        uint executeIl = Firmware.ResolveSymbol("Execute_IL");
+        var watch = new MethodWatch(Pico.Cpu, Clr, executeIl, methodFqn);
+
+        long remaining = maxInstructions;
+        while (remaining > 0 && !watch.Hit)
+        {
+            int chunk = (int)Math.Min(remaining, 1_000_000);
+            Pico.Rp2040.RunProfiled(chunk, watch);
+            remaining -= chunk;
+        }
+
+        if (watch.Hit)
+        {
+            LastReachedSymbol = methodFqn;
+            LastReachedCycle = watch.HitCycle;
+        }
+
+        return watch.Hit;
+    }
+
+    /// <summary>Element count of a managed <c>static int[]</c> field (a heap-allocated array object).</summary>
+    public uint StaticArrayLength(string assembly, string field) => Clr.ReadArrayLength(ResolveStaticArray(assembly, field));
+
+    /// <summary>Reads element <paramref name="index"/> of a managed <c>static int[]</c> field.</summary>
+    public int ReadStaticArrayInt32(string assembly, string field, int index)
+        => Clr.ReadArrayInt32(ResolveStaticArray(assembly, field), index);
+
+    private uint ResolveStaticArray(string assembly, string field)
+    {
+        uint asm = Clr.FindAssembly(assembly);
+        if (asm == 0 || !Clr.TryResolveStaticSlot(asm, field, out int slot))
+        {
+            throw new InvalidOperationException($"Static array '{field}' not found/ready in '{assembly}'.");
+        }
+
+        uint arrayObject = Clr.ReadStatic(asm, slot).Raw; // the static cell holds the array reference
+        if (arrayObject == 0)
+        {
+            throw new InvalidOperationException($"Static array '{field}' is null.");
+        }
+
+        return arrayObject;
+    }
+
+    // Watches every Execute_IL entry; flags when the running frame's method matches the target. The
+    // CLR_RT_StackFrame& is the call argument, so it sits in R0 or R1 — check both.
+    private sealed class MethodWatch(CortexM0Plus cpu, ClrInspector clr, uint executeIl, string fqn) : IProfilingObserver
+    {
+        public bool Hit { get; private set; }
+        public long HitCycle { get; private set; } = -1;
+
+        public void OnInstruction(uint pc, ushort opcode, long cycles)
+        {
+            if (Hit || pc != executeIl)
+            {
+                return;
+            }
+
+            if (clr.MethodAt(cpu.Registers.R1) == fqn || clr.MethodAt(cpu.Registers.R0) == fqn)
+            {
+                Hit = true;
+                HitCycle = cycles;
+            }
+        }
+    }
+
     private ClrInspector? _inspector;
 
     /// <summary>Reads managed CLR state out of the emulator (needs <c>g_CLR_RT_TypeSystem</c> in the manifest).</summary>
