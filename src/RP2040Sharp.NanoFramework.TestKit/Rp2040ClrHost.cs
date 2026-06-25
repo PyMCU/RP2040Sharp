@@ -14,18 +14,25 @@ public sealed class Rp2040ClrHost : IClrHost
 {
     private readonly PicoSimulation _pico;
     private readonly NanoFirmware _firmware;
+    private readonly Rp2040ClrMemory _memory;
 
     public Rp2040ClrHost(PicoSimulation pico, NanoFirmware firmware)
     {
         _pico = pico;
         _firmware = firmware;
+        _memory = new Rp2040ClrMemory(pico.Rp2040);
     }
 
-    public uint ReadWord(uint address) => _pico.Rp2040.Bus.ReadWord(address);
+    // Memory access (and the RAM window) come from the shared Rp2040ClrMemory — no duplicated bus reads.
+    public uint ReadWord(uint address) => _memory.ReadWord(address);
 
-    public ushort ReadHalfWord(uint address) => _pico.Rp2040.Bus.ReadHalfWord(address);
+    public ushort ReadHalfWord(uint address) => _memory.ReadHalfWord(address);
 
-    public byte ReadByte(uint address) => _pico.Rp2040.Bus.ReadByte(address);
+    public byte ReadByte(uint address) => _memory.ReadByte(address);
+
+    public uint RamStart => _memory.RamStart;
+
+    public uint RamEnd => _memory.RamEnd;
 
     public uint Pc => _pico.Cpu.Registers.PC;
 

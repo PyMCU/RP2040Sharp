@@ -19,4 +19,9 @@ public sealed class Rp2040ClrMemory : IClrMemory
     public ushort ReadHalfWord(uint address) => _machine.Bus.ReadHalfWord(address);
 
     public byte ReadByte(uint address) => _machine.Bus.ReadByte(address);
+
+    // RP2040 SRAM: 264 KB at 0x20000000 (the striped main banks + scratch).
+    public uint RamStart => 0x20000000;
+
+    public uint RamEnd => 0x20042000;
 }
