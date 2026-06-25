@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1-beta.5] - 2026-06-25
+
+### Changed
+
+- **Renamed the nanoFramework TestKit package** `RP2040Sharp.TestKit.NanoFramework` →
+  **`RP2040Sharp.NanoFramework.TestKit`** (the previous id had the segments reversed). The
+  rename is full: package id, assembly (`RP2040Sharp.NanoFramework.TestKit.dll`), namespaces
+  (`RP2040Sharp.NanoFramework.TestKit[.SourceGen]`, were `RP2040.NanoFramework.TestKit*`),
+  project folders, the bundled analyzer, and the `buildTransitive` targets file.
+  **Migration:** switch to the new package id and update
+  `using RP2040.NanoFramework.TestKit;` → `using RP2040Sharp.NanoFramework.TestKit;`. The old
+  `RP2040Sharp.TestKit.NanoFramework` package (beta.2–beta.4) is unlisted.
+
 ## [1.0.1-beta.4] - 2026-06-25
 
 ### Changed
@@ -140,7 +153,8 @@ First public release candidate. A high-performance RP2040 emulator in modern C#
 - Flash programming uses C# hooks rather than the SSI XIP hardware path.
 - USB host support is CDC-only (sufficient for the MicroPython REPL).
 
-[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.4...HEAD
+[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.5...HEAD
+[1.0.1-beta.5]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.4...v1.0.1-beta.5
 [1.0.1-beta.4]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.3...v1.0.1-beta.4
 [1.0.1-beta.3]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.2...v1.0.1-beta.3
 [1.0.1-beta.2]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.1...v1.0.1-beta.2

@@ -75,9 +75,9 @@ jobs:
           --output ./nupkgs
 
       # ── BUSL-1.1 package: bundles the NanoSymbols generator as an analyzer ───
-      - name: Pack RP2040Sharp.TestKit.NanoFramework
+      - name: Pack RP2040Sharp.NanoFramework.TestKit
         run: >
-          dotnet pack src/RP2040.NanoFramework.TestKit/RP2040.NanoFramework.TestKit.csproj
+          dotnet pack src/RP2040Sharp.NanoFramework.TestKit/RP2040Sharp.NanoFramework.TestKit.csproj
           -c Release
           --no-build
           --output ./nupkgs

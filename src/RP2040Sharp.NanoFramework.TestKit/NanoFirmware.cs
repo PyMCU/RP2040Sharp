@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using RP2040.TestKit.Boards;
 
-namespace RP2040.NanoFramework.TestKit;
+namespace RP2040Sharp.NanoFramework.TestKit;
 
 /// <summary>
 /// A flashed nanoCLR firmware (nanoBooter + nanoCLR) plus the native-methods checksums it provides,

@@ -1,4 +1,4 @@
-namespace RP2040.NanoFramework.TestKit;
+namespace RP2040Sharp.NanoFramework.TestKit;
 
 /// <summary>
 /// Thrown when a deployed assembly's <c>.pe</c> declares a native-methods checksum that the flashed

@@ -1,7 +1,7 @@
 using System.Text;
 using RP2040.Peripherals;
 
-namespace RP2040.NanoFramework.TestKit;
+namespace RP2040Sharp.NanoFramework.TestKit;
 
 /// <summary>
 /// Reads managed state out of a running nanoCLR by walking its in-RAM data structures with a

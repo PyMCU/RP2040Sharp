@@ -1,7 +1,7 @@
 using RP2040.Core.Cpu;
 using RP2040.TestKit.Boards;
 
-namespace RP2040.NanoFramework.TestKit;
+namespace RP2040Sharp.NanoFramework.TestKit;
 
 /// <summary>
 /// Boots a deployed nanoFramework app on the RP2040Sharp emulator and drives it to points of

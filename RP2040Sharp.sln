@@ -20,9 +20,9 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040Sharp.Runner", "src\R
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040Sharp.Wireless", "src\RP2040Sharp.Wireless\RP2040Sharp.Wireless.csproj", "{62DDE19A-912F-4A89-BC09-747DE5E05345}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040.NanoFramework.TestKit", "src\RP2040.NanoFramework.TestKit\RP2040.NanoFramework.TestKit.csproj", "{F81F075C-6A42-40ED-8061-2272EC8C3B3E}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040Sharp.NanoFramework.TestKit", "src\RP2040Sharp.NanoFramework.TestKit\RP2040Sharp.NanoFramework.TestKit.csproj", "{F81F075C-6A42-40ED-8061-2272EC8C3B3E}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040.NanoFramework.TestKit.SourceGen", "src\RP2040.NanoFramework.TestKit.SourceGen\RP2040.NanoFramework.TestKit.SourceGen.csproj", "{54BD74A3-CFF4-444C-95F6-F7A3DD5D6837}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RP2040Sharp.NanoFramework.TestKit.SourceGen", "src\RP2040Sharp.NanoFramework.TestKit.SourceGen\RP2040Sharp.NanoFramework.TestKit.SourceGen.csproj", "{54BD74A3-CFF4-444C-95F6-F7A3DD5D6837}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

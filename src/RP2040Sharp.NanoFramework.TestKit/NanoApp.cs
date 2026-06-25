@@ -1,6 +1,6 @@
 using System.Buffers.Binary;
 
-namespace RP2040.NanoFramework.TestKit;
+namespace RP2040Sharp.NanoFramework.TestKit;
 
 /// <summary>
 /// A nanoFramework deployment image assembled from build output. The Metadata Processor emits one

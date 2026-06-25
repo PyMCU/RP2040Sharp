@@ -1,4 +1,4 @@
-namespace RP2040.NanoFramework.TestKit;
+namespace RP2040Sharp.NanoFramework.TestKit;
 
 /// <summary>
 /// In-RAM struct offsets of a specific nanoCLR build, used to read managed state (e.g. a static
