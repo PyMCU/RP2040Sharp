@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1-beta.6] - 2026-06-26
+
+### Changed
+
+- **Extracted the chip-agnostic nanoCLR introspection into the shared
+  [NfClr.Core](https://github.com/begeistert/NfClr) package.** `ClrInspector`, `ClrLayout`,
+  the heap walk and `ClrSession` now live once in `NfClr.Core` (`1.0.0-beta.1`);
+  `RP2040Sharp.NanoFramework.TestKit` keeps only the RP2040 `IClrMemory`/`IClrHost` adapter
+  (`Rp2040ClrHost` / `Rp2040ClrMemory`) and depends on `NfClr.Core` via **PackageReference**.
+  `NanoClrHarness` is now a thin facade over `ClrSession`. Firmware symbols, layout and
+  checksums derive from the nanoCLR ELF/DWARF when present.
+- **Publishing migrated to NuGet Trusted Publishing (OIDC)** — no long-lived API key.
+
 ## [1.0.1-beta.5] - 2026-06-25
 
 ### Changed
@@ -153,7 +166,8 @@ First public release candidate. A high-performance RP2040 emulator in modern C#
 - Flash programming uses C# hooks rather than the SSI XIP hardware path.
 - USB host support is CDC-only (sufficient for the MicroPython REPL).
 
-[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.5...HEAD
+[Unreleased]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.6...HEAD
+[1.0.1-beta.6]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.5...v1.0.1-beta.6
 [1.0.1-beta.5]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.4...v1.0.1-beta.5
 [1.0.1-beta.4]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.3...v1.0.1-beta.4
 [1.0.1-beta.3]: https://github.com/PyMCU/RP2040Sharp/compare/v1.0.1-beta.2...v1.0.1-beta.3
