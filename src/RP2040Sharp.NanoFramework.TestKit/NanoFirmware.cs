@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
+using NfClr;
 using RP2040.TestKit.Boards;
 
 namespace RP2040Sharp.NanoFramework.TestKit;
@@ -92,8 +94,42 @@ public sealed class NanoFirmware
 
         byte[] booter = File.ReadAllBytes(FindOne(directory, "nanoBooter"));
         byte[] clr = File.ReadAllBytes(FindOne(directory, "nanoCLR"));
-        var (checksums, symbols) = LoadManifest(Path.Combine(directory, "firmware.manifest.json"));
+
+        // Prefer deriving everything from the nanoCLR ELF; fall back to a manifest when only the .bin ships.
+        string? elf = Directory.GetFiles(directory, "nanoCLR*.elf").FirstOrDefault();
+        var (checksums, symbols) = elf is not null
+            ? FromElf(elf)
+            : LoadManifest(Path.Combine(directory, "firmware.manifest.json"));
+
         return new NanoFirmware(booter, clr, checksums, symbols);
+    }
+
+    private static (IReadOnlyDictionary<string, uint> Checksums, IReadOnlyDictionary<string, uint> Symbols)
+        FromElf(string elfPath)
+    {
+        // Generic nanoCLR symbols come from FirmwareElf.CoreSymbols; the PIO native call is the chip-specific one.
+        FirmwareDescriptor d = FirmwareElf.Read(
+            File.ReadAllBytes(elfPath),
+            ("PioBlock.NativeAddProgram", "PioBlock.NativeAddProgram"));
+
+        var symbols = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in d.Symbols)
+        {
+            symbols[k] = v;
+        }
+
+        foreach (var (k, v) in d.Layout)
+        {
+            symbols[k] = v;
+        }
+
+        var checksums = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in d.NativeChecksums)
+        {
+            checksums[k] = v;
+        }
+
+        return (checksums, symbols);
     }
 
     /// <summary>
@@ -145,6 +181,7 @@ public sealed class NanoFirmware
         using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
         ReadHexMap(doc.RootElement, "nativeChecksums", checksums);
         ReadHexMap(doc.RootElement, "symbols", symbols);
+        ReadHexMap(doc.RootElement, "layout", symbols); // struct field offsets, resolved by name like symbols
         return (checksums, symbols);
     }
 

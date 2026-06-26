@@ -83,6 +83,14 @@ public sealed class NanoApp
         return new NanoApp(ms.ToArray(), assemblyOrder, checksums);
     }
 
+    /// <summary>
+    /// Wraps an already-assembled deployment image (e.g. a prebuilt <c>deployment.bin</c>) as-is. No
+    /// checksum guard is applied unless <paramref name="nativeChecksums"/> is supplied — the caller
+    /// vouches that the deployment matches the firmware.
+    /// </summary>
+    public static NanoApp FromDeployment(byte[] deployment, IReadOnlyDictionary<string, uint>? nativeChecksums = null)
+        => new(deployment, Array.Empty<string>(), nativeChecksums ?? new Dictionary<string, uint>());
+
     // nanoFramework PE header: marker "NFMRK1" at 0, nativeMethodsChecksum (UINT32 LE) at offset 20.
     private const int NativeChecksumOffset = 20;
     private static readonly byte[] Marker = "NFMRK1"u8.ToArray();
