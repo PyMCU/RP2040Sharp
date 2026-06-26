@@ -1,4 +1,4 @@
-using NanoFramework.Clr;
+using NfClr;
 using RP2040.Peripherals;
 
 namespace RP2040Sharp.NanoFramework.TestKit;
@@ -6,7 +6,7 @@ namespace RP2040Sharp.NanoFramework.TestKit;
 /// <summary>
 /// Adapts an RP2040Sharp machine's bus to the chip-agnostic <see cref="IClrMemory"/> so the shared
 /// <see cref="ClrInspector"/> can read this emulator's RAM. This is the one RP2040-specific seam the
-/// CLR walker needs; the rest of the introspection lives in NanoFramework.Clr.Core.
+/// CLR walker needs; the rest of the introspection lives in NfClr.Core.
 /// </summary>
 public sealed class Rp2040ClrMemory : IClrMemory
 {

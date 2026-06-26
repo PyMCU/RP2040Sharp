@@ -1,4 +1,4 @@
-using NanoFramework.Clr;
+using NfClr;
 using RP2040.TestKit.Boards;
 
 namespace RP2040Sharp.NanoFramework.TestKit;
@@ -12,7 +12,7 @@ namespace RP2040Sharp.NanoFramework.TestKit;
 /// <remarks>
 /// This is the RP2040 façade over the chip-agnostic <see cref="ClrSession"/>: it owns the emulator and
 /// the boot, and adapts them through <see cref="Rp2040ClrHost"/>. All the run/snapshot/profile logic
-/// lives in NanoFramework.Clr.Core and is shared with the other chips' kits and the profiler. The run
+/// lives in NfClr.Core and is shared with the other chips' kits and the profiler. The run
 /// methods drive the emulator's hook-aware execution path (the one that services the bootrom/flash
 /// hooks the firmware needs to boot).
 /// </remarks>

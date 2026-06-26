@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
-using NanoFramework.Clr;
+using NfClr;
 using RP2040.TestKit.Boards;
 
 namespace RP2040Sharp.NanoFramework.TestKit;

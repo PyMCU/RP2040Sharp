@@ -1,4 +1,4 @@
-using NanoFramework.Clr;
+using NfClr;
 using RP2040.Core.Cpu;
 using RP2040.TestKit.Boards;
 
@@ -8,7 +8,7 @@ namespace RP2040Sharp.NanoFramework.TestKit;
 /// Adapts an RP2040Sharp <see cref="PicoSimulation"/> (plus its <see cref="NanoFirmware"/> for symbol
 /// resolution) to the chip-agnostic <see cref="IClrHost"/>, so the shared <see cref="ClrSession"/> can
 /// drive and read this emulator. This is the one RP2040-specific seam; the run/snapshot/profile logic
-/// lives in NanoFramework.Clr.Core.
+/// lives in NfClr.Core.
 /// </summary>
 public sealed class Rp2040ClrHost : IClrHost
 {

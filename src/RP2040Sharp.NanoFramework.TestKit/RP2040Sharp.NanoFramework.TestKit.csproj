@@ -28,7 +28,7 @@
     <ProjectReference Include="..\RP2040.TestKit\RP2040.TestKit.csproj" />
     <!-- Chip-agnostic nanoCLR introspection (ClrInspector, ClrLayout, heap walk). This kit supplies
          the RP2040 IClrMemory adapter; the CLR knowledge lives once in the shared core. -->
-    <ProjectReference Include="..\..\..\NanoFramework.Clr\src\NanoFramework.Clr.Core\NanoFramework.Clr.Core.csproj" />
+    <ProjectReference Include="..\..\..\NanoFramework.Clr\src\NfClr.Core\NfClr.Core.csproj" />
     <!-- Build the source generator alongside us; not a compile reference, only packaged as an analyzer. -->
     <ProjectReference Include="..\RP2040Sharp.NanoFramework.TestKit.SourceGen\RP2040Sharp.NanoFramework.TestKit.SourceGen.csproj"
                       ReferenceOutputAssembly="false" PrivateAssets="all" />
