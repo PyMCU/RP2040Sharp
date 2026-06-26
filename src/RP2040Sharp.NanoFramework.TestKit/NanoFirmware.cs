@@ -104,22 +104,13 @@ public sealed class NanoFirmware
         return new NanoFirmware(booter, clr, checksums, symbols);
     }
 
-    // Symbols the test kit resolves by name; layout offsets and native checksums derive automatically.
-    private static readonly (string Name, string Pattern)[] WantedSymbols =
-    {
-        ("g_CLR_RT_TypeSystem", @"\bg_CLR_RT_TypeSystem$"),
-        ("g_CLR_RT_ExecutionEngine", @"\bg_CLR_RT_ExecutionEngine$"),
-        ("g_CLR_RT_GarbageCollector", @"\bg_CLR_RT_GarbageCollector$"),
-        ("Execute_IL", @"CLR_RT_Thread\d+Execute_IL"),
-        ("PioBlock.NativeAddProgram", @"Library_.*PioBlock\d+NativeAddProgram.*STATIC"),
-        ("c_CLR_StringTable_Data", @"c_CLR_StringTable_Data$"),
-        ("c_CLR_StringTable_Lookup", @"c_CLR_StringTable_Lookup$"),
-    };
-
     private static (IReadOnlyDictionary<string, uint> Checksums, IReadOnlyDictionary<string, uint> Symbols)
         FromElf(string elfPath)
     {
-        FirmwareDescriptor d = FirmwareElf.Read(File.ReadAllBytes(elfPath), WantedSymbols);
+        // Generic nanoCLR symbols come from FirmwareElf.CoreSymbols; the PIO native call is the chip-specific one.
+        FirmwareDescriptor d = FirmwareElf.Read(
+            File.ReadAllBytes(elfPath),
+            ("PioBlock.NativeAddProgram", "PioBlock.NativeAddProgram"));
 
         var symbols = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
         foreach (var (k, v) in d.Symbols)
