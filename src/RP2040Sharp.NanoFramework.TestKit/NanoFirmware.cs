@@ -145,6 +145,7 @@ public sealed class NanoFirmware
         using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
         ReadHexMap(doc.RootElement, "nativeChecksums", checksums);
         ReadHexMap(doc.RootElement, "symbols", symbols);
+        ReadHexMap(doc.RootElement, "layout", symbols); // struct field offsets, resolved by name like symbols
         return (checksums, symbols);
     }
 
