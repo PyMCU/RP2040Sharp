@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
+using NanoFramework.Clr;
 using RP2040.TestKit.Boards;
 
 namespace RP2040Sharp.NanoFramework.TestKit;
@@ -92,8 +94,51 @@ public sealed class NanoFirmware
 
         byte[] booter = File.ReadAllBytes(FindOne(directory, "nanoBooter"));
         byte[] clr = File.ReadAllBytes(FindOne(directory, "nanoCLR"));
-        var (checksums, symbols) = LoadManifest(Path.Combine(directory, "firmware.manifest.json"));
+
+        // Prefer deriving everything from the nanoCLR ELF; fall back to a manifest when only the .bin ships.
+        string? elf = Directory.GetFiles(directory, "nanoCLR*.elf").FirstOrDefault();
+        var (checksums, symbols) = elf is not null
+            ? FromElf(elf)
+            : LoadManifest(Path.Combine(directory, "firmware.manifest.json"));
+
         return new NanoFirmware(booter, clr, checksums, symbols);
+    }
+
+    // Symbols the test kit resolves by name; layout offsets and native checksums derive automatically.
+    private static readonly (string Name, string Pattern)[] WantedSymbols =
+    {
+        ("g_CLR_RT_TypeSystem", @"\bg_CLR_RT_TypeSystem$"),
+        ("g_CLR_RT_ExecutionEngine", @"\bg_CLR_RT_ExecutionEngine$"),
+        ("g_CLR_RT_GarbageCollector", @"\bg_CLR_RT_GarbageCollector$"),
+        ("Execute_IL", @"CLR_RT_Thread\d+Execute_IL"),
+        ("PioBlock.NativeAddProgram", @"Library_.*PioBlock\d+NativeAddProgram.*STATIC"),
+        ("c_CLR_StringTable_Data", @"c_CLR_StringTable_Data$"),
+        ("c_CLR_StringTable_Lookup", @"c_CLR_StringTable_Lookup$"),
+    };
+
+    private static (IReadOnlyDictionary<string, uint> Checksums, IReadOnlyDictionary<string, uint> Symbols)
+        FromElf(string elfPath)
+    {
+        FirmwareDescriptor d = FirmwareElf.Read(File.ReadAllBytes(elfPath), WantedSymbols);
+
+        var symbols = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in d.Symbols)
+        {
+            symbols[k] = v;
+        }
+
+        foreach (var (k, v) in d.Layout)
+        {
+            symbols[k] = v;
+        }
+
+        var checksums = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in d.NativeChecksums)
+        {
+            checksums[k] = v;
+        }
+
+        return (checksums, symbols);
     }
 
     /// <summary>
