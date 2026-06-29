@@ -301,7 +301,10 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     {
         var sm = _sm[smIndex];
         if (sm.RxFifo.Count < sm.RxDepth)
+        {
             sm.RxFifo.Enqueue(value);
+            OnRxPush?.Invoke(smIndex, value);
+        }
     }
 
     // ── Private: stall wake-up ───────────────────────────────────────
