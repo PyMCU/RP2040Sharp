@@ -267,5 +267,58 @@ public abstract class DmaTests
             f.Bus.ReadWord(0x20015000u).Should().Be(0x12345678u);
         }
     }
+
+    /// <summary>
+    /// Regression for the PIO RX DREQ → DMA pacing fix: injecting a word into a state machine's RX FIFO
+    /// must fire <c>OnRxPush</c> — the only trigger for <c>Dma.ResumeDreq</c> (wired in RP2040Machine).
+    /// Before the fix InjectRxData enqueued silently, so a DREQ-paced DMA channel never woke and stalled
+    /// BUSY forever. (Full end-to-end FIFO→DMA drain is exercised by the nanoFramework harness, which
+    /// runs a real PIO program that configures the SM — a bare machine leaves the RX FIFO unconfigured.)
+    /// </summary>
+    public class PioRxDreqPacing
+    {
+        [Fact]
+        public void InjectRxData_fires_OnRxPush_to_wake_a_paced_dma()
+        {
+            using var m = new RP2040Machine();
+            var pushes = new System.Collections.Generic.List<(int sm, uint val)>();
+            m.Pio0.OnRxPush += (sm, v) => pushes.Add((sm, v));
+
+            m.Pio0.InjectRxData(0, 0xCAFEBABEu);
+
+            pushes.Should().ContainSingle();
+            pushes[0].sm.Should().Be(0);
+            pushes[0].val.Should().Be(0xCAFEBABEu);
+        }
+
+        [Fact]
+        public void Injected_rx_words_drive_a_dreq_paced_channel_to_completion()
+        {
+            using var m = new RP2040Machine();
+            m.Pio0.InReset = false;   // firmware releases the PIO via RESETS; do the same so RXF reads work
+            const int sm = 0;
+            const uint pio0Rxf0 = 0x50200020u;   // PIO0 RXF0 — a read dequeues that SM's RX FIFO
+            const uint dst = 0x20001000u;
+            uint[] src = { 0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u, 0x55555555u };
+
+            // ch0: read PIO0 RXF0 (fixed), write dst (incrementing), paced by PIO0 RX SM0 DREQ (index 4).
+            m.Dma.WriteWord(READ_ADDR(0),   pio0Rxf0);
+            m.Dma.WriteWord(WRITE_ADDR(0),  dst);
+            m.Dma.WriteWord(TRANS_COUNT(0), (uint)src.Length);
+            m.Dma.WriteWord(CTRL_TRIG(0),
+                CTRL_EN | CTRL_DATA_SIZE_WORD | CTRL_INCR_WRITE | (4u << 15));   // TREQ_SEL = 4
+
+            // Each inject fires OnRxPush → ResumeDreq → one synchronous DMA beat reads the word out.
+            foreach (var w in src)
+            {
+                m.Pio0.InjectRxData(sm, w);
+            }
+
+            for (uint i = 0; i < src.Length; i++)
+            {
+                m.Bus.ReadWord(dst + i * 4).Should().Be(src[i]);
+            }
+        }
+    }
 }
 
