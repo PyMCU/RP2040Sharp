@@ -12,8 +12,8 @@ public class RtcTests
     private const uint RTC_CTRL    = 0x0C;
     private const uint IRQ_SETUP_0 = 0x10;
     private const uint IRQ_SETUP_1 = 0x14;
-    private const uint RTC_RTC1    = 0x18;
-    private const uint RTC_RTC0    = 0x1C;
+    private const uint RTC_RTC1    = 0x18;   // RTC_1 read reg = YEAR/MONTH/DAY  (datasheet swaps read-reg layout vs SETUP)
+    private const uint RTC_RTC0    = 0x1C;   // RTC_0 read reg = DOTW/HOUR/MIN/SEC
 
     private const uint CTRL_ENABLE = 1u;
     private const uint CTRL_ACTIVE = 1u << 1;
@@ -42,13 +42,13 @@ public class RtcTests
     {
         var rtc = new RtcPeripheral();
         // RTC0: YEAR[27:16]=2024, MONTH[11:8]=1, DAY[4:0]=1
-        var rtc0 = rtc.ReadWord(RTC_RTC0);
+        var rtc0 = rtc.ReadWord(RTC_RTC1);
         ((rtc0 >> 16) & 0xFFF).Should().Be(2024);
         ((rtc0 >> 8)  & 0xF)  .Should().Be(1);
         (rtc0 & 0x1F)          .Should().Be(1);
 
         // RTC1: DOTW[26:24]=1 (Monday)
-        var rtc1 = rtc.ReadWord(RTC_RTC1);
+        var rtc1 = rtc.ReadWord(RTC_RTC0);
         ((rtc1 >> 24) & 0x7).Should().Be(1);
         ((rtc1 >> 16) & 0x1F).Should().Be(0); // hour
         ((rtc1 >> 8)  & 0x3F).Should().Be(0); // min
@@ -66,8 +66,8 @@ public class RtcTests
 
         rtc.WriteWord(RTC_CTRL, CTRL_LOAD | CTRL_ENABLE);
 
-        var rtc0   = rtc.ReadWord(RTC_RTC0);
-        var rtc1   = rtc.ReadWord(RTC_RTC1);
+        var rtc0   = rtc.ReadWord(RTC_RTC1);
+        var rtc1   = rtc.ReadWord(RTC_RTC0);
 
         ((rtc0 >> 16) & 0xFFF).Should().Be(2025);
         ((rtc0 >> 8)  & 0xF)  .Should().Be(6);
@@ -104,7 +104,7 @@ public class RtcTests
 
         rtc.Tick(125_000_000L);
 
-        var rtc1 = rtc.ReadWord(RTC_RTC1);
+        var rtc1 = rtc.ReadWord(RTC_RTC0);
         (rtc1 & 0x3F).Should().Be(1); // sec = 1
     }
 
@@ -117,7 +117,7 @@ public class RtcTests
 
         rtc.Tick(125_000_000L * 60);
 
-        var rtc1 = rtc.ReadWord(RTC_RTC1);
+        var rtc1 = rtc.ReadWord(RTC_RTC0);
         (rtc1 & 0x3F).Should().Be(0); // still 0
     }
 
@@ -128,7 +128,7 @@ public class RtcTests
 
         rtc.Tick(125_000_000L * 60); // 60 seconds
 
-        var rtc1 = rtc.ReadWord(RTC_RTC1);
+        var rtc1 = rtc.ReadWord(RTC_RTC0);
         (rtc1 & 0x3F)          .Should().Be(0); // sec = 0
         ((rtc1 >> 8)  & 0x3F)  .Should().Be(1); // min = 1
     }
@@ -140,8 +140,8 @@ public class RtcTests
 
         rtc.Tick(125_000_000L * 86400); // 24 hours
 
-        var rtc0 = rtc.ReadWord(RTC_RTC0);
-        var rtc1 = rtc.ReadWord(RTC_RTC1);
+        var rtc0 = rtc.ReadWord(RTC_RTC1);
+        var rtc1 = rtc.ReadWord(RTC_RTC0);
 
         (rtc0 & 0x1F)          .Should().Be(2);  // day = 2
         ((rtc1 >> 24) & 0x7)   .Should().Be(2);  // Tuesday
@@ -155,8 +155,8 @@ public class RtcTests
         var rtc = new RtcPeripheral();
         rtc.SetDateTime(2030, 12, 31, 5, 23, 59, 59); // Fri 23:59:59
 
-        var rtc0 = rtc.ReadWord(RTC_RTC0);
-        var rtc1 = rtc.ReadWord(RTC_RTC1);
+        var rtc0 = rtc.ReadWord(RTC_RTC1);
+        var rtc1 = rtc.ReadWord(RTC_RTC0);
 
         ((rtc0 >> 16) & 0xFFF).Should().Be(2030);
         ((rtc0 >> 8)  & 0xF)  .Should().Be(12);

@@ -15,8 +15,8 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
     private const uint RTC_CTRL     = 0x0C;   // ENABLE[0], ACTIVE[1], LOAD[4]
     private const uint IRQ_SETUP_0  = 0x10;
     private const uint IRQ_SETUP_1  = 0x14;
-    private const uint RTC_RTC1     = 0x18;   // DOTW/HOUR/MIN/SEC (same layout as SETUP1 bits)
-    private const uint RTC_RTC0     = 0x1C;   // YEAR/MONTH/DAY
+    private const uint RTC_RTC1     = 0x18;   // RTC_1 read reg = YEAR/MONTH/DAY  (NB: the read regs SWAP layout vs SETUP)
+    private const uint RTC_RTC0     = 0x1C;   // RTC_0 read reg = DOTW/HOUR/MIN/SEC
 
     private const uint CTRL_ENABLE  = 1u;
     private const uint CTRL_ACTIVE  = 1u << 1;
@@ -47,8 +47,8 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
     private uint _irqSetup0;
     private uint _irqSetup1;
     // Running time registers
-    private uint _rtc0;   // YEAR[27:16] MONTH[11:8] DAY[4:0]
-    private uint _rtc1;   // DOTW[26:24] HOUR[20:16] MIN[13:8] SEC[5:0]
+    private uint _rtcDate;   // YEAR[27:16] MONTH[11:8] DAY[4:0]
+    private uint _rtcTime;   // DOTW[26:24] HOUR[20:16] MIN[13:8] SEC[5:0]
 
     private long _accumCycles;
 
@@ -58,15 +58,15 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
     {
         _cpu = cpu;
         // Default to 2024-01-01 Monday 00:00:00
-        _rtc0 = (2024u << 16) | (1u << 8) | 1u;
-        _rtc1 = (1u << 24); // Monday
+        _rtcDate = (2024u << 16) | (1u << 8) | 1u;
+        _rtcTime = (1u << 24); // Monday
     }
 
     /// <summary>Inject a specific date/time into the RTC.</summary>
     public void SetDateTime(int year, int month, int day, int dayOfWeek, int hour, int min, int sec)
     {
-        _rtc0 = ((uint)year << 16) | ((uint)month << 8) | (uint)day;
-        _rtc1 = ((uint)dayOfWeek << 24) | ((uint)hour << 16) | ((uint)min << 8) | (uint)sec;
+        _rtcDate = ((uint)year << 16) | ((uint)month << 8) | (uint)day;
+        _rtcTime = ((uint)dayOfWeek << 24) | ((uint)hour << 16) | ((uint)min << 8) | (uint)sec;
     }
 
     // ── ITickable ─────────────────────────────────────────────────────────
@@ -93,8 +93,8 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
         RTC_CTRL    => (_ctrl & CTRL_ENABLE) != 0 ? (_ctrl | CTRL_ACTIVE) : _ctrl,
         IRQ_SETUP_0 => _irqSetup0,
         IRQ_SETUP_1 => _irqSetup1,
-        RTC_RTC1    => _rtc1,
-        RTC_RTC0    => _rtc0,
+        RTC_RTC1    => _rtcDate,   // RTC_1 (0x18) = YEAR/MONTH/DAY
+        RTC_RTC0    => _rtcTime,   // RTC_0 (0x1C) = DOTW/HOUR/MIN/SEC
         _           => 0,
     };
 
@@ -117,8 +117,8 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
             case RTC_CTRL:
                 if ((value & CTRL_LOAD) != 0)
                 {
-                    _rtc0 = _setup0;
-                    _rtc1 = _setup1;
+                    _rtcDate = _setup0;
+                    _rtcTime = _setup1;
                     _accumCycles = 0;
                 }
                 _ctrl = value & CTRL_ENABLE; // LOAD is strobe, ACTIVE is read-only
@@ -150,13 +150,13 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
 
     private void AdvanceSecond()
     {
-        var sec   = (int)(_rtc1 & 0x3F);
-        var min   = (int)((_rtc1 >> 8) & 0x3F);
-        var hour  = (int)((_rtc1 >> 16) & 0x1F);
-        var dotw  = (int)((_rtc1 >> 24) & 0x7);
-        var day   = (int)(_rtc0 & 0x1F);
-        var month = (int)((_rtc0 >> 8) & 0xF);
-        var year  = (int)((_rtc0 >> 16) & 0xFFF);
+        var sec   = (int)(_rtcTime & 0x3F);
+        var min   = (int)((_rtcTime >> 8) & 0x3F);
+        var hour  = (int)((_rtcTime >> 16) & 0x1F);
+        var dotw  = (int)((_rtcTime >> 24) & 0x7);
+        var day   = (int)(_rtcDate & 0x1F);
+        var month = (int)((_rtcDate >> 8) & 0xF);
+        var year  = (int)((_rtcDate >> 16) & 0xFFF);
 
         sec++;
         if (sec >= 60) { sec = 0; min++; }
@@ -172,21 +172,21 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
             if (month > 12) { month = 1; year++; }
         }
 
-        _rtc0 = ((uint)year << 16) | ((uint)month << 8) | (uint)day;
-        _rtc1 = ((uint)dotw << 24) | ((uint)hour << 16) | ((uint)min << 8) | (uint)sec;
+        _rtcDate = ((uint)year << 16) | ((uint)month << 8) | (uint)day;
+        _rtcTime = ((uint)dotw << 24) | ((uint)hour << 16) | ((uint)min << 8) | (uint)sec;
     }
 
     private void CheckAlarm()
     {
         if ((_irqSetup0 & IRQ0_MATCH_ENA) == 0) return;
 
-        var sec   = _rtc1 & 0x3F;
-        var min   = (_rtc1 >> 8) & 0x3F;
-        var hour  = (_rtc1 >> 16) & 0x1F;
-        var dotw  = (_rtc1 >> 24) & 0x7;
-        var day   = _rtc0 & 0x1F;
-        var month = (_rtc0 >> 8) & 0xF;
-        var year  = (_rtc0 >> 16) & 0xFFF;
+        var sec   = _rtcTime & 0x3F;
+        var min   = (_rtcTime >> 8) & 0x3F;
+        var hour  = (_rtcTime >> 16) & 0x1F;
+        var dotw  = (_rtcTime >> 24) & 0x7;
+        var day   = _rtcDate & 0x1F;
+        var month = (_rtcDate >> 8) & 0xF;
+        var year  = (_rtcDate >> 16) & 0xFFF;
 
         var matched = true;
         if ((_irqSetup0 & IRQ0_YEAR_ENA)  != 0) matched &= ((_irqSetup0 >> 16) & 0xFFF) == year;

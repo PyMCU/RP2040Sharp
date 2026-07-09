@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using RP2040.Core.Memory;
@@ -75,6 +76,7 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     private const byte CMD_READ_DATA     = 0x03;
     private const byte CMD_FAST_READ     = 0x0B;
     private const byte CMD_QUAD_IO_READ  = 0xEB;
+    private const byte CMD_READ_UNIQUE_ID = 0x4B;   // 4 dummy bytes, then 8 id bytes
 
     // ── Registers ─────────────────────────────────────────────────────────────
     private uint _ctrlr0;
@@ -105,6 +107,20 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     private readonly List<byte> _rxFrame = new(260);
     private bool _lastOpWasRead;
 
+    // 64-bit flash unique id served for the 0x4B (Read Unique ID) command — what machine.unique_id() reads.
+    // MUST differ per board instance, else two identical boards share an identity (e.g. the same MQTT
+    // client-id, so a broker drops the first when the second connects). Defaults to a random-looking
+    // value generated per instance (like a real chip's factory-programmed id) so this holds even when
+    // the host never touches it; still overridable for tests that need a reproducible id.
+    public byte[] UniqueId = CreateDefaultUniqueId();
+
+    private static byte[] CreateDefaultUniqueId()
+    {
+        var id = new byte[8];
+        Array.Copy(Guid.NewGuid().ToByteArray(), id, 8);
+        return id;
+    }
+
     public uint Size => 0x1000;
 
     // ── Wiring API ────────────────────────────────────────────────────────────
@@ -128,6 +144,11 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
         if (_csAsserted) return;    // guard against double-assert
         _csAsserted = true;
         _txBuf.Clear();
+        // Each CS assert starts a fresh transaction: reset the RX frame so the command byte lands at index 0
+        // (bytes clocked earlier with CS deasserted, e.g. flash_exit_xip dummies, must not shift the frame).
+        _rxQueue.Clear();
+        _rxFrame.Clear();
+        _lastOpWasRead = false;
     }
 
     /// <summary>
@@ -212,8 +233,11 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
                 // RXFLR-polling loops, instead of spinning forever on a FIFO that never advances.
                 if ((_ssienr & 1) != 0)
                 {
-                    // A write following a read begins a new command/response frame.
-                    if (_lastOpWasRead)
+                    // A write following a read begins a new command/response frame — but ONLY when the CS is
+                    // deasserted. Inside a CS-held transaction, flash_do_cmd interleaves write/read per byte
+                    // (0x4B Read Unique ID: cmd + 4 dummy + 8 data), so clearing the frame on every write-after-
+                    // read would drop the command byte and every multi-byte read (unique id) would return zero.
+                    if (_lastOpWasRead && !_csAsserted)
                     {
                         _rxFrame.Clear();
                         _lastOpWasRead = false;
@@ -278,6 +302,10 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
             case CMD_QUAD_IO_READ when pos >= 6 && _flashPtr != null:
                 // Layout: [0xEB][A2][A1][A0][M][dummy][D0][D1]… (single-lane model of the quad read)
                 return ReadFlashByte(RxAddress24() + (uint)(pos - 6));
+
+            case CMD_READ_UNIQUE_ID when pos >= 5:
+                // Layout: [0x4B][dummy][dummy][dummy][dummy][D0]…[D7] — 64-bit flash unique id.
+                return (pos - 5) < 8 ? UniqueId[pos - 5] : (byte)0x00;
 
             default:
                 return 0x00;
