@@ -7,7 +7,8 @@ namespace RP2040Sharp.IntegrationTests.Tests;
 [Trait("Category","Integration")]
 public class FreeRtosKernelTest {
     private const string Bin="/Users/begeistert/Repos/pymcu-nanort/dist/firmware.bin";
-    [Fact] public void Full_Kernel_AllSubsystems() {
+    [Fact(Skip="Requires a locally-built PyMCU/nanoRT firmware at the hard-coded Bin path; not available in CI. Remove Skip after `pymcu build`.")]
+    public void Full_Kernel_AllSubsystems() {
         using var pico=new PicoSimulation(withUsbCdc:false);
         pico.LoadFlash(File.ReadAllBytes(Bin));
         for(int i=0;i<1000;i++) pico.RunInstructions(5000);

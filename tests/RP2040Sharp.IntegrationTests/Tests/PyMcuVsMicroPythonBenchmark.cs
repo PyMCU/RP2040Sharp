@@ -64,7 +64,7 @@ public class PyMcuVsMicroPythonBenchmark
         return (edges - startEdges, instrs);
     }
 
-    [Fact]
+    [Fact(Skip="Requires a locally-built PyMCU firmware (run `pymcu build` in examples/mp-blink-tight); the hard-coded path is not available in CI. Remove Skip to run locally.")]
     public void Native_PyMcu_vs_Interpreted_MicroPython()
     {
         if (!File.Exists(PyMcuBin))
