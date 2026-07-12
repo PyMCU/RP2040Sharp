@@ -132,6 +132,7 @@ public static class SystemOps
 
                     case 16: // PRIMASK
                         cpu.Registers.PRIMASK = value & 1;
+                        cpu.Registers.InterruptsUpdated = true;
                         break;
 
                     case 20: // CONTROL
