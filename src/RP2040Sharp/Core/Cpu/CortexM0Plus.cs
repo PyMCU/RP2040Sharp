@@ -103,6 +103,15 @@ public sealed unsafe class CortexM0Plus
         Registers.C = false;
         Registers.V = false;
 
+        // All IRQs reset to priority level 0 (each InterruptPrioritiesN is the bitmask of
+        // IRQs currently at that level; NVIC IPR writes move bits between buckets).
+        Registers.InterruptPriorities0 = 0x03FFFFFF;
+        Registers.InterruptPriorities1 = 0;
+        Registers.InterruptPriorities2 = 0;
+        Registers.InterruptPriorities3 = 0;
+        Registers.SHPR2 = 0;
+        Registers.SHPR3 = 0;
+
         Cycles = 0;
     }
 
@@ -479,6 +488,29 @@ public sealed unsafe class CortexM0Plus
     public void TriggerPendSv() { Registers.PendingPendSV = true; Registers.InterruptsUpdated = true; }
     public void TriggerHardFault() => ExceptionEntry(EXC_HARDFAULT);
 
+    private int IrqPriority(int irq)
+    {
+        var bit = 1u << irq;
+        if ((Registers.InterruptPriorities0 & bit) != 0) return 0;
+        if ((Registers.InterruptPriorities1 & bit) != 0) return 1;
+        if ((Registers.InterruptPriorities2 & bit) != 0) return 2;
+        return 3;
+    }
+
+    // ARMv6-M §B1.5.4: group priority of an exception. 256 = Thread mode base level
+    // (lower than any configurable priority), so anything pending can preempt it.
+    private int ExceptionPriority(uint exceptionNumber) => exceptionNumber switch
+    {
+        0 => 256,
+        EXC_NMI => -2,
+        EXC_HARDFAULT => -1,
+        EXC_SVCALL => (int)(Registers.SHPR2 >> 30),
+        EXC_PENDSV => (int)((Registers.SHPR3 >> 22) & 3),
+        EXC_SYSTICK => (int)(Registers.SHPR3 >> 30),
+        >= 16 => IrqPriority((int)exceptionNumber - 16),
+        _ => -3,
+    };
+
     /// <summary>Returns true if an interrupt was taken (PC changed).</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private bool CheckForInterrupts()
@@ -497,57 +529,67 @@ public sealed unsafe class CortexM0Plus
                 Registers.Waiting = false;
         }
 
-        if (Registers.PRIMASK != 0 && !Registers.PendingNMI)
-            return false;
+        // ARMv6-M §B1.5.4: an exception only preempts when its group priority is strictly
+        // higher (numerically lower) than the current execution priority.  Without this
+        // gate a level/held IRQ (e.g. IO_IRQ_BANK0 before the handler acks INTR) preempts
+        // its own handler after every instruction, the stack unwinds into RAM and the core
+        // ends up in a HardFault lockup loop.  PRIMASK boosts execution priority to 0.
+        var execPriority = ExceptionPriority(Registers.IPSR);
+        if (Registers.PRIMASK != 0 && execPriority > 0)
+            execPriority = 0;
 
-        // NMI (priority -2, always takes over everything)
-        if (Registers.PendingNMI)
+        // Pick the highest-priority pending exception; ties resolve to the lowest
+        // exception number (candidates are considered in exception-number order).
+        uint bestExc = 0;
+        var bestPriority = execPriority;
+
+        if (Registers.PendingNMI && -2 < bestPriority)
         {
-            Registers.PendingNMI = false;
-            Registers.Waiting = false;
-            ExceptionEntry(EXC_NMI);
-            return true;
+            bestExc = EXC_NMI;
+            bestPriority = -2;
         }
-
-        // SVCall — only when triggered via SVC instruction
-        if (Registers.PendingSVCall && Registers.PRIMASK == 0)
+        if (Registers.PendingSVCall)
         {
-            Registers.PendingSVCall = false;
-            Registers.Waiting = false;
-            ExceptionEntry(EXC_SVCALL);
-            return true;
+            var p = ExceptionPriority(EXC_SVCALL);
+            if (p < bestPriority) { bestExc = EXC_SVCALL; bestPriority = p; }
         }
-
-        // SysTick
-        if (Registers.PendingSystick && Registers.PRIMASK == 0)
+        if (Registers.PendingPendSV)
         {
-            Registers.PendingSystick = false;
-            Registers.Waiting = false;
-            ExceptionEntry(EXC_SYSTICK);
-            return true;
+            var p = ExceptionPriority(EXC_PENDSV);
+            if (p < bestPriority) { bestExc = EXC_PENDSV; bestPriority = p; }
         }
-
-        // PendSV (lowest priority system exception)
-        if (Registers.PendingPendSV && Registers.PRIMASK == 0)
+        if (Registers.PendingSystick)
         {
-            Registers.PendingPendSV = false;
-            Registers.Waiting = false;
-            ExceptionEntry(EXC_PENDSV);
-            return true;
+            var p = ExceptionPriority(EXC_SYSTICK);
+            if (p < bestPriority) { bestExc = EXC_SYSTICK; bestPriority = p; }
         }
-
-        // Hardware IRQs
         var pending = Registers.PendingInterrupts & Registers.EnabledInterrupts;
-        if (pending != 0 && Registers.PRIMASK == 0)
+        while (pending != 0)
         {
             var irq = System.Numerics.BitOperations.TrailingZeroCount(pending);
-            Registers.PendingInterrupts &= ~(1u << irq);
-            Registers.Waiting = false;
-            ExceptionEntry((uint)(irq + 16)); // IRQ0 = Exception 16
-            return true;
+            pending &= pending - 1;
+            var p = IrqPriority(irq);
+            if (p < bestPriority)
+            {
+                bestExc = (uint)(irq + 16); // IRQ0 = Exception 16
+                bestPriority = p;
+            }
         }
 
-        return false;
+        if (bestExc == 0)
+            return false;
+
+        switch (bestExc)
+        {
+            case EXC_NMI: Registers.PendingNMI = false; break;
+            case EXC_SVCALL: Registers.PendingSVCall = false; break;
+            case EXC_PENDSV: Registers.PendingPendSV = false; break;
+            case EXC_SYSTICK: Registers.PendingSystick = false; break;
+            default: Registers.PendingInterrupts &= ~(1u << ((int)bestExc - 16)); break;
+        }
+        Registers.Waiting = false;
+        ExceptionEntry(bestExc);
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
