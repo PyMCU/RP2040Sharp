@@ -14,6 +14,10 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
 {
     private const int GPIO_COUNT = 30;
 
+    /// <summary>Raised on each pad input transition (pin, new level), after the edge is latched.
+    /// The machine routes these to peripherals that consume pin inputs (e.g. the PWM B pins).</summary>
+    public Action<int, bool>? OnInputChanged;
+
     // Register layout offsets
     private const uint GPIO_CTRL_LAST  = 0x0EC;  // last byte of GPIO pair area
     private const uint INTR_BASE       = 0x0F0;  // INTR0-3 raw interrupt (write 1 to clear edge)
@@ -194,6 +198,9 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         if (old == value) return;  // no edge → no IRQ to (re-)evaluate
         if (value) _intrEdge[pin] |= IRQ_EDGE_HIGH;
         else       _intrEdge[pin] |= IRQ_EDGE_LOW;
+
+        // Fan out the edge to peripherals with pin inputs (PWM B-pin gating/edge-count DIVMODEs).
+        OnInputChanged?.Invoke(pin, value);
 
         // Only run the (whole-bank) interrupt scan when this pin actually has an interrupt enabled or
         // forced. A bit-banged input with no GPIO IRQ — e.g. the CYW43 gSPI DATA line toggling per bit —
