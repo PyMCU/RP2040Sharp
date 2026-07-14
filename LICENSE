@@ -1,4 +1,18 @@
-MIT License
+RP2040Sharp is licensed under the Business Source License 1.1 (BUSL-1.1).
+
+The full license text and parameters are in LICENSE-BUSL.txt. In summary: the
+entire project is initially BUSL-1.1 and automatically converts to the MIT
+License (the Change License) on the Change Date. Non-commercial, personal,
+hobby, educational, academic, evaluation and open-source use is free of charge;
+Commercial Use requires a separate commercial license (see LICENSE-BUSL.txt).
+
+Portions of the emulator core are derived from rp2040js
+(https://github.com/wokwi/rp2040js) by Uri Shaked, originally distributed under
+the MIT License. That original MIT copyright and permission notice is retained
+below and continues to apply to those portions.
+
+===============================================================================
+MIT License (applies to the rp2040js-derived portions of the emulator core)
 
 Copyright (c) 2026 Iván Montiel Cardona
 Copyright (c) 2026 Sergio Domínguez Rojas

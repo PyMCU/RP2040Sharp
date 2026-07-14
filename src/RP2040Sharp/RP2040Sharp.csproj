@@ -12,6 +12,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="..\..\LICENSE-BUSL.txt" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="bootrom_b1.bin" />
     <EmbeddedResource Include="bootrom_b2.bin" />
   </ItemGroup>
