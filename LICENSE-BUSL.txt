@@ -3,10 +3,15 @@ Business Source License 1.1
 Parameters
 
 Licensor:             Iván Montiel Cardona
-Licensed Work:        RP2040Sharp BUSL-1.1 components — RP2040Sharp.TestKit,
-                      RP2040Sharp.Wireless, and RP2040Sharp.TestKit.NanoFramework.
-                      (The RP2040Sharp emulator core is licensed separately under MIT.)
+Licensed Work:        RP2040Sharp — the complete RP2040 emulator: the emulator core
+                      (RP2040Sharp) and every package (RP2040Sharp.TestKit,
+                      RP2040Sharp.Wireless, RP2040Sharp.NanoFramework.TestKit).
                       The Licensed Work is © 2024-2026 Iván Montiel Cardona.
+
+                      Portions of the emulator core are derived from rp2040js
+                      (© Uri Shaked), originally under the MIT License; that MIT
+                      copyright and permission notice is retained in the LICENSE file
+                      and continues to apply to those portions.
 Additional Use Grant: You may copy, modify, create derivative works of, redistribute,
                       and make production use of the Licensed Work free of charge for
                       any use that is not a Commercial Use, as defined below.
