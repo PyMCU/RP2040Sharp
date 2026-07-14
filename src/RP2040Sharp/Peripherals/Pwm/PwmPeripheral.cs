@@ -5,9 +5,10 @@ namespace RP2040.Peripherals.Pwm;
 
 /// <summary>
 /// RP2040 PWM peripheral (base 0x40050000).
-/// 8 slices (A/B channels each). Supports:
-/// - Free-running mode (default): counter wraps at TOP
-/// - Level-sensitive: counter resets when input goes low
+/// 8 slices (A/B channels each). Supports the four CSR.DIVMODE clocking modes:
+/// free-running (clk_sys/div), gated on the B-pin level, and rising/falling B-pin
+/// edge counting (what CircuitPython's countio uses). The B-pin input arrives via
+/// <see cref="SetBInput"/> from the GPIO input path when the pin is muxed to PWM.
 /// Provides ITickable to advance the counter.
 /// </summary>
 public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
@@ -40,6 +41,7 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
 
     private long[] _fracAccum = new long[SLICE_COUNT];
     private bool[] _phaseDir  = new bool[SLICE_COUNT];  // true=counting up (phase-correct)
+    private readonly bool[] _bInput = new bool[SLICE_COUNT];  // B-pin level (gated / edge DIVMODEs)
 
     private uint _enable;   // slice enable bitfield (mirrors CSR.EN per slice)
     private uint _intr;
@@ -76,56 +78,77 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
         {
             if ((_csr[s] & CSR_EN) == 0) continue;  // slice not enabled
 
-            // DIV = integer (bits 11:4) + fraction (bits 3:0) in 8.4 format
-            var divInt  = (int)((_div[s] >> 4) & 0xFF);
-            var divFrac = (int)(_div[s] & 0xF);
-            if (divInt == 0) divInt = 1;
+            var divMode = (_csr[s] & CSR_DIVMODE) >> 4;
+            if (divMode >= 2) continue;                // edge modes: SetBInput advances the slice
+            if (divMode == 1 && !_bInput[s]) continue; // gated: only counts while B is high
 
-            // Fixed-point divisor in 1/16 units
-            var divisor = divInt * 16 + divFrac;
+            Advance(s, deltaCycles * 16);
+        }
+    }
 
-            _fracAccum[s] += deltaCycles * 16;
-            var steps = _fracAccum[s] / divisor;
-            _fracAccum[s] %= divisor;
+    /// <summary>Drive the slice's B-pin input (from the GPIO mux when FUNCSEL=PWM). In the
+    /// edge-count DIVMODEs each matching transition advances the counter by one divider event.</summary>
+    public void SetBInput(int slice, bool level)
+    {
+        if (_bInput[slice] == level) return;
+        _bInput[slice] = level;
+        if ((_csr[slice] & CSR_EN) == 0) return;
+        var divMode = (_csr[slice] & CSR_DIVMODE) >> 4;
+        if ((divMode == 2 && level) || (divMode == 3 && !level))
+            Advance(slice, 16);
+    }
 
-            var phCorrect = (_csr[s] & CSR_PH_CORRECT) != 0;
+    private void Advance(int s, long events16)
+    {
+        // DIV = integer (bits 11:4) + fraction (bits 3:0) in 8.4 format
+        var divInt  = (int)((_div[s] >> 4) & 0xFF);
+        var divFrac = (int)(_div[s] & 0xF);
+        if (divInt == 0) divInt = 1;
 
-            for (var i = 0L; i < steps; i++)
+        // Fixed-point divisor in 1/16 units
+        var divisor = divInt * 16 + divFrac;
+
+        _fracAccum[s] += events16;
+        var steps = _fracAccum[s] / divisor;
+        _fracAccum[s] %= divisor;
+
+        var phCorrect = (_csr[s] & CSR_PH_CORRECT) != 0;
+
+        for (var i = 0L; i < steps; i++)
+        {
+            if (phCorrect)
             {
-                if (phCorrect)
+                // Phase-correct: count up to TOP then back down to 0
+                if (_phaseDir[s])
                 {
-                    // Phase-correct: count up to TOP then back down to 0
-                    if (_phaseDir[s])
+                    _ctr[s]++;
+                    if (_ctr[s] >= _top[s])
                     {
-                        _ctr[s]++;
-                        if (_ctr[s] >= _top[s])
-                        {
-                            _ctr[s] = _top[s];
-                            _phaseDir[s] = false;
-                        }
-                    }
-                    else
-                    {
-                        if (_ctr[s] == 0)
-                        {
-                            _phaseDir[s] = true;
-                            _intr |= 1u << s;
-                            if ((_inte & (1u << s)) != 0)
-                                _cpu.SetInterrupt(4, true); // PWM_IRQ_WRAP is single shared IRQ
-                        }
-                        else _ctr[s]--;
+                        _ctr[s] = _top[s];
+                        _phaseDir[s] = false;
                     }
                 }
                 else
                 {
-                    _ctr[s]++;
-                    if (_ctr[s] > _top[s])
+                    if (_ctr[s] == 0)
                     {
-                        _ctr[s] = 0;
+                        _phaseDir[s] = true;
                         _intr |= 1u << s;
                         if ((_inte & (1u << s)) != 0)
                             _cpu.SetInterrupt(4, true); // PWM_IRQ_WRAP is single shared IRQ
                     }
+                    else _ctr[s]--;
+                }
+            }
+            else
+            {
+                _ctr[s]++;
+                if (_ctr[s] > _top[s])
+                {
+                    _ctr[s] = 0;
+                    _intr |= 1u << s;
+                    if ((_inte & (1u << s)) != 0)
+                        _cpu.SetInterrupt(4, true); // PWM_IRQ_WRAP is single shared IRQ
                 }
             }
         }

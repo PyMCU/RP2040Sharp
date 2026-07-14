@@ -210,6 +210,14 @@ public sealed class RP2040Machine : IDisposable
         Pwm = new PwmPeripheral(Cpu);
         apb.Register(0x40050000, Pwm);
 
+        // B-pin inputs for the PWM gated/edge-count DIVMODEs: odd GPIOs muxed to PWM (FUNCSEL 4)
+        // feed slice (pin >> 1) & 7 — what CircuitPython's countio counts.
+        IoBank0.OnInputChanged = (pin, level) =>
+        {
+            if ((pin & 1) != 0 && IoBank0.GetFuncSel(pin) == 4)
+                Pwm.SetBInput((pin >> 1) & 7, level);
+        };
+
         // Timer @ 0x40054000 (slot 21)
         Timer = new TimerPeripheral(Cpu, CLK_HZ);
         apb.Register(0x40054000, Timer);

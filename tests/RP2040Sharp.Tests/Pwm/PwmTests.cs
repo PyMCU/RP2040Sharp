@@ -196,4 +196,91 @@ public abstract class PwmTests
             (csr & CSR_PH_ADV).Should().Be(0u, "PH_ADV is a strobe and must not be stored in CSR");
         }
     }
+
+    public class DivMode
+    {
+        private const uint DIVMODE_GATED = 1u << 4;
+        private const uint DIVMODE_RISE  = 2u << 4;
+        private const uint DIVMODE_FALL  = 3u << 4;
+
+        [Fact]
+        public void EdgeRise_counts_rising_B_edges_only()
+        {
+            using var f = new Fixture();
+            f.Pwm.WriteWord(CSR(0), CSR_EN | DIVMODE_RISE);
+
+            for (var i = 0; i < 5; i++)
+            {
+                f.Pwm.SetBInput(0, true);
+                f.Pwm.Tick(10_000);
+                f.Pwm.SetBInput(0, false);
+                f.Pwm.Tick(10_000);
+            }
+
+            f.Pwm.ReadWord(CTR(0)).Should().Be(5u, "each rising edge is one count; clock cycles must not advance the slice");
+        }
+
+        [Fact]
+        public void EdgeFall_counts_falling_B_edges_only()
+        {
+            using var f = new Fixture();
+            f.Pwm.WriteWord(CSR(0), CSR_EN | DIVMODE_FALL);
+
+            for (var i = 0; i < 3; i++)
+            {
+                f.Pwm.SetBInput(0, true);
+                f.Pwm.SetBInput(0, false);
+            }
+            f.Pwm.SetBInput(0, true);
+
+            f.Pwm.ReadWord(CTR(0)).Should().Be(3u);
+        }
+
+        [Fact]
+        public void Gated_counts_cycles_only_while_B_high()
+        {
+            using var f = new Fixture();
+            f.Pwm.WriteWord(CSR(0), CSR_EN | DIVMODE_GATED);
+
+            f.Pwm.Tick(100);
+            f.Pwm.ReadWord(CTR(0)).Should().Be(0u, "B low: the slice clock is gated off");
+
+            f.Pwm.SetBInput(0, true);
+            f.Pwm.Tick(100);
+            f.Pwm.ReadWord(CTR(0)).Should().Be(100u, "B high: counts at clk/div");
+
+            f.Pwm.SetBInput(0, false);
+            f.Pwm.Tick(100);
+            f.Pwm.ReadWord(CTR(0)).Should().Be(100u);
+        }
+
+        [Fact]
+        public void EdgeRise_applies_fractional_divider()
+        {
+            using var f = new Fixture();
+            f.Pwm.WriteWord(DIV(0), 4u << 4);
+            f.Pwm.WriteWord(CSR(0), CSR_EN | DIVMODE_RISE);
+
+            for (var i = 0; i < 8; i++)
+            {
+                f.Pwm.SetBInput(0, true);
+                f.Pwm.SetBInput(0, false);
+            }
+
+            f.Pwm.ReadWord(CTR(0)).Should().Be(2u, "8 edges / div 4 = 2 counts");
+        }
+
+        [Fact]
+        public void FreeRun_ignores_B_pin()
+        {
+            using var f = new Fixture();
+            f.Pwm.WriteWord(CSR(0), CSR_EN);
+
+            f.Pwm.SetBInput(0, true);
+            f.Pwm.SetBInput(0, false);
+            f.Pwm.Tick(50);
+
+            f.Pwm.ReadWord(CTR(0)).Should().Be(50u, "edges must not add counts in free-running mode");
+        }
+    }
 }
