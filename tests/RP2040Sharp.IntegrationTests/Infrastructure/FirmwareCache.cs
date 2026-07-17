@@ -1,8 +1,14 @@
+using System.Security.Cryptography;
+
 namespace RP2040Sharp.IntegrationTests.Infrastructure;
 
 /// <summary>
 /// Downloads and caches MicroPython and CircuitPython UF2 firmware images.
 /// Firmware is stored in a local cache directory so subsequent test runs are offline-capable.
+///
+/// Images listed in <see cref="FirmwareManifest"/> are verified by SHA-256 on every use: a cached or
+/// freshly-downloaded file whose hash does not match is deleted and a hard error is raised (upstream
+/// reissued the build, or the cache is corrupt) — never a silent skip that would boot the wrong bytes.
 /// </summary>
 public static class FirmwareCache
 {
@@ -18,15 +24,16 @@ public static class FirmwareCache
     {
         Directory.CreateDirectory(CacheDir);
 
-        var path = Path.Combine(CacheDir, $"micropython-{version}.uf2");
+        var key = $"micropython-{version}";
+        var path = Path.Combine(CacheDir, $"{key}.uf2");
         if (File.Exists(path) && new FileInfo(path).Length > 0)
-            return path;
+            return VerifyOrThrow(path, key);
 
         // Prefer firmware embedded in the test assembly — offline and free of network flakiness.
-        if (TryLoadEmbedded($"micropython-{version}") is { } embedded)
+        if (TryLoadEmbedded(key) is { } embedded)
         {
             await File.WriteAllBytesAsync(path, embedded);
-            return path;
+            return VerifyOrThrow(path, key);
         }
 
         try
@@ -40,7 +47,7 @@ public static class FirmwareCache
 
             var bytes = await http.GetByteArrayAsync(url);
             await File.WriteAllBytesAsync(path, bytes);
-            return path;
+            return VerifyOrThrow(path, key);
         }
         catch
         {
@@ -106,16 +113,17 @@ public static class FirmwareCache
     {
         Directory.CreateDirectory(CacheDir);
 
-        var path = Path.Combine(CacheDir, $"circuitpython-{version}.uf2");
+        var key = $"circuitpython-{version}";
+        var path = Path.Combine(CacheDir, $"{key}.uf2");
         if (File.Exists(path) && new FileInfo(path).Length > 0)
-            return path;
+            return VerifyOrThrow(path, key);
 
         // Prefer firmware embedded in the test assembly — offline and free of network flakiness.
         var embeddedTag = version.StartsWith('v') ? version[1..] : version;
         if (TryLoadEmbedded($"circuitpython-{embeddedTag}") is { } embedded)
         {
             await File.WriteAllBytesAsync(path, embedded);
-            return path;
+            return VerifyOrThrow(path, key);
         }
 
         try
@@ -130,7 +138,7 @@ public static class FirmwareCache
 
             var bytes = await http.GetByteArrayAsync(url);
             await File.WriteAllBytesAsync(path, bytes);
-            return path;
+            return VerifyOrThrow(path, key);
         }
         catch
         {
@@ -160,5 +168,66 @@ public static class FirmwareCache
         var tag = version.StartsWith('v') ? version[1..] : version;
         var path = Path.Combine(CacheDir, $"circuitpython-{tag}.uf2");
         return File.Exists(path) && new FileInfo(path).Length > 0 ? path : null;
+    }
+
+    /// <summary>
+    /// Returns the local path to the wireless RPI_PICO_W MicroPython UF2 for <paramref name="version"/>
+    /// (bundles the CYW43 WLAN/BT firmware the Pico-W tests need), downloading it from the pinned
+    /// <see cref="FirmwareManifest.PicoWUrl"/> if not cached. Returns <c>null</c> when the version has no
+    /// known URL or the download fails (offline). Throws on a SHA-256 mismatch.
+    /// </summary>
+    public static async Task<string?> GetMicroPythonPicoWAsync(string version)
+    {
+        Directory.CreateDirectory(CacheDir);
+
+        var key = $"micropython-picow-{version}";
+        var path = Path.Combine(CacheDir, $"{key}.uf2");
+        if (File.Exists(path) && new FileInfo(path).Length > 0)
+            return VerifyOrThrow(path, key);
+
+        var url = FirmwareManifest.PicoWUrl(version);
+        if (url is null) return null;
+
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("RP2040Sharp-IntegrationTests/1.0");
+            var bytes = await http.GetByteArrayAsync(url);
+            await File.WriteAllBytesAsync(path, bytes);
+            return VerifyOrThrow(path, key);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Verifies a cached file against its <see cref="FirmwareManifest"/> pin. Unpinned images pass through
+    /// unchecked (forward-compatibility). A mismatch deletes the bad copy and throws — it must be loud, not
+    /// a silent skip, because the file is not the build the tests were written against.
+    /// </summary>
+    private static string VerifyOrThrow(string path, string cacheKey)
+    {
+        var pin = FirmwareManifest.PinFor(cacheKey);
+        if (pin is null) return path; // not pinned — download unverified
+
+        var actual = Sha256OfFile(path);
+        if (!actual.Equals(pin.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            File.Delete(path);
+            throw new InvalidOperationException(
+                $"Firmware upstream changed for '{cacheKey}': expected SHA-256 {pin.Sha256} but got " +
+                $"{actual}. Re-pin the hash/size in FirmwareManifest after reviewing the new build " +
+                "(deleted the bad cache copy).");
+        }
+        return path;
+    }
+
+    private static string Sha256OfFile(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexStringLower(SHA256.HashData(stream));
     }
 }
