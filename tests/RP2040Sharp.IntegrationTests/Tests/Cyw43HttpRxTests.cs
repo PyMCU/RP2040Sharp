@@ -18,13 +18,13 @@ namespace RP2040Sharp.IntegrationTests.Tests;
 /// </summary>
 public class Cyw43HttpRxTests(ITestOutputHelper output)
 {
-    private const string PicoW = "/Users/begeistert/Repos/micropython/ports/rp2/build-RPI_PICO_W/firmware.uf2";
+    private static readonly string? PicoW = FirmwareCache.GetMicroPythonPicoWAsync("v1.21.0").GetAwaiter().GetResult();
 
     [Fact]
     public void Guest_http_server_is_reachable_over_the_virtual_network()
     {
         if (!File.Exists(PicoW)) { output.WriteLine("skip"); return; }
-        using var sim = RP2040TestSimulation.Create().WithBinary(Uf2Reader.ToFlashImage(File.ReadAllBytes(PicoW)));
+        using var sim = RP2040TestSimulation.Create().WithBinary(Uf2Reader.ToFlashImage(File.ReadAllBytes(PicoW!)));
         sim.Rp2040.Pio0.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
         sim.Rp2040.Pio1.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
         sim.Rp2040.Sio.OnGpioChanged += () => sim.Rp2040.IoBank0.NotifyPads(0xFFFFFFFFu);

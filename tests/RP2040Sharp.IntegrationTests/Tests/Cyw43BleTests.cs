@@ -55,13 +55,13 @@ file sealed class PanicObserver(RP2040TestSimulation sim, System.Collections.Gen
 /// </summary>
 public class Cyw43BleTests(ITestOutputHelper output)
 {
-    private const string PicoW = "/Users/begeistert/Repos/micropython/ports/rp2/build-RPI_PICO_W/firmware.uf2";
+    private static readonly string? PicoW = FirmwareCache.GetMicroPythonPicoWAsync("v1.21.0").GetAwaiter().GetResult();
 
     [Fact(Skip = "Diagnostic-only USB-DCD trace.")]
     public void Diag_usb_timeline()
     {
         if (!File.Exists(PicoW)) { output.WriteLine("skip"); return; }
-        using var sim = RP2040TestSimulation.Create().WithBinary(Uf2Reader.ToFlashImage(File.ReadAllBytes(PicoW)));
+        using var sim = RP2040TestSimulation.Create().WithBinary(Uf2Reader.ToFlashImage(File.ReadAllBytes(PicoW!)));
         sim.Rp2040.Pio0.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
         sim.Rp2040.Pio1.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
         sim.Rp2040.Sio.OnGpioChanged += () => sim.Rp2040.IoBank0.NotifyPads(0xFFFFFFFFu);
@@ -87,7 +87,7 @@ public class Cyw43BleTests(ITestOutputHelper output)
     public void Ble_controller_brings_up()
     {
         if (!File.Exists(PicoW)) { output.WriteLine("skip"); return; }
-        using var sim = RP2040TestSimulation.Create().WithBinary(Uf2Reader.ToFlashImage(File.ReadAllBytes(PicoW)));
+        using var sim = RP2040TestSimulation.Create().WithBinary(Uf2Reader.ToFlashImage(File.ReadAllBytes(PicoW!)));
         sim.Rp2040.Pio0.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
         sim.Rp2040.Pio1.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
         sim.Rp2040.Sio.OnGpioChanged += () => sim.Rp2040.IoBank0.NotifyPads(0xFFFFFFFFu);
