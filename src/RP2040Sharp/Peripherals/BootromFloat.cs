@@ -17,6 +17,13 @@
 // rounding behaviour — are the RP2040 datasheet §2.8.3.2 and pico-sdk's
 // BSD-3-Clause headers (pico/bootrom/sf_table.h, pico/float.h). mufplib itself
 // was never consulted.
+//
+// Known deviations from silicon:
+//   * Timing. A hook costs a single cycle, whereas the real routines take tens to
+//     hundreds. Firmware that measures how long ROM float calls take will read low.
+//   * Last-bit accuracy. The results come from the .NET math library rather than
+//     mufplib's approximations, so the transcendentals can differ in the final ulp
+//     (ours are the more accurate ones). Only matters to code comparing exact bits.
 
 using RP2040.Core.Cpu;
 
