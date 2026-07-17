@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <PackageId>RP2040Sharp.Wireless</PackageId>
+    <Product>RP2040Sharp.Wireless</Product>
+    <Title>RP2040Sharp.Wireless — CYW43439 Wi-Fi + BLE emulation for the Raspberry Pi Pico W</Title>
+    <Description>
+      A firmware-agnostic emulation of the Infineon CYW43439 Wi-Fi + Bluetooth LE combo chip as wired on
+      the Raspberry Pi Pico W: the gSPI bus (bit-banged through PIO), the SDIO backplane and firmware
+      download, the WHD/SDPCM control + Ethernet data plane, and the BT HCI shared-bus transport. The
+      radio link is virtualized behind the chip's register/protocol boundary, so unmodified firmware
+      (pico-sdk, MicroPython, CircuitPython) runs in STA and SoftAP modes against a virtual access point,
+      and BLE advertises/scans/connects and relays GATT between virtual devices.
+    </Description>
+    <PackageTags>rp2040;picow;cyw43439;wifi;ble;bluetooth;emulator;sdpcm;whd;hci;virtualization</PackageTags>
+
+    <!-- Specialized work: Business Source License 1.1 (converts to MIT on the Change Date).
+         nuget.org rejects BUSL-1.1 as a license *expression* (it only accepts OSI/FSF-approved
+         SPDX ids), so we ship the license as a *file* and clear the MIT expression inherited
+         from Directory.Build.props. -->
+    <PackageLicenseExpression></PackageLicenseExpression>
+    <PackageLicenseFile>LICENSE-BUSL.txt</PackageLicenseFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- BUSL extension depends only on the MIT core; the core never depends back. -->
+    <ProjectReference Include="..\RP2040Sharp\RP2040Sharp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSE-BUSL.txt" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+</Project>

@@ -121,15 +121,18 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private byte ReadByteDispatch(uint address) =>
-        _memoryMap[address >> 28]?.ReadByte(address & 0x0FFFFFFF) ?? 0;
+        _memoryMap[address >> 28] is { } d ? d.ReadByte(address & 0x0FFFFFFF)
+            : EmuStrict.NoteRet("mmio.read.unmapped-region", $"0x{address:X8}", (byte)0);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private ushort ReadHalfWordDispatch(uint address) =>
-        _memoryMap[address >> 28]?.ReadHalfWord(address & 0x0FFFFFFF) ?? 0;
+        _memoryMap[address >> 28] is { } d ? d.ReadHalfWord(address & 0x0FFFFFFF)
+            : EmuStrict.NoteRet("mmio.read.unmapped-region", $"0x{address:X8}", (ushort)0);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private uint ReadWordDispatch(uint address) =>
-        _memoryMap[address >> 28]?.ReadWord(address & 0x0FFFFFFF) ?? 0;
+        _memoryMap[address >> 28] is { } d ? d.ReadWord(address & 0x0FFFFFFF)
+            : EmuStrict.NoteRet("mmio.read.unmapped-region", $"0x{address:X8}", 0u);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteWord(uint address, uint value)
@@ -190,8 +193,11 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void WriteWordDispatch(uint region, uint address, uint value) =>
-        _memoryMap[region]?.WriteWord(address & 0x0FFFFFFF, value);
+    private void WriteWordDispatch(uint region, uint address, uint value)
+    {
+        if (_memoryMap[region] is { } d) d.WriteWord(address & 0x0FFFFFFF, value);
+        else EmuStrict.Note("mmio.write.unmapped-region", $"0x{address:X8}");
+    }
 
     public void Dispose()
     {

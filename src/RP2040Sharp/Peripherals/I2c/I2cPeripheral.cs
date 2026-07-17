@@ -61,6 +61,12 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
     private const uint ST_RFF       = 1u << 4;  // RX FIFO full
     private const uint ST_MST_ACTV  = 1u << 5;  // Master FSM active
 
+    // IC_RAW_INTR_STAT bit for a transfer abort.
+    private const uint INTR_TX_ABRT = 1u << 6;
+
+    // IC_TX_ABRT_SOURCE bits (RP2040 datasheet §4.3.13.10).
+    private const uint ABRT_7B_ADDR_NOACK = 1u << 0;  // master sent 7-bit addr, got no ACK
+
     private const int FIFO_DEPTH = 16;
 
     private readonly CortexM0Plus? _cpu;
@@ -73,6 +79,7 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
     private uint _fsSclHcnt = 0x06, _fsSclLcnt = 0x0D;
     private uint _intrMask = 0x8FF;
     private uint _rawIntr;
+    private uint _txAbrtSource;
     private uint _rxTl;
     private uint _txTl;
     private uint _enable;
@@ -137,7 +144,7 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
             IC_CLR_RX_OVER        => ClearBit(1),
             IC_CLR_TX_OVER        => ClearBit(3),
             IC_CLR_RD_REQ         => ClearBit(5),
-            IC_CLR_TX_ABRT        => ClearBit(6),
+            IC_CLR_TX_ABRT        => ClearTxAbrt(),
             IC_CLR_RX_DONE        => ClearBit(7),
             IC_CLR_ACTIVITY       => ClearBit(8),
             IC_CLR_STOP_DET       => ClearBit(9),
@@ -148,7 +155,7 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
             IC_TXFLR              => 0,   // TX FIFO always drained in simulation
             IC_RXFLR              => (uint)_rxFifo.Count,
             IC_SDA_HOLD           => _sdaHold,
-            IC_TX_ABRT_SOURCE     => 0,
+            IC_TX_ABRT_SOURCE     => _txAbrtSource,
             IC_SLV_DATA_NACK_ONLY => _slvDataNackOnly,
             IC_DMA_CR             => _dmaCr,
             IC_DMA_TDLR           => _dmaTdlr,
@@ -305,6 +312,30 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
         _rawIntr &= ~(1u << bit);
         CheckInterrupts();
         return 0;
+    }
+
+    /// <summary>Reading IC_CLR_TX_ABRT clears the TX_ABRT interrupt AND the abort source register.</summary>
+    private uint ClearTxAbrt()
+    {
+        _rawIntr      &= ~INTR_TX_ABRT;
+        _txAbrtSource  = 0;
+        CheckInterrupts();
+        return 0;
+    }
+
+    /// <summary>
+    /// Signal that the address phase of a master transfer was not acknowledged
+    /// (no device at the target address). Raises TX_ABRT (IC_RAW_INTR_STAT bit 6)
+    /// and sets ABRT_7B_ADDR_NOACK in IC_TX_ABRT_SOURCE, so firmware doing an I2C
+    /// bus scan or checking <c>Wire.endTransmission()</c> correctly sees the device
+    /// as absent. Mirrors the DW_apb_i2c behaviour for a 7-bit address NACK.
+    /// </summary>
+    public void SignalAddressNack()
+    {
+        _txAbrtSource |= ABRT_7B_ADDR_NOACK;
+        _rawIntr      |= INTR_TX_ABRT;
+        // The abort flushes the TX FIFO on real hardware; our TX is already drained.
+        CheckInterrupts();
     }
 
     private void CheckInterrupts()

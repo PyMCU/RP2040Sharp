@@ -136,6 +136,10 @@ public sealed class SioPeripheral : IMemoryMappedDevice
     /// </summary>
     public Action<uint, uint, uint>? OnLaunchCore1;
 
+    /// <summary>Raised whenever a SIO GPIO output level or output-enable register changes, so a board can
+    /// forward SIO-driven pad changes to an attached external device (the CYW43439 wires REG_ON/CS to SIO).</summary>
+    public Action? OnGpioChanged { get; set; }
+
     // Interpolators
     private InterpState _interp0;
     private InterpState _interp1;
@@ -245,14 +249,14 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
         switch (address)
         {
-            case GPIO_OUT:         _gpioOut  =  value; break;
-            case GPIO_OUT_SET:     _gpioOut |=  value; break;
-            case GPIO_OUT_CLR:     _gpioOut &= ~value; break;
-            case GPIO_OUT_XOR:     _gpioOut ^=  value; break;
-            case GPIO_OE:          _gpioOe  =  value; break;
-            case GPIO_OE_SET:      _gpioOe |=  value; break;
-            case GPIO_OE_CLR:      _gpioOe &= ~value; break;
-            case GPIO_OE_XOR:      _gpioOe ^=  value; break;
+            case GPIO_OUT:         _gpioOut  =  value; OnGpioChanged?.Invoke(); break;
+            case GPIO_OUT_SET:     _gpioOut |=  value; OnGpioChanged?.Invoke(); break;
+            case GPIO_OUT_CLR:     _gpioOut &= ~value; OnGpioChanged?.Invoke(); break;
+            case GPIO_OUT_XOR:     _gpioOut ^=  value; OnGpioChanged?.Invoke(); break;
+            case GPIO_OE:          _gpioOe  =  value; OnGpioChanged?.Invoke(); break;
+            case GPIO_OE_SET:      _gpioOe |=  value; OnGpioChanged?.Invoke(); break;
+            case GPIO_OE_CLR:      _gpioOe &= ~value; OnGpioChanged?.Invoke(); break;
+            case GPIO_OE_XOR:      _gpioOe ^=  value; OnGpioChanged?.Invoke(); break;
             case GPIO_HI_OUT:      _gpioHiOut  =  value; break;
             case GPIO_HI_OUT_SET:  _gpioHiOut |=  value; break;
             case GPIO_HI_OUT_CLR:  _gpioHiOut &= ~value; break;

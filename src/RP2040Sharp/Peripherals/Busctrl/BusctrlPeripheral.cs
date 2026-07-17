@@ -21,7 +21,10 @@ public sealed class BusctrlPeripheral : IMemoryMappedDevice
     private const uint PERFSEL3         = 0x024;
 
     private uint _priority;
-    private readonly uint[] _perfsel = new uint[4];
+    // PERFSELn reset value is 0x1F (BUSCTRL_PERFSEL0_RESET): the "no event selected / counter free"
+    // sentinel. pico-sdk's pico_rand initialise_rand() scans for a counter still at 0x1F to claim; if
+    // none read 0x1F it hard_assert()s — which panicked the Pico W boot when these defaulted to 0.
+    private readonly uint[] _perfsel = { 0x1F, 0x1F, 0x1F, 0x1F };
 
     public uint Size => 0x1000;
 

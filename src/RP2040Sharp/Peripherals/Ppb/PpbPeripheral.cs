@@ -44,7 +44,8 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
     // SysTick state
     private uint _systCsr;
     private uint _systRvr;
-    private long _systCvr;   // kept as long to handle large delta gracefully
+    private long _systCvr;      // kept as long to handle large delta gracefully
+    private long _systAnchor;   // _cpu.Cycles at which _systCvr was last brought up to date
 
     // NVIC priority registers — 8 × uint → 32 IRQs, 2 priority bits each (bits 7:6)
     private readonly uint[] _nvicIpr = new uint[8];
@@ -58,20 +59,32 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
 
     // ── ITickable ────────────────────────────────────────────────────
 
-    /// <summary>Advance SysTick by <paramref name="deltaCycles"/> cycles.</summary>
-    public void Tick(long deltaCycles)
+    /// <summary>Bring SysTick up to date with the owning core's cycle counter, firing COUNTFLAG and
+    /// the SysTick exception for any reload boundaries crossed since the last sync.
+    /// <para>SysTick counts off the core clock, so it must be sampled against <see cref="CortexM0Plus.Cycles"/>
+    /// and never against the peripheral tick quantum: firmware busy-waits on CVR
+    /// (<c>machine.bitstream</c> times WS2812 bit widths this way), and a CVR that only moves on the
+    /// tick boundary makes every such wait expire at the same instant.</para>
+    /// <paramref name="deltaCycles"/> is ignored — the router ticks both cores' PPBs with a shared
+    /// delta, but each core's SysTick advances with that core's own cycles.</summary>
+    public void Tick(long deltaCycles) => SyncSysTick();
+
+    private long SystReload => _systRvr > 0 ? _systRvr : 0xFFFFFF;
+
+    private void SyncSysTick()
     {
-        if ((_systCsr & 1) == 0) return;   // SysTick not enabled
+        var now = _cpu.Cycles;
+        var delta = now - _systAnchor;
+        _systAnchor = now;
 
-        _systCvr -= deltaCycles;
+        if ((_systCsr & 1) == 0 || delta <= 0) return;   // SysTick not enabled, or nothing elapsed
 
-        // Handle one or more rollovers (usually 0 or 1 per Tick call)
+        _systCvr -= delta;
+
         while (_systCvr <= 0)
         {
             _systCsr |= 1u << 16;   // COUNTFLAG
-
-            long reload = _systRvr > 0 ? (long)_systRvr : 0xFFFFFF;
-            _systCvr += reload;
+            _systCvr += SystReload;
 
             if ((_systCsr & 2) != 0)   // TICKINT
                 _cpu.TriggerSysTick();
@@ -86,6 +99,9 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
 
         if (offset >= NVIC_IPR0 && offset <= NVIC_IPR7)
             return _nvicIpr[(offset - NVIC_IPR0) >> 2];
+
+        if (offset is SYST_CSR or SYST_CVR)
+            SyncSysTick();
 
         return offset switch
         {
@@ -130,15 +146,21 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
         switch (offset)
         {
             case SYST_CSR:
+                SyncSysTick();
                 _systCsr = value & 0x7;   // ENABLE | TICKINT | CLKSOURCE
                 break;
 
             case SYST_RVR:
+                SyncSysTick();
                 _systRvr = value & 0x00FFFFFF;
                 break;
 
             case SYST_CVR:
-                _systCvr = 0;
+                SyncSysTick();
+                // ARMv6-M: a CVR write clears the counter and COUNTFLAG and must not raise a SysTick
+                // exception. Parking at 0 would instead roll over on the very next cycle, so seed the
+                // reload the hardware performs on the following clock.
+                _systCvr = SystReload;
                 _systCsr &= ~(1u << 16);   // clear COUNTFLAG
                 break;
 
@@ -185,11 +207,13 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
                 break;
 
             case SCB_SHPR2:
-                _cpu.Registers.SHPR2 = value;
+                _cpu.Registers.SHPR2 = value & 0xC0000000;
+                _cpu.Registers.InterruptsUpdated = true;
                 break;
 
             case SCB_SHPR3:
-                _cpu.Registers.SHPR3 = value;
+                _cpu.Registers.SHPR3 = value & 0xC0C00000;
+                _cpu.Registers.InterruptsUpdated = true;
                 break;
         }
     }
@@ -234,19 +258,27 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
 
     private void UpdatePriorityBucket(int iprIdx, uint iprValue)
     {
-        // Each InterruptPrioritiesN field holds 8 priority bytes (2 IPR registers).
-        // iprIdx 0-1 → InterruptPriorities0, 2-3 → InterruptPriorities1, etc.
-        var inBucket = (iprIdx & 1) << 4;   // 0 or 16 bit shift within the 32-bit bucket
-        var mask = 0xFFFFu << inBucket;
-        var twoBytes = (iprValue & 0xC0C0u) << inBucket;
+        // Each InterruptPrioritiesN field is the bitmask of IRQs currently at priority
+        // level N; an IPR write moves its 4 IRQs to the level in bits 7:6 of each byte.
+        for (var b = 0; b < 4; b++)
+        {
+            var irq = iprIdx * 4 + b;
+            if (irq > 25) break;
+            var level = (int)((iprValue >> (b * 8 + 6)) & 3);
+            var bit = 1u << irq;
 
-        if (iprIdx < 2)
-            _cpu.Registers.InterruptPriorities0 = (_cpu.Registers.InterruptPriorities0 & ~(uint)mask) | (uint)twoBytes;
-        else if (iprIdx < 4)
-            _cpu.Registers.InterruptPriorities1 = (_cpu.Registers.InterruptPriorities1 & ~(uint)mask) | (uint)twoBytes;
-        else if (iprIdx < 6)
-            _cpu.Registers.InterruptPriorities2 = (_cpu.Registers.InterruptPriorities2 & ~(uint)mask) | (uint)twoBytes;
-        else
-            _cpu.Registers.InterruptPriorities3 = (_cpu.Registers.InterruptPriorities3 & ~(uint)mask) | (uint)twoBytes;
+            _cpu.Registers.InterruptPriorities0 &= ~bit;
+            _cpu.Registers.InterruptPriorities1 &= ~bit;
+            _cpu.Registers.InterruptPriorities2 &= ~bit;
+            _cpu.Registers.InterruptPriorities3 &= ~bit;
+            switch (level)
+            {
+                case 0: _cpu.Registers.InterruptPriorities0 |= bit; break;
+                case 1: _cpu.Registers.InterruptPriorities1 |= bit; break;
+                case 2: _cpu.Registers.InterruptPriorities2 |= bit; break;
+                default: _cpu.Registers.InterruptPriorities3 |= bit; break;
+            }
+        }
+        _cpu.Registers.InterruptsUpdated = true;
     }
 }

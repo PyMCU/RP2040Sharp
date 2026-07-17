@@ -116,6 +116,59 @@ public sealed class MicroPythonPioTests
             "PIO OUT PINS → IN PINS loopback must return the 0xA5 sentinel byte");
     }
 
+    // ── Late producer (autopull stall regression) ────────────────────────────
+
+    /// <summary>
+    /// Functional check (against real MicroPython) of the autopull late-producer path: SM0 runs
+    /// OUT PINS,8 with autopull, stalls on the empty TX FIFO, and must drive the pins with the
+    /// byte once it is produced late via <c>sm.put()</c>. The strict regression that pins down the
+    /// PC-skip bug lives in the unit suite (<c>LateProducerAutopull</c>).
+    /// </summary>
+    [Fact]
+    public async Task MicroPython_Pio_LateProducer_AutopullStall_DrivesPins()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await MicroPythonRunner.CreateAsync(Version);
+        if (runner is null) return;
+
+        runner.WaitForPrompt().Should().BeTrue();
+
+        var script = LoadScript("pio_late_producer");
+        runner.WriteFile("main.py", script).Should().BeTrue();
+
+        runner.SoftReset(timeoutMs: 25_000).Should().BeTrue();
+
+        var text = runner.UsbCdc.IsConnected ? runner.UsbCdc.Text : runner.Uart.Text;
+        text.Should().Contain("late: 0x3c",
+            "an OUT stalled on autopull must drive the pins once the byte is produced late");
+    }
+
+    // ── MOV operators (invert / bit-reverse) ──────────────────────────────────
+
+    /// <summary>
+    /// Verify the PIO MOV invert and bit-reverse operators end-to-end via real MicroPython.
+    /// </summary>
+    [Fact]
+    public async Task MicroPython_Pio_MovOperators_InvertAndReverse()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await MicroPythonRunner.CreateAsync(Version);
+        if (runner is null) return;
+
+        runner.WaitForPrompt().Should().BeTrue();
+
+        var script = LoadScript("pio_mov_ops");
+        runner.WriteFile("main.py", script).Should().BeTrue();
+
+        runner.SoftReset(timeoutMs: 25_000).Should().BeTrue();
+
+        var text = runner.UsbCdc.IsConnected ? runner.UsbCdc.Text : runner.Uart.Text;
+        text.Should().Contain("inv: 0xffff0000", "MOV ISR, ~OSR must bitwise-invert the word");
+        text.Should().Contain("rev: 0x80000000", "MOV ISR, ::OSR must bit-reverse the word");
+    }
+
     // ── REPL-based smoke test ─────────────────────────────────────────────────
 
     /// <summary>

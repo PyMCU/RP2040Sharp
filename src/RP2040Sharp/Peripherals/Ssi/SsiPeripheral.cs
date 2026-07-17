@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using RP2040.Core.Memory;
@@ -74,6 +75,8 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     private const byte CMD_PAGE_PROGRAM  = 0x02;
     private const byte CMD_READ_DATA     = 0x03;
     private const byte CMD_FAST_READ     = 0x0B;
+    private const byte CMD_QUAD_IO_READ  = 0xEB;
+    private const byte CMD_READ_UNIQUE_ID = 0x4B;   // 4 dummy bytes, then 8 id bytes
 
     // ── Registers ─────────────────────────────────────────────────────────────
     private uint _ctrlr0;
@@ -93,8 +96,30 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     // ── Transaction state ─────────────────────────────────────────────────────
     private bool          _csAsserted;
     private bool          _writeEnabled;
-    private readonly List<byte>  _txBuf   = new(260);
+    private readonly List<byte>  _txBuf   = new(260);   // CS-delimited; drives write/erase (ProcessTransaction)
     private readonly Queue<byte> _rxQueue = new(260);
+
+    // RX framing, independent of the CS model: every byte the firmware clocks out while the SSI is
+    // enabled produces an RX byte. A frame (for choosing the RX value) begins after a CS-deassert or
+    // when a write follows a read (the command/response boundary of bootrom-style auto-CS flash access),
+    // so the command byte that selects the RX response is tracked even when it is clocked before the
+    // IO_QSPI/SER chip-select edge that RP2040Sharp observes.
+    private readonly List<byte> _rxFrame = new(260);
+    private bool _lastOpWasRead;
+
+    // 64-bit flash unique id served for the 0x4B (Read Unique ID) command — what machine.unique_id() reads.
+    // MUST differ per board instance, else two identical boards share an identity (e.g. the same MQTT
+    // client-id, so a broker drops the first when the second connects). Defaults to a random-looking
+    // value generated per instance (like a real chip's factory-programmed id) so this holds even when
+    // the host never touches it; still overridable for tests that need a reproducible id.
+    public byte[] UniqueId = CreateDefaultUniqueId();
+
+    private static byte[] CreateDefaultUniqueId()
+    {
+        var id = new byte[8];
+        Array.Copy(Guid.NewGuid().ToByteArray(), id, 8);
+        return id;
+    }
 
     public uint Size => 0x1000;
 
@@ -119,6 +144,11 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
         if (_csAsserted) return;    // guard against double-assert
         _csAsserted = true;
         _txBuf.Clear();
+        // Each CS assert starts a fresh transaction: reset the RX frame so the command byte lands at index 0
+        // (bytes clocked earlier with CS deasserted, e.g. flash_exit_xip dummies, must not shift the frame).
+        _rxQueue.Clear();
+        _rxFrame.Clear();
+        _lastOpWasRead = false;
     }
 
     /// <summary>
@@ -131,27 +161,37 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
         _csAsserted = false;
         ProcessTransaction();
         _txBuf.Clear();
+        // End of transaction: flush the RX FIFO and start a fresh RX frame (the SSI's RX FIFO is
+        // drained/reset at CS deassert; leaving stale bytes desynchronises the next read).
+        _rxQueue.Clear();
+        _rxFrame.Clear();
+        _lastOpWasRead = false;
     }
 
     // ── IMemoryMappedDevice ───────────────────────────────────────────────────
 
-    public uint ReadWord(uint address) => address switch
+    public uint ReadWord(uint address)
     {
-        SSI_CTRLR0         => _ctrlr0,
-        SSI_CTRLR1         => _ctrlr1,
-        SSI_SSIENR         => _ssienr,
-        SSI_SER            => _ser,
-        SSI_BAUDR          => _baudr,
-        SSI_SR             => SR_TFE | SR_RFNE | SR_TFNF,  // always ready
-        SSI_RXFLR          => (uint)_rxQueue.Count,
-        SSI_IDR            => 0x51535049u,    // "QSPI" identifier
-        SSI_VERSION_ID     => 0x3430312Au,
-        SSI_DR0            => _rxQueue.Count > 0 ? _rxQueue.Dequeue() : 0u,
-        SSI_SPI_CTRL_R0    => _spiCtrlr0,
-        SSI_TXD_DRIVE_EDGE => _txDriveEdge,
-        SSI_RX_SAMPLE_DLY  => _rxSampleDly,
-        _                  => 0u,
-    };
+        switch (address)
+        {
+            case SSI_CTRLR0:         return _ctrlr0;
+            case SSI_CTRLR1:         return _ctrlr1;
+            case SSI_SSIENR:         return _ssienr;
+            case SSI_SER:            return _ser;
+            case SSI_BAUDR:          return _baudr;
+            case SSI_SR:             return SR_TFE | SR_RFNE | SR_TFNF;  // always ready
+            case SSI_RXFLR:          return (uint)_rxQueue.Count;
+            case SSI_IDR:            return 0x51535049u;    // "QSPI" identifier
+            case SSI_VERSION_ID:     return 0x3430312Au;
+            case SSI_DR0:
+                _lastOpWasRead = true;
+                return _rxQueue.Count > 0 ? _rxQueue.Dequeue() : 0u;
+            case SSI_SPI_CTRL_R0:    return _spiCtrlr0;
+            case SSI_TXD_DRIVE_EDGE: return _txDriveEdge;
+            case SSI_RX_SAMPLE_DLY:  return _rxSampleDly;
+            default:                 return 0u;
+        }
+    }
 
     public ushort ReadHalfWord(uint address) =>
         (ushort)(ReadWord(address & ~3u) >> (int)((address & 2) << 3));
@@ -187,11 +227,29 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
             }
 
             case SSI_DR0:
-                // Only accumulate bytes when a transaction is active (CS asserted).
-                if (_csAsserted)
+                // The SSI clocks one byte per DR0 write while enabled, so the RX FIFO always fills —
+                // independently of the chip-select model. This lets bootrom flash routines that clock
+                // dummy bytes with the flash deselected (e.g. rp_flash_exit_xip) progress past their
+                // RXFLR-polling loops, instead of spinning forever on a FIFO that never advances.
+                if ((_ssienr & 1) != 0)
                 {
-                    _txBuf.Add((byte)value);
+                    // A write following a read begins a new command/response frame — but ONLY when the CS is
+                    // deasserted. Inside a CS-held transaction, flash_do_cmd interleaves write/read per byte
+                    // (0x4B Read Unique ID: cmd + 4 dummy + 8 data), so clearing the frame on every write-after-
+                    // read would drop the command byte and every multi-byte read (unique id) would return zero.
+                    if (_lastOpWasRead && !_csAsserted)
+                    {
+                        _rxFrame.Clear();
+                        _lastOpWasRead = false;
+                    }
+                    _rxFrame.Add((byte)value);
                     _rxQueue.Enqueue(ComputeRxByte());
+
+                    // Write/erase application still uses the CS-delimited buffer (unchanged path).
+                    if (_csAsserted)
+                    {
+                        _txBuf.Add((byte)value);
+                    }
                 }
                 break;
         }
@@ -221,10 +279,10 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private byte ComputeRxByte()
     {
-        if (_txBuf.Count == 0) return 0;
+        if (_rxFrame.Count == 0) return 0;
 
-        var pos = _txBuf.Count - 1;   // 0-based index of the byte just added
-        var cmd = _txBuf[0];
+        var pos = _rxFrame.Count - 1;   // 0-based index of the byte just clocked
+        var cmd = _rxFrame[0];
 
         switch (cmd)
         {
@@ -234,23 +292,31 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
                 return 0x00;
 
             case CMD_READ_DATA when pos >= 4 && _flashPtr != null:
-            {
                 // Layout: [0x03][A2][A1][A0][D0][D1]…
-                var flashAddr = GetAddress24() + (uint)(pos - 4);
-                return flashAddr < _flashSize ? _flashPtr[flashAddr] : (byte)0xFF;
-            }
+                return ReadFlashByte(RxAddress24() + (uint)(pos - 4));
 
             case CMD_FAST_READ when pos >= 5 && _flashPtr != null:
-            {
                 // Layout: [0x0B][A2][A1][A0][dummy][D0][D1]…
-                var flashAddr = GetAddress24() + (uint)(pos - 5);
-                return flashAddr < _flashSize ? _flashPtr[flashAddr] : (byte)0xFF;
-            }
+                return ReadFlashByte(RxAddress24() + (uint)(pos - 5));
+
+            case CMD_QUAD_IO_READ when pos >= 6 && _flashPtr != null:
+                // Layout: [0xEB][A2][A1][A0][M][dummy][D0][D1]… (single-lane model of the quad read)
+                return ReadFlashByte(RxAddress24() + (uint)(pos - 6));
+
+            case CMD_READ_UNIQUE_ID when pos >= 5:
+                // Layout: [0x4B][dummy][dummy][dummy][dummy][D0]…[D7] — 64-bit flash unique id.
+                return (pos - 5) < 8 ? UniqueId[pos - 5] : (byte)0x00;
 
             default:
                 return 0x00;
         }
     }
+
+    private uint RxAddress24() =>
+        ((uint)_rxFrame[1] << 16) | ((uint)_rxFrame[2] << 8) | _rxFrame[3];
+
+    private byte ReadFlashByte(uint addr) =>
+        addr < _flashSize ? _flashPtr[addr] : (byte)0xFF;
 
     /// <summary>
     /// Apply write/erase operations accumulated in <see cref="_txBuf"/>.

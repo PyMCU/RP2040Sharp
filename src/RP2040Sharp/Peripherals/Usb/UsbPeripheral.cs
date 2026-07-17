@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2024-2026 Iván Montiel Cardona
+// Portions derived from rp2040js — Copyright (c) 2021 Uri Shaked (MIT).
+// See NOTICE.txt.
 using RP2040.Core.Cpu;
 using RP2040.Core.Memory;
 
@@ -166,6 +170,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
         _prevSieConnected = false;
         _pendingWrites.Clear();
         _pendingReads.Clear();
+        _setupPending = false;
     }
 
     // ── IMemoryMappedDevice ───────────────────────────────────────────────
@@ -286,12 +291,26 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
 
             case R_INT_EP_CTRL:    _intEpCtrl = ApplyAtomic(_intEpCtrl, value, atomicType); break;
             // W1C registers — value is always the bitmask of bits to clear.
-            case R_BUFF_STATUS:    _buffStatus &= ~value; BuffStatusUpdated(); break;
+            case R_BUFF_STATUS:    OnUsbEvent?.Invoke($"BS-CLR clr=0x{value:X} bs=0x{_buffStatus:X}->0x{_buffStatus & ~value:X}"); _buffStatus &= ~value; BuffStatusUpdated(); break;
             case R_BUFF_CPU_SHOULD_HANDLE: _buffCpuShouldHandle &= ~value; break;
             case R_EP_ABORT:
                 {
                     var v = ApplyAtomic(_epAbort, value, atomicType);
                     _epAbort = v; _epAbortDone |= v;
+                    OnUsbEvent?.Invoke($"EP_ABORT v=0x{v:X}");
+                    // Aborting an endpoint cancels its in-flight transfer AND any pending buffer-status
+                    // completion (EP_ABORT and BUFF_STATUS share the same per-buffer bit layout). Without
+                    // dropping the BUFF_STATUS bit here, a completion the firmware already aborted (e.g.
+                    // EP0-IN aborted by reset_ep0 when a new SETUP arrives) is still delivered to TinyUSB,
+                    // which then panics "Can't continue xfer on inactive ep" — the Pico W boot blocker.
+                    _buffStatus &= ~v;
+                    // Also drop any deferred completion still queued for the aborted buffer(s), so a
+                    // completion the firmware already cancelled can't fire later and re-raise
+                    // BUFF_STATUS on an inactive endpoint. _pendingReads/_pendingWrites are keyed by the
+                    // same per-buffer bit (OUT = endpoint*2+1, IN = endpoint*2).
+                    for (var b = 0; b < 32; b++)
+                        if ((v & (1u << b)) != 0) { _pendingReads.Remove(b); _pendingWrites.Remove(b); }
+                    BuffStatusUpdated();
                 }
                 break;
             case R_EP_ABORT_DONE:  _epAbortDone &= ~value; break;  // W1C
@@ -413,10 +432,18 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     public void SendSetupPacket(ReadOnlySpan<byte> setup)
     {
         if (setup.Length != 8) throw new ArgumentException("SETUP packet must be 8 bytes", nameof(setup));
+        OnUsbEvent?.Invoke($"SETUP [{Convert.ToHexString(setup)}]");
         setup.CopyTo(_dpram.AsSpan(0, 8));
-        _sieStatus |= SIE_SETUP_REC;
-        SieStatusUpdated();
+        // Raise SETUP_REC on the NEXT Tick, not now. A new SETUP triggers reset_ep0 in the device, which
+        // aborts EP0 transfers (ep->active=0). If it lands while the device is still completing the prior
+        // control transfer's status stage (mid hw_handle_buff_status, between the BUFF_STATUS clear and
+        // hw_endpoint_xfer_continue), the in-flight EP0-IN completion then runs with active=0 and panics
+        // "Can't continue xfer on inactive ep". On real USB the host wouldn't start a new control transfer
+        // until the device ACKs the status; deferring one quantum gives the device that window.
+        _setupPending = true;
     }
+
+    private bool _setupPending;
 
     /// <summary>Provide data for an OUT endpoint that the firmware previously armed.</summary>
     public void EndpointReadDone(int endpoint, ReadOnlySpan<byte> data)
@@ -474,6 +501,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
         var isOut = (offset & 4) != 0;
         var bufLen = (int)(value & USB_BUF_CTRL_LEN_MASK);
         var bufferOffset = GetEndpointBufferOffset(endpoint, isOut);
+        OnUsbEvent?.Invoke($"ARM ep{endpoint}{(isOut ? "O" : "I")} len{bufLen} full{(value & USB_BUF_CTRL_FULL) != 0}");
 
         // Consume AVAILABLE flag
         value &= ~USB_BUF_CTRL_AVAILABLE;
@@ -507,8 +535,15 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
         return ReadDpramWord(ctrlOffset) & 0xFFC0u;
     }
 
+    /// <summary>Diagnostic: a BUFF_STATUS bit was set for (endpoint, isOut).</summary>
+    public Action<int, bool>? OnBuffStatusDiag;
+    /// <summary>Diagnostic: a textual USB event (SETUP/ARM/BS) for boot tracing.</summary>
+    public Action<string>? OnUsbEvent;
+
     private void IndicateBufferReady(int endpoint, bool isOut)
     {
+        OnBuffStatusDiag?.Invoke(endpoint, isOut);
+        OnUsbEvent?.Invoke($"BS ep{endpoint}{(isOut ? "O" : "I")}");
         _buffStatus |= 1u << (endpoint * 2 + (isOut ? 1 : 0));
         BuffStatusUpdated();
     }
@@ -577,6 +612,13 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     public void Tick(long deltaCycles)
     {
         _totalCycles += deltaCycles;
+
+        if (_setupPending)   // deferred SETUP_REC: see SendSetupPacket
+        {
+            _setupPending = false;
+            _sieStatus |= SIE_SETUP_REC;
+            SieStatusUpdated();
+        }
 
         // Auto-clear SOF bit after one tick so it doesn't re-trigger indefinitely.
         _intr &= ~INTR_DEV_SOF;

@@ -91,4 +91,48 @@ public sealed class MicroPythonReplTests
         var found = runner.ExecuteAndWait("print(x + y)", "42");
         found.Should().BeTrue("accumulated variable state should be preserved across REPL lines");
     }
+
+    [Fact]
+    public async Task Repl_MachineUniqueId_IsNotAllZero()
+    {
+        // Regression: SsiPeripheral.UniqueId used to default to an all-zero byte[8], so
+        // machine.unique_id() always read back "0000000000000000" instead of a real per-chip id.
+        if (ShouldSkip) return;
+
+        await using var runner = await MicroPythonRunner.CreateAsync(Version);
+        if (runner is null) return;
+
+        runner.WaitForPrompt().Should().BeTrue();
+
+        runner.Execute("import machine, ubinascii; print(ubinascii.hexlify(machine.unique_id()))");
+        var found = runner.WaitForOutput(text => text.Contains("b'", StringComparison.Ordinal)
+                                                  && !text.Contains("b'0000000000000000'", StringComparison.Ordinal));
+        found.Should().BeTrue("machine.unique_id() must not read back as all zero bytes");
+    }
+
+    [Fact]
+    public async Task Repl_MachineUniqueId_DiffersAcrossTwoBoards()
+    {
+        // Regression: two independently-booted boards both defaulted to the same all-zero
+        // unique id, so client_id = b"pico-" + hexlify(machine.unique_id()) collided between
+        // boards (e.g. an MQTT broker would drop the first connection when the second joined).
+        if (ShouldSkip) return;
+
+        await using var boardA = await MicroPythonRunner.CreateAsync(Version);
+        await using var boardB = await MicroPythonRunner.CreateAsync(Version);
+        if (boardA is null || boardB is null) return;
+
+        boardA.WaitForPrompt().Should().BeTrue();
+        boardB.WaitForPrompt().Should().BeTrue();
+
+        boardA.Execute("import machine, ubinascii; print(ubinascii.hexlify(machine.unique_id()))");
+        boardA.WaitForOutput("b'", 5_000).Should().BeTrue();
+        var idA = boardA.Uart.Text + boardA.UsbCdc.Text;
+
+        boardB.Execute("import machine, ubinascii; print(ubinascii.hexlify(machine.unique_id()))");
+        boardB.WaitForOutput("b'", 5_000).Should().BeTrue();
+        var idB = boardB.Uart.Text + boardB.UsbCdc.Text;
+
+        idA.Should().NotBe(idB, "two boards must not report the same machine.unique_id()");
+    }
 }

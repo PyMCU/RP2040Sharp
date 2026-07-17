@@ -1,3 +1,4 @@
+using RP2040.Core;
 using RP2040.Core.Memory;
 
 namespace RP2040.Peripherals.Apb;
@@ -29,25 +30,28 @@ public sealed class ApbBridge : IMemoryMappedDevice
     public uint ReadWord(uint address)
     {
         var device = _devices[(address >> 14) & 0xFF];
-        return device?.ReadWord(address & 0xFFF) ?? 0;
+        if (device == null) { EmuStrict.Note("apb.read.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return 0; }
+        return device.ReadWord(address & 0xFFF);
     }
 
     public ushort ReadHalfWord(uint address)
     {
         var device = _devices[(address >> 14) & 0xFF];
-        return device?.ReadHalfWord(address & 0xFFF) ?? 0;
+        if (device == null) { EmuStrict.Note("apb.read.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return 0; }
+        return device.ReadHalfWord(address & 0xFFF);
     }
 
     public byte ReadByte(uint address)
     {
         var device = _devices[(address >> 14) & 0xFF];
-        return device?.ReadByte(address & 0xFFF) ?? 0;
+        if (device == null) { EmuStrict.Note("apb.read.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return 0; }
+        return device.ReadByte(address & 0xFFF);
     }
 
     public void WriteWord(uint address, uint value)
     {
         var device = _devices[(address >> 14) & 0xFF];
-        if (device == null) return;
+        if (device == null) { EmuStrict.Note("apb.write.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return; }
 
         var atomicType = (address >> 12) & 0x3;
         var offset = address & 0xFFF;
@@ -71,7 +75,7 @@ public sealed class ApbBridge : IMemoryMappedDevice
     public void WriteHalfWord(uint address, ushort value)
     {
         var device = _devices[(address >> 14) & 0xFF];
-        if (device == null) return;
+        if (device == null) { EmuStrict.Note("apb.write.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return; }
 
         var atomicType = (address >> 12) & 0x3;
         var offset = address & 0xFFF;
@@ -95,7 +99,7 @@ public sealed class ApbBridge : IMemoryMappedDevice
     public void WriteByte(uint address, byte value)
     {
         var device = _devices[(address >> 14) & 0xFF];
-        if (device == null) return;
+        if (device == null) { EmuStrict.Note("apb.write.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return; }
 
         var atomicType = (address >> 12) & 0x3;
         var offset = address & 0xFFF;

@@ -4,7 +4,11 @@
     <Company>begeistert</Company>
     <RepositoryUrl>https://github.com/PyMCU/RP2040Sharp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <!-- The whole project is BUSL-1.1 (converts to MIT on the Change Date). nuget.org
+         rejects BUSL-1.1 as an SPDX expression, so we ship it as a packaged file. Each
+         packable project includes LICENSE-BUSL.txt via a <None Pack="true"> item. -->
+    <PackageLicenseExpression></PackageLicenseExpression>
+    <PackageLicenseFile>LICENSE-BUSL.txt</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/PyMCU/RP2040Sharp</PackageProjectUrl>
     <PackageTags>rp2040;raspberry-pi;emulator;cortex-m0plus;microcontroller;simulation</PackageTags>
@@ -24,5 +28,8 @@
   <ItemGroup Condition="'$(IsPackable)' != 'false'">
     <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="all" />
     <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="README.md" Visible="false" />
+    <!-- Third-party attribution (rp2040js, bootrom). The MIT and BSD notices must travel with
+         every copy, so ship it in the package alongside the licence. -->
+    <None Include="$(MSBuildThisFileDirectory)NOTICE.txt" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
 </Project>

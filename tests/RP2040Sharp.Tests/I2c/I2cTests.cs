@@ -11,14 +11,17 @@ public abstract class I2cTests
     private const uint IC_SAR           = 0x008;
     private const uint IC_DATA_CMD      = 0x010;
     private const uint IC_RAW_INTR_STAT = 0x034;
+    private const uint IC_CLR_TX_ABRT   = 0x054;
     private const uint IC_CLR_RD_REQ    = 0x050;
     private const uint IC_CLR_STOP_DET  = 0x060;
     private const uint IC_ENABLE        = 0x06C;
+    private const uint IC_TX_ABRT_SOURCE = 0x080;
 
     // IC_RAW_INTR_STAT bits
     private const uint RX_FULL  = 1u << 2;
     private const uint TX_EMPTY = 1u << 4;
     private const uint RD_REQ   = 1u << 5;
+    private const uint TX_ABRT  = 1u << 6;
     private const uint STOP_DET = 1u << 9;
 
     private static I2cPeripheral Enabled(byte slaveAddr = 0x55)
@@ -152,6 +155,37 @@ public abstract class I2cTests
 
             written.Should().Be(0x99);
             i2c.HasSlaveTransmitByte.Should().BeFalse();
+        }
+    }
+
+    public class MasterNack
+    {
+        [Fact]
+        public void SignalAddressNack_raises_TX_ABRT()
+        {
+            var i2c = Enabled();
+            i2c.SignalAddressNack();
+            (i2c.ReadWord(IC_RAW_INTR_STAT) & TX_ABRT).Should().NotBe(0);
+        }
+
+        [Fact]
+        public void SignalAddressNack_sets_ABRT_7B_ADDR_NOACK_source()
+        {
+            var i2c = Enabled();
+            i2c.SignalAddressNack();
+            (i2c.ReadWord(IC_TX_ABRT_SOURCE) & 0x1u).Should().NotBe(0);
+        }
+
+        [Fact]
+        public void Reading_IC_CLR_TX_ABRT_clears_interrupt_and_source()
+        {
+            var i2c = Enabled();
+            i2c.SignalAddressNack();
+
+            i2c.ReadWord(IC_CLR_TX_ABRT);   // clear-on-read
+
+            (i2c.ReadWord(IC_RAW_INTR_STAT) & TX_ABRT).Should().Be(0);
+            i2c.ReadWord(IC_TX_ABRT_SOURCE).Should().Be(0);
         }
     }
 }

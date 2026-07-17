@@ -1,8 +1,35 @@
-MIT License
+RP2040Sharp is licensed under the Business Source License 1.1 (BUSL-1.1).
 
-Copyright (c) 2026 Iván Montiel Cardona
-Copyright (c) 2026 Sergio Domínguez Rojas
-Copyright (c) 2026 Uri Shaked
+The full license text and parameters are in LICENSE-BUSL.txt. In summary: the
+entire project is initially BUSL-1.1 and automatically converts to the MIT
+License (the Change License) on the Change Date. Non-commercial, personal,
+hobby, educational, academic, evaluation and open-source use is free of charge;
+Commercial Use requires a separate commercial license (see LICENSE-BUSL.txt).
+
+RP2040Sharp is © 2024-2026 Iván Montiel Cardona.
+
+Parts of the emulator core reached this project under the MIT License, which is
+what permits relicensing them here (that license grants the right to
+sublicense). Those parts are:
+
+  * Portions derived from rp2040js (https://github.com/wokwi/rp2040js) by
+    Uri Shaked.
+  * Contributions by Sergio Domínguez Rojas, made while RP2040Sharp was itself
+    MIT-licensed and who remains the copyright holder of that work.
+
+As the MIT License requires, the copyright and permission notice covering both
+is retained below and must accompany every copy.
+
+RP2040Sharp also embeds the RP2040 bootrom (© Raspberry Pi Trading Ltd,
+3-clause BSD). See NOTICE.txt for the full third-party attribution that must
+accompany every redistribution.
+
+===============================================================================
+MIT License (retained attribution for the portions named above; it does not make
+those portions available to you under the MIT License before the Change Date)
+
+Copyright (c) 2021 Uri Shaked
+Copyright (c) 2025-2026 Sergio Domínguez Rojas
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

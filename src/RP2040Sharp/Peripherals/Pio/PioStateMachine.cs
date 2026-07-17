@@ -29,6 +29,12 @@ internal sealed class PioStateMachine
     // ── Execution state ──────────────────────────────────────────────
     public bool Enabled;
     public bool Stalled;         // waiting for FIFO or condition
+    /// <summary>
+    /// An IN already shifted its data into the ISR and reached the autopush threshold, but the
+    /// RX FIFO was full so the push could not complete. The SM stalls without re-shifting; the
+    /// deferred push completes once the RX FIFO drains. Mirrors RP2040 datasheet §3.5.4.2.
+    /// </summary>
+    internal bool AutopushPending;
     internal bool PcJumped;      // JMP or MOV PC set a new PC directly (skip auto-increment)
     internal long FracAccum;     // for sub-cycle fractional clock divisor
     internal int DelayCounter;   // instruction delay cycles remaining
@@ -42,7 +48,7 @@ internal sealed class PioStateMachine
     {
         PC = 0; X = 0; Y = 0; ISR = 0; OSR = 0;
         IsrCount = 0; OsrCount = 0;
-        Stalled = false; PcJumped = false; FracAccum = 0; DelayCounter = 0;
+        Stalled = false; AutopushPending = false; PcJumped = false; FracAccum = 0; DelayCounter = 0;
         TxFifo.Clear(); RxFifo.Clear();
     }
 

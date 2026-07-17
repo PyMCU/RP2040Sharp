@@ -22,6 +22,13 @@ public static class FirmwareCache
         if (File.Exists(path) && new FileInfo(path).Length > 0)
             return path;
 
+        // Prefer firmware embedded in the test assembly — offline and free of network flakiness.
+        if (TryLoadEmbedded($"micropython-{version}") is { } embedded)
+        {
+            await File.WriteAllBytesAsync(path, embedded);
+            return path;
+        }
+
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
@@ -42,6 +49,29 @@ public static class FirmwareCache
                 File.Delete(path);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Loads a firmware UF2 embedded in this test assembly (under Firmware/python/), matched by a
+    /// substring of its filename (e.g. "micropython-v1.21.0" or "circuitpython-9.2.1"). Matching by
+    /// substring avoids depending on MSBuild's exact manifest-resource name mangling.
+    /// Returns <c>null</c> when no embedded firmware matches (caller falls back to downloading).
+    /// </summary>
+    private static byte[]? TryLoadEmbedded(string fileNameContains)
+    {
+        var asm = typeof(FirmwareCache).Assembly;
+        var name = asm.GetManifestResourceNames()
+            .FirstOrDefault(n => n.EndsWith(".uf2", StringComparison.OrdinalIgnoreCase)
+                                 && n.Contains(fileNameContains, StringComparison.OrdinalIgnoreCase));
+        if (name is null)
+            return null;
+
+        using var stream = asm.GetManifestResourceStream(name);
+        if (stream is null)
+            return null;
+        using var ms = new MemoryStream();
+        stream.CopyTo(ms);
+        return ms.ToArray();
     }
 
     private static async Task<string?> ResolveMicroPythonUrlAsync(HttpClient http, string version)
@@ -79,6 +109,14 @@ public static class FirmwareCache
         var path = Path.Combine(CacheDir, $"circuitpython-{version}.uf2");
         if (File.Exists(path) && new FileInfo(path).Length > 0)
             return path;
+
+        // Prefer firmware embedded in the test assembly — offline and free of network flakiness.
+        var embeddedTag = version.StartsWith('v') ? version[1..] : version;
+        if (TryLoadEmbedded($"circuitpython-{embeddedTag}") is { } embedded)
+        {
+            await File.WriteAllBytesAsync(path, embedded);
+            return path;
+        }
 
         try
         {

@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>RP2040Sharp.NanoFramework.TestKit</PackageId>
+    <Product>RP2040Sharp.NanoFramework.TestKit</Product>
+    <Title>RP2040Sharp.NanoFramework.TestKit — boot &amp; assert deployed .NET nanoFramework apps on the RP2040 emulator</Title>
+    <Description>Boot a deployed .NET nanoFramework app on the RP2040Sharp emulator: firmware
+      discovery, deployment assembly from .pe metadata, and a native-checksum compatibility guard. Run your
+      real deployed C# on the emulated chip and assert against it from xUnit — managed static and instance
+      fields by name, run-until-managed-method, and a NanoSymbols source generator that emits strongly-typed
+      symbols for your app's methods and static fields.</Description>
+    <PackageTags>rp2040;nanoframework;testkit;emulator;integration-testing;clr;xunit</PackageTags>
+    <IsPackable>true</IsPackable>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <!-- Specialized work: Business Source License 1.1 (converts to MIT on the Change Date).
+         nuget.org rejects BUSL-1.1 as a license *expression* (it only accepts OSI/FSF-approved
+         SPDX ids), so we ship the license as a *file* and clear the MIT expression inherited
+         from Directory.Build.props. -->
+    <PackageLicenseExpression></PackageLicenseExpression>
+    <PackageLicenseFile>LICENSE-BUSL.txt</PackageLicenseFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RP2040Sharp\RP2040Sharp.csproj" />
+    <ProjectReference Include="..\RP2040.TestKit\RP2040.TestKit.csproj" />
+    <!-- Chip-agnostic nanoCLR introspection (ClrInspector, ClrLayout, heap walk). This kit supplies
+         the RP2040 IClrMemory adapter; the CLR knowledge lives once in the shared NfClr.Core package. -->
+    <PackageReference Include="NfClr.Core" Version="1.0.0-beta.1" />
+    <!-- Build the source generator alongside us; not a compile reference, only packaged as an analyzer. -->
+    <ProjectReference Include="..\RP2040Sharp.NanoFramework.TestKit.SourceGen\RP2040Sharp.NanoFramework.TestKit.SourceGen.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- NuGet consumers get the generator (analyzer) and the wiring targets automatically. -->
+  <ItemGroup>
+    <None Include="..\..\LICENSE-BUSL.txt" Pack="true" PackagePath="" Visible="false" />
+    <None Include="..\RP2040Sharp.NanoFramework.TestKit.SourceGen\bin\$(Configuration)\netstandard2.0\RP2040Sharp.NanoFramework.TestKit.SourceGen.dll"
+          Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="build\RP2040Sharp.NanoFramework.TestKit.targets"
+          Pack="true" PackagePath="buildTransitive" Visible="false" />
+  </ItemGroup>
+
+</Project>

@@ -95,6 +95,33 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
         _dreqSources[dreqIndex] = ready;
     }
 
+    private bool _inResume;
+
+    /// <summary>
+    /// Re-arm any channel that stalled waiting on the given DREQ line, now that the source peripheral
+    /// has signalled readiness for another beat (e.g. a PIO RX push, or a TX slot freed by the SM). A
+    /// stalled channel keeps BUSY set with beats still pending; re-running it moves as many beats as the
+    /// DREQ now allows, then re-stalls if the source drains again. This is what makes a DMA↔FIFO transfer
+    /// self-paced instead of draining an empty FIFO greedily at trigger time, and without it a DREQ-paced
+    /// transfer (e.g. a CYW43 firmware download over the PIO gSPI) stalls forever. Reentrancy-guarded.
+    /// </summary>
+    public void ResumeDreq(int dreqIndex)
+    {
+        if (_inResume) return;
+        _inResume = true;
+        try
+        {
+            for (var ch = 0; ch < CHANNEL_COUNT; ch++)
+            {
+                if ((_ctrl[ch] & CTRL_BUSY) == 0 || _transCount[ch] == 0) continue;
+                // TREQ_SEL is CTRL bits [20:15] on the RP2040.
+                if ((int)((_ctrl[ch] >> 15) & 0x3F) == dreqIndex)
+                    ExecuteChannel(ch);
+            }
+        }
+        finally { _inResume = false; }
+    }
+
     public DmaPeripheral(BusInterconnect bus, CortexM0Plus cpu)
     {
         _bus = bus;

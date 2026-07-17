@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2024-2026 Iván Montiel Cardona
+// Portions derived from rp2040js — Copyright (c) 2021 Uri Shaked (MIT).
+// See NOTICE.txt.
 namespace RP2040.Peripherals.Usb;
 
 /// <summary>
@@ -17,6 +21,7 @@ public sealed class UsbCdcHost
     private const byte CDC_DTR = 1 << 0;
     private const byte CDC_RTS = 1 << 1;
     private const byte CDC_DATA_CLASS = 10;
+    private const byte CDC_COMM_CLASS  = 2; // CDC communications (control) interface
     private const byte ENDPOINT_BULK   = 2;
 
     private const int ENDPOINT_ZERO = 0;
@@ -75,12 +80,38 @@ public sealed class UsbCdcHost
         _usb.OnSof            += HandleSof;
     }
 
+    // The device's bulk-OUT endpoint stays armed (active) while it waits for host data. We remember
+    // that pending arm here and fulfil it the instant bytes become available, mirroring real USB:
+    // a host with nothing to send simply doesn't complete the OUT transfer. The previous behaviour —
+    // fabricating a zero-length completion on every empty arm — created a BUFF_STATUS re-arm busy-loop
+    // that, when the device was busy (e.g. during Wi-Fi association), raced TinyUSB into a
+    // "Can't continue xfer on inactive ep" panic (hw_endpoint_xfer_continue with ep->active == 0).
+    private int _armedOutEp = -1;
+    private int _armedOutSize;
+
     /// <summary>Queue a byte to be delivered to the device on the next bulk-OUT poll.</summary>
-    public void SendSerialByte(byte data) => _txFifo.Enqueue(data);
+    public void SendSerialByte(byte data) { _txFifo.Enqueue(data); FlushPendingOut(); }
 
     public void SendSerialBytes(ReadOnlySpan<byte> data)
     {
         foreach (var b in data) _txFifo.Enqueue(b);
+        FlushPendingOut();
+    }
+
+    private void FlushPendingOut()
+    {
+        if (_armedOutEp < 0 || _txFifo.Count == 0) return;
+        var ep = _armedOutEp; var size = _armedOutSize;
+        _armedOutEp = -1;
+        DeliverOut(ep, size);
+    }
+
+    private void DeliverOut(int endpoint, int size)
+    {
+        var n = Math.Min(size, _txFifo.Count);
+        var buffer = new byte[n];
+        for (var i = 0; i < n; i++) buffer[i] = _txFifo.Dequeue();
+        _usb.EndpointReadDone(endpoint, buffer);
     }
 
     private void HandleUsbEnabled() => _usb.SignalBusReset();
@@ -101,7 +132,16 @@ public sealed class UsbCdcHost
             }
             else if (!_initialized)
             {
-                CdcSetControlLineState();
+                // Assert DTR/RTS on every CDC control interface so the firmware sees a terminal as
+                // "connected". MicroPython has one CDC (interface 0); CircuitPython is a composite with
+                // its console CDC potentially at a different interface — without DTR there, CircuitPython
+                // gates code.py's stdout and nothing reaches the Serial Monitor.
+                var controlIfaces = ExtractCdcControlInterfaces(_descriptors);
+                if (controlIfaces.Count == 0)
+                    CdcSetControlLineState();
+                else
+                    foreach (var ifn in controlIfaces)
+                        CdcSetControlLineState(interfaceNumber: (ushort)ifn);
                 OnDeviceConnected?.Invoke();
                 OnConfigurationComplete?.Invoke();
                 // Trigger MicroPython REPL prompt (mirrors rp2040js micropython-run.ts onDeviceConnected)
@@ -154,18 +194,16 @@ public sealed class UsbCdcHost
     private void HandleEndpointRead(int endpoint, int size)
     {
         if (endpoint != _outEndpoint) return;
-        var n = Math.Min(size, _txFifo.Count);
-        if (n == 0)
+        if (_txFifo.Count == 0)
         {
-            // No data ready — leave the buffer armed; we'll fulfil it next time the
-            // firmware re-arms or whenever bytes become available via SendSerialByte.
-            // Submit a zero-length completion so TinyUSB doesn't stall.
-            _usb.EndpointReadDone(endpoint, ReadOnlySpan<byte>.Empty);
+            // No data ready — leave the OUT endpoint armed (the device keeps ep->active = 1 and waits,
+            // exactly as hardware waits for the host to send an OUT token). Deliver the moment bytes
+            // arrive (FlushPendingOut). Do NOT fabricate a zero-length completion: that re-arm loop
+            // panics TinyUSB on a busy device (see _armedOutEp note above).
+            _armedOutEp = endpoint; _armedOutSize = size;
             return;
         }
-        var buffer = new byte[n];
-        for (var i = 0; i < n; i++) buffer[i] = _txFifo.Dequeue();
-        _usb.EndpointReadDone(endpoint, buffer);
+        DeliverOut(endpoint, size);
     }
 
     private void CdcSetControlLineState(ushort value = CDC_DTR | CDC_RTS, ushort interfaceNumber = 0)
@@ -183,6 +221,28 @@ public sealed class UsbCdcHost
     /// Scans the configuration descriptor blob for the CDC data interface and returns its
     /// bulk IN/OUT endpoint numbers.  Each output is -1 when no CDC data endpoint is found.
     /// </summary>
+    /// <summary>Returns the bInterfaceNumber of every CDC communications (control) interface in the
+    /// configuration descriptor, so DTR/RTS can be asserted on each — needed for composite devices
+    /// (CircuitPython) whose console CDC is not interface 0.</summary>
+    public static List<int> ExtractCdcControlInterfaces(IReadOnlyList<byte> descriptors)
+    {
+        var result = new List<int>();
+        var index = 0;
+        while (index < descriptors.Count)
+        {
+            var len = descriptors[index];
+            if (len < 2 || index + len > descriptors.Count) break;
+            if (descriptors[index + 1] == (byte)DescriptorType.Interface && len >= 9
+                && descriptors[index + 5] == CDC_COMM_CLASS)
+            {
+                var ifn = descriptors[index + 2]; // bInterfaceNumber
+                if (!result.Contains (ifn)) result.Add (ifn);
+            }
+            index += len;
+        }
+        return result;
+    }
+
     public static void ExtractEndpointNumbers(IReadOnlyList<byte> descriptors, out int inEp, out int outEp)
     {
         inEp = outEp = -1;

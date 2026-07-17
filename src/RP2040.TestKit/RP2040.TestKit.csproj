@@ -5,9 +5,19 @@
     <IsPackable>true</IsPackable>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Specialized work: Business Source License 1.1 (converts to MIT on the Change Date).
+         nuget.org rejects BUSL-1.1 as a license *expression* (it only accepts OSI/FSF-approved
+         SPDX ids), so we ship the license as a *file* and clear the MIT expression inherited
+         from Directory.Build.props. -->
+    <PackageLicenseExpression></PackageLicenseExpression>
+    <PackageLicenseFile>LICENSE-BUSL.txt</PackageLicenseFile>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\RP2040Sharp\RP2040Sharp.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\LICENSE-BUSL.txt" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
   <ItemGroup>
     <!-- 6.12.0 is the last MIT-licensed release; 7.x+ are under a commercial license. -->
