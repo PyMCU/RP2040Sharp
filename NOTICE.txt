@@ -12,23 +12,30 @@ or documentation.
 
 
 -------------------------------------------------------------------------------
-1. rp2040js — portions of the emulator core
+1. MIT-licensed portions of the emulator core
 -------------------------------------------------------------------------------
 
-Portions of the emulator core are derived from rp2040js by Uri Shaked, originally
-distributed under the MIT License. The MIT permission notice is reproduced below
-and continues to apply to those portions.
+Two parts of the emulator core reached this project under the MIT License, whose
+grant of the right to sublicense is what permits relicensing them here:
 
+  * Portions derived from rp2040js by Uri Shaked.
     Upstream: https://github.com/wokwi/rp2040js
 
+  * Contributions by Sergio Domínguez Rojas, made between 2025 and 2026 while
+    RP2040Sharp was itself MIT-licensed. He remains the copyright holder of that
+    work; it was not assigned to the project.
+
+The MIT copyright and permission notice covering both is reproduced below.
+
 Note: retaining this notice is what the MIT License requires of us. It does not
-make the derived portions of RP2040Sharp available to you under the MIT License —
+make those portions of RP2040Sharp available to you under the MIT License —
 RP2040Sharp as distributed is BUSL-1.1 until its Change Date. The upstream
 rp2040js project remains MIT-licensed for everyone, independently of this project.
 
     The MIT License (MIT)
 
     Copyright (c) 2021 Uri Shaked
+    Copyright (c) 2025-2026 Sergio Domínguez Rojas
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
