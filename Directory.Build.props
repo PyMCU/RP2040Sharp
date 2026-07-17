@@ -28,5 +28,8 @@
   <ItemGroup Condition="'$(IsPackable)' != 'false'">
     <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="all" />
     <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="README.md" Visible="false" />
+    <!-- Third-party attribution (rp2040js, bootrom). The MIT and BSD notices must travel with
+         every copy, so ship it in the package alongside the licence. -->
+    <None Include="$(MSBuildThisFileDirectory)NOTICE.txt" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
 </Project>
