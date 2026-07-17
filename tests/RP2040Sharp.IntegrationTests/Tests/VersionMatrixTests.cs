@@ -23,6 +23,7 @@ public sealed class VersionMatrixTests
         ["v1.19.1"],
         ["v1.20.0"],
         ["v1.21.0"],
+        ["v1.28.0"],
     ];
 
     [Theory]

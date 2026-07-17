@@ -629,6 +629,26 @@ public sealed class SioPeripheral : IMemoryMappedDevice
         _launchSeqPos  = 0;
     }
 
+    /// <summary>
+    /// Simulate Core 1's bootrom reporting "ready" after it is released from a PSM reset
+    /// (<c>multicore_reset_core1()</c>).  On real silicon Core 1 comes out of reset, drains
+    /// its own inbound mailbox, then pushes a single 0 to Core 0.  We reproduce that: clear
+    /// Core 1's RX FIFO and status flags, enqueue the 0 into Core 0's RX FIFO, and raise an
+    /// event so Core 0's blocking <c>multicore_fifo_pop_blocking()</c>/WFE returns.
+    /// </summary>
+    public void SignalCore1BootromReady()
+    {
+        // Core 1 drains its own inbound mailbox (Core0→Core1) as it reboots.
+        _fifo01.Clear();
+        _wof1 = _roe1 = false;
+
+        // Push the "ready" sentinel (0) into Core 0's RX FIFO (Core1→Core0) and wake it.
+        if (_fifo10.Count < FIFO_DEPTH)
+            _fifo10.Enqueue(0);
+        _cpu.SetInterrupt(15, true);           // SIO_IRQ_PROC0: data available for Core 0
+        _cpu.Registers.EventRegistered = true; // SEV: wake Core 0 out of WFE
+    }
+
     // ── FIFO helpers ──────────────────────────────────────────────────
 
     private uint BuildFifoStatus(int coreId)

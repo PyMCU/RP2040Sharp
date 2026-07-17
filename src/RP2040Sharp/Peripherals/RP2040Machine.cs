@@ -152,6 +152,9 @@ public sealed class RP2040Machine : IDisposable
 
         // PSM @ 0x40010000 (slot 4)
         Psm = new PsmPeripheral();
+        // Firmware releasing PROC1 from FRCE_OFF is multicore_reset_core1(): reset Core 1
+        // and signal its bootrom is ready so Core 0's blocking FIFO pop returns.
+        Psm.OnProc1Released = ResetCore1FromPsm;
         apb.Register(0x40010000, Psm);
 
         // IO_BANK0 @ 0x40014000 (slot 5)
@@ -965,6 +968,24 @@ public sealed class RP2040Machine : IDisposable
         Cpu1.Registers.PC   = entry & 0xFFFFFFFEu; // strip Thumb bit
         // The Run() loop will auto-update the fetch cache on the first instruction.
         _core1Launched = true;
+    }
+
+    /// <summary>
+    /// Invoked when firmware releases PROC1 from <see cref="PsmPeripheral"/>.FRCE_OFF, i.e.
+    /// calls pico-sdk's <c>multicore_reset_core1()</c> (MicroPython does this before every
+    /// <c>_thread.start_new_thread</c>).  On real silicon Core 1 leaves reset, re-runs its
+    /// bootrom and pushes a "ready" word to Core 0, which is blocked in a FIFO pop.  We
+    /// reproduce that here: stop and reset Core 1, clear the SIO launch handshake so the
+    /// following §2.8.3 sequence re-launches it, and inject the ready word to unblock Core 0.
+    /// Without this the register write is inert, Core 1 never signals, and Core 0 sleeps in
+    /// WFE forever.
+    /// </summary>
+    private void ResetCore1FromPsm()
+    {
+        _core1Launched = false;
+        Sio.ResetMulticoreLaunch();
+        Cpu1.Reset();
+        Sio.SignalCore1BootromReady();
     }
 
     // ── Per-core PPB router ───────────────────────────────────────────
