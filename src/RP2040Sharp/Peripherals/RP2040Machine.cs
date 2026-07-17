@@ -399,6 +399,11 @@ public sealed class RP2040Machine : IDisposable
         {
             LoadRealBootRom(Bus.PtrBootRom, _bootromRevision);
 
+            // The ROM images ship without their float library (see BootromFloat and
+            // NOTICE.txt): install native implementations behind the 'SF'/'SD' tables so
+            // firmware that resolves them through rom_data_lookup keeps working.
+            BootromFloat.Install(Cpu, Bus.PtrBootRom);
+
             if (TryFindVectorTable(Bus.PtrFlash, (int)image.Length, out var sp, out var resetPc,
                     out var vectorTableOffset))
             {

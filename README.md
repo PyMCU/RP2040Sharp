@@ -1,7 +1,7 @@
 # RP2040Sharp
 
 ![Build Status](https://github.com/PyMCU/RP2040Sharp/actions/workflows/test.yml/badge.svg)
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![License](https://img.shields.io/badge/license-BUSL--1.1-orange.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple)
 
 **RP2040Sharp** is a high-performance emulator for the Raspberry Pi RP2040 microcontroller, written entirely in **modern C# (.NET 10)**. It runs real RP2040 firmware — including **MicroPython** — without modification.
@@ -199,7 +199,10 @@ server.Start();
 
 ## License
 
-MIT License — see [LICENSE](LICENSE).
+RP2040Sharp is licensed under the **Business Source License 1.1** — the whole project, the emulator core included. It converts automatically to the **MIT License** (the Change License) on the Change Date, four years after each release. See [LICENSE](LICENSE) and [LICENSE-BUSL.txt](LICENSE-BUSL.txt).
 
-Based on the original work from [rp2040js](https://github.com/wokwi/rp2040js) © 2021 Uri Shaked.  
-C# Port © 2026 Iván Montiel Cardona.
+Use for personal, hobby, educational, academic-research, evaluation or open-source purposes is free of charge. Commercial Use — as defined in [LICENSE-BUSL.txt](LICENSE-BUSL.txt) — requires a separate commercial license.
+
+Based on the original work from [rp2040js](https://github.com/wokwi/rp2040js) © 2021 Uri Shaked, used under the MIT License; that notice is retained as attribution in [LICENSE](LICENSE) and [NOTICE.txt](NOTICE.txt). C# port © 2024-2026 Iván Montiel Cardona.
+
+The emulator embeds the RP2040 bootrom (© Raspberry Pi Trading Ltd, 3-clause BSD), with its floating point library removed and reimplemented natively — see [NOTICE.txt](NOTICE.txt) for the full third-party attribution.

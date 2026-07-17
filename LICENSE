@@ -6,17 +6,23 @@ License (the Change License) on the Change Date. Non-commercial, personal,
 hobby, educational, academic, evaluation and open-source use is free of charge;
 Commercial Use requires a separate commercial license (see LICENSE-BUSL.txt).
 
+RP2040Sharp is © 2024-2026 Iván Montiel Cardona and Sergio Domínguez Rojas.
+
 Portions of the emulator core are derived from rp2040js
 (https://github.com/wokwi/rp2040js) by Uri Shaked, originally distributed under
 the MIT License. That original MIT copyright and permission notice is retained
 below and continues to apply to those portions.
 
-===============================================================================
-MIT License (applies to the rp2040js-derived portions of the emulator core)
+RP2040Sharp also embeds the RP2040 bootrom (© Raspberry Pi Trading Ltd,
+3-clause BSD). See NOTICE.txt for the full third-party attribution that must
+accompany every redistribution.
 
-Copyright (c) 2026 Iván Montiel Cardona
-Copyright (c) 2026 Sergio Domínguez Rojas
-Copyright (c) 2026 Uri Shaked
+===============================================================================
+MIT License (retained attribution for the rp2040js-derived portions of the
+emulator core; it does not make those portions available to you under the MIT
+License before the Change Date)
+
+Copyright (c) 2021 Uri Shaked
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

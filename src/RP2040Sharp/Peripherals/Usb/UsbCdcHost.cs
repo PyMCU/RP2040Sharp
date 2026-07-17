@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2024-2026 Iván Montiel Cardona
+// Portions derived from rp2040js — Copyright (c) 2021 Uri Shaked (MIT).
+// See NOTICE.txt.
 namespace RP2040.Peripherals.Usb;
 
 /// <summary>

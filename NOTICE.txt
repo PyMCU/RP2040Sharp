@@ -1,0 +1,112 @@
+RP2040Sharp — Third-Party Notices
+=================================
+
+RP2040Sharp is licensed under the Business Source License 1.1 (see LICENSE and
+LICENSE-BUSL.txt). It incorporates and redistributes the third-party components
+listed below, under their own licences.
+
+This file must accompany every redistribution of RP2040Sharp, in source or binary
+form, and is included in every published NuGet package. Any product that ships
+RP2040Sharp must reproduce these notices in its own third-party-attribution screen
+or documentation.
+
+
+-------------------------------------------------------------------------------
+1. rp2040js — portions of the emulator core
+-------------------------------------------------------------------------------
+
+Portions of the emulator core are derived from rp2040js by Uri Shaked, originally
+distributed under the MIT License. The MIT permission notice is reproduced below
+and continues to apply to those portions.
+
+    Upstream: https://github.com/wokwi/rp2040js
+
+Note: retaining this notice is what the MIT License requires of us. It does not
+make the derived portions of RP2040Sharp available to you under the MIT License —
+RP2040Sharp as distributed is BUSL-1.1 until its Change Date. The upstream
+rp2040js project remains MIT-licensed for everyone, independently of this project.
+
+    The MIT License (MIT)
+
+    Copyright (c) 2021 Uri Shaked
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+
+-------------------------------------------------------------------------------
+2. RP2040 bootrom — embedded binary
+-------------------------------------------------------------------------------
+
+RP2040Sharp embeds the RP2040 bootrom images so the emulator can execute the real
+on-chip ROM code that firmware calls by fixed address. These are the silicon ROMs
+of the chip — not firmware, and not authored by this project.
+
+Embedded resources (compiled into the RP2040Sharp assembly):
+
+    src/RP2040Sharp/bootrom_b1.bin   RP2040 B0/B1 silicon (bootrom version 2)
+    src/RP2040Sharp/bootrom_b2.bin   RP2040 B2 silicon (bootrom version 3)
+
+Copyright (C) 2020 Raspberry Pi Trading Ltd. (as stated in the ROM images)
+
+    Upstream: https://github.com/raspberrypi/pico-bootrom
+
+The bootrom is licensed under the 3-clause BSD licence, reproduced verbatim below
+from the upstream LICENSE.TXT.
+
+IMPORTANT — the floating point library has been REMOVED from the images we ship.
+As the notice at the top of the licence states, the upstream licence does not cover
+bootrom/mufplib.S and bootrom/mufplib-double.S. Those files carry a separate
+licence (Copyright (c) 2020 Mark Owen, https://www.quinapalus.com) permitting use
+"solely on a Raspberry Pi RP2040 device", or GPLv2 from their author. Neither
+permits redistributing them here, so tools/strip_mufplib.py blanks that code out of
+both images before they are packaged, and RP2040Sharp implements the ROM float API
+natively instead (see src/RP2040Sharp/Peripherals/BootromFloat.cs). No mufplib code
+is present in this repository or in any published package. Everything that remains
+in the images is covered by the BSD licence below.
+
+    NOTE: this license applies to the contents of this repository, EXCLUDING the
+    contents of the files bootrom/mufplib.S and bootrom/mufplib-double.S, which are
+    licensed separately:
+
+    Copyright 2020 (c) 2020 Raspberry Pi (Trading) Ltd.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+
+    1. Redistributions of source code must retain the above copyright notice, this
+       list of conditions and the following disclaimer.
+
+    2. Redistributions in binary form must reproduce the above copyright notice,
+       this list of conditions and the following disclaimer in the documentation
+       and/or other materials provided with the distribution.
+
+    3. Neither the name of the copyright holder nor the names of its contributors
+       may be used to endorse or promote products derived from this software
+       without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+    ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+    WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+    DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+    SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+    OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
