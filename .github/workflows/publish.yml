@@ -107,6 +107,20 @@ jobs:
           --no-build
           --output ./nupkgs
 
+      # ── Licensing guard ─────────────────────────────────────────────────────
+      #    Everything published before 2026-07-17 shipped without its third-party
+      #    notices, and some of it shipped mufplib, which we have no right to
+      #    redistribute. Both were invisible from the repo: the LICENSE was fine,
+      #    the package was not. Check the artifact, not the source, and check it
+      #    before the push rather than after.
+      - name: Verify the boot ROMs carry no mufplib
+        run: >
+          python3 tools/strip_mufplib.py --check
+          src/RP2040Sharp/bootrom_b1.bin src/RP2040Sharp/bootrom_b2.bin
+
+      - name: Verify every package carries its licence and NOTICE
+        run: python3 tools/verify_packages.py ./nupkgs/*.nupkg
+
       # ── Trusted Publishing: mint a short-lived API key from the OIDC token ────
       - name: NuGet login (OIDC → temporary API key)
         if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event.inputs.push_public == 'true' }}
