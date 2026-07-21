@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <PackageId>RP2040Sharp.TestKit</PackageId>
+    <PackageId>SiliconTwin.RP2040</PackageId>
     <Description>Test utilities and helpers for writing unit tests against RP2040Sharp emulator firmware.</Description>
     <IsPackable>true</IsPackable>
     <TargetFramework>net10.0</TargetFramework>
@@ -23,4 +23,10 @@
     <!-- 6.12.0 is the last MIT-licensed release; 7.x+ are under a commercial license. -->
     <PackageReference Include="FluentAssertions" Version="6.12.0" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Entitlement is checked where a simulation is built. Free locally and on public
+         repositories; private CI needs a licence. -->
+    <PackageReference Include="SiliconTwin.Licensing" Version="1.0.0" />
+  </ItemGroup>
+
 </Project>

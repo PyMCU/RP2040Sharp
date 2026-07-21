@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <PackageId>RP2040Sharp.NanoFramework.TestKit</PackageId>
+    <PackageId>SiliconTwin.RP2040.NanoFramework</PackageId>
     <Product>RP2040Sharp.NanoFramework.TestKit</Product>
     <Title>RP2040Sharp.NanoFramework.TestKit — boot &amp; assert deployed .NET nanoFramework apps on the RP2040 emulator</Title>
     <Description>Boot a deployed .NET nanoFramework app on the RP2040Sharp emulator: firmware

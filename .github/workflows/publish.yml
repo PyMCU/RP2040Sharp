@@ -84,7 +84,7 @@ jobs:
           --no-build
           --output ./nupkgs
 
-      - name: Pack RP2040Sharp.TestKit
+      - name: Pack SiliconTwin.RP2040
         run: >
           dotnet pack src/RP2040.TestKit/RP2040.TestKit.csproj
           -c Release
@@ -100,7 +100,7 @@ jobs:
           --output ./nupkgs
 
       # ── BUSL-1.1 package: bundles the NanoSymbols generator as an analyzer ───
-      - name: Pack RP2040Sharp.NanoFramework.TestKit
+      - name: Pack SiliconTwin.RP2040.NanoFramework
         run: >
           dotnet pack src/RP2040Sharp.NanoFramework.TestKit/RP2040Sharp.NanoFramework.TestKit.csproj
           -c Release

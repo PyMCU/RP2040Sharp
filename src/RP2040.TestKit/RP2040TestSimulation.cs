@@ -61,6 +61,12 @@ public class RP2040TestSimulation : IDisposable
 
     protected RP2040TestSimulation()
     {
+        // Every simulation, including the board presets, is built through here — so this is
+        // the one place the entitlement check belongs. Free locally and on public
+        // repositories; private CI needs a licence. Cached per process, so a suite of
+        // thousands pays for one check.
+        SiliconTwin.Licensing.Entitlement.Require("rp2040");
+
         Machine = new RP2040Machine();
         // Install a capturing breakpoint handler so BKPT does not escalate to HardFault.
         // This is the correct ARMv6-M behaviour when a debugger/monitor is attached.
