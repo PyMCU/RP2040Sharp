@@ -74,6 +74,66 @@ public sealed class ClocksPeripheral : IMemoryMappedDevice
 
     public uint Size => 0x1000;
 
+    // ── Live clock-tree frequencies (read-only, for inspection) ──────────────
+    // Wired from the machine so the System view can report real frequencies. XOSC is the
+    // 12 MHz Pico crystal; the PLLs derive clk_sys / clk_usb.
+    public Pll.PllPeripheral? PllSys;
+    public Pll.PllPeripheral? PllUsb;
+    private const uint XoscHz = 12_000_000;
+    private uint PllSysHz() => PllSys?.OutputHz(XoscHz) ?? 125_000_000u;
+    private uint PllUsbHz() => PllUsb?.OutputHz(XoscHz) ?? 48_000_000u;
+
+    /// <summary>clk_ref source (CLK_REF_CTRL.SRC[1:0]): 0=ROSC, 1=aux, 2=XOSC.</summary>
+    public uint ClkRefHz()
+    {
+        var src = (_ctrl[4] & 0x3u) switch
+        {
+            2 => XoscHz,          // XOSC
+            1 => PllUsbHz(),      // clk_ref_aux (pll_usb) — rarely used
+            _ => 6_500_000u,      // ROSC free-running (boot default)
+        };
+        var divInt = (_div[4] >> 8) & 0x3u; if (divInt == 0) divInt = 1;
+        return src / divInt;
+    }
+
+    /// <summary>Live clk_sys frequency (Hz), derived from CLK_SYS_CTRL and CLK_SYS_DIV.</summary>
+    public uint ClkSysHz
+    {
+        get
+        {
+            if ((_ctrl[5] & 0x1u) == 0) return ClkRefHz();   // SRC bit0: 0=clk_ref (boot)
+            var aux = ((_ctrl[5] >> 5) & 0x7u) switch          // AUXSRC[7:5]
+            {
+                0 => PllSysHz(),   // pll_sys (what clock_init selects)
+                1 => PllUsbHz(),   // pll_usb
+                2 => 6_500_000u,   // ROSC
+                3 => XoscHz,       // XOSC
+                _ => 0u,           // gpin0/gpin1 — external, unmodeled
+            };
+            // CLK_SYS_DIV INT[31:8]. NB: this peripheral's reset default (DIV_DEFAULT = 0x01000000)
+            // uses a top-byte layout, not the hardware INT[31:8]; firmware that starts the PLL but
+            // leaves the divider untouched would otherwise read a huge divisor. Treat that exact
+            // reset value as div = 1 (firmware writes 0x100 for div 1 in the real layout).
+            var raw = _div[5];
+            var divInt = raw == 0x01000000u ? 1u : ((raw >> 8) & 0xFFFFFFu);
+            if (divInt == 0) divInt = 1;
+            var hz = aux / divInt;
+            return hz == 0 ? 125_000_000u : hz;
+        }
+    }
+
+    /// <summary>Live clk_peri frequency (Hz) — feeds UART/SPI (used for baud). RP2040 clk_peri has
+    /// no divider, only CLK_PERI_CTRL.AUXSRC[7:5].</summary>
+    public uint ClkPeriHz() => ((_ctrl[6] >> 5) & 0x7u) switch
+    {
+        0 => ClkSysHz,     // clk_sys (reset default)
+        1 => PllSysHz(),   // pll_sys
+        2 => PllUsbHz(),   // pll_usb (48 MHz)
+        3 => 6_500_000u,   // ROSC
+        4 => XoscHz,       // XOSC
+        _ => ClkSysHz,
+    };
+
     public uint ReadWord(uint address)
     {
         return address switch

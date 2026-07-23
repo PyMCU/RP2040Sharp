@@ -66,6 +66,19 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
     /// <summary>DREQ source for DMA RX: true when RX FIFO has data to read.</summary>
     public bool RxDataAvailable => _rxFifo.Count > 0;
 
+    /// <summary>Read-only snapshot of the SPI (PL022) configuration for external inspection.</summary>
+    public readonly record struct SpiConfigSnapshot(
+        bool Enabled, uint Cpsdvsr, int Scr, int DataBits, int Format, bool Cpol, bool Cpha, bool Loopback);
+    public SpiConfigSnapshot GetConfig() => new(
+        (_cr1 & CR1_SSE) != 0,
+        _cpsr & 0xFF,
+        (int)((_cr0 >> 8) & 0xFF),        // SCR
+        (int)(_cr0 & 0xF) + 1,            // DSS -> bits
+        (int)((_cr0 >> 4) & 0x3),         // FRF
+        (_cr0 & (1u << 6)) != 0,          // SPO / CPOL
+        (_cr0 & (1u << 7)) != 0,          // SPH / CPHA
+        (_cr1 & CR1_LBM) != 0);
+
     public uint Size => 0x1000;
 
     public SpiPeripheral(CortexM0Plus? cpu = null, int irq = 0)

@@ -296,6 +296,29 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     /// <summary>DREQ source for DMA TX: true when TX FIFO has space to accept data.</summary>
     public bool TxFifoNotFull(int smIndex) => _sm[smIndex].TxFifo.Count < _sm[smIndex].TxDepth;
 
+    /// <summary>Read-only snapshot of one state machine's observable state, for tooling/UIs
+    /// (a playground PIO view). Purely a getter — does not affect emulation.</summary>
+    public readonly record struct PioSmSnapshot(
+        bool Enabled, uint Pc, uint ClkDiv, uint PinCtrl, uint Pins, int TxLevel, int RxLevel,
+        uint X, uint Y, uint Osr, uint OsrCount, uint Isr, uint IsrCount, uint ExecCtrl);
+
+    /// <summary>Number of state machines in this PIO block (4).</summary>
+    public int SmCount => _sm.Length;
+
+    /// <summary>This PIO block's index (0=PIO0, 1=PIO1).</summary>
+    public uint BlockIndex => _blockIndex;
+
+    /// <summary>Observable state of state machine <paramref name="smIndex"/> (0-3), read-only.</summary>
+    public PioSmSnapshot GetSmState(int smIndex)
+    {
+        var s = _sm[smIndex];
+        return new PioSmSnapshot(s.Enabled, s.PC, s.ClkDiv, s.PinCtrl, s.GpioPins, s.TxFifo.Count, s.RxFifo.Count,
+            s.X, s.Y, s.OSR, s.OsrCount, s.ISR, s.IsrCount, s.ExecCtrl);
+    }
+
+    /// <summary>Copy of this block's 32-word instruction memory (for a disassembly view). Read-only.</summary>
+    public ushort[] GetProgram() => (ushort[])_instrMem.Clone();
+
     /// <summary>Inject a value directly into the RX FIFO of <paramref name="smIndex"/>.</summary>
     public void InjectRxData(int smIndex, uint value)
     {

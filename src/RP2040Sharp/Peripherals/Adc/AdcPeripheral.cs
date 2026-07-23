@@ -44,6 +44,17 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
     /// </summary>
     public Func<int, ushort>? ReadChannel;
 
+    /// <summary>Read-only snapshot of the ADC control state for external inspection (playground/tests).</summary>
+    public readonly record struct AdcStateSnapshot(
+        bool Enabled, int SelectedChannel, bool TempSensorEnabled, bool StartMany, bool FifoEnabled);
+    public int ChannelCount => CHANNEL_COUNT;
+    public AdcStateSnapshot GetState() => new(
+        (_cs & 1u) != 0,                    // EN
+        (int)((_cs >> 12) & 0x7),           // AINSEL (RP2040: 3 bits, ch4 = temp)
+        (_cs & (1u << 1)) != 0,             // TS_EN
+        (_cs & (1u << 3)) != 0,             // START_MANY
+        (_fcs & 1u) != 0);                  // FIFO EN
+
     /// <summary>DREQ source for DMA: true when the ADC FIFO has data to read.</summary>
     public bool HasFifoData => _adcFifo.Count > 0;
 

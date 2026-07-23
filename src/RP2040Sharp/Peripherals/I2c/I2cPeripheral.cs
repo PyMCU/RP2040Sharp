@@ -112,6 +112,17 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
     /// <summary>The 7-bit slave address currently written in IC_SAR.</summary>
     public byte SlaveAddress => (byte)(_sar & 0x7F);
 
+    /// <summary>Read-only snapshot of the I2C (DW_apb_i2c) configuration for external inspection.</summary>
+    public readonly record struct I2cConfigSnapshot(
+        bool Enabled, bool Master, int Speed, int TargetAddr, int SlaveAddr, bool TenBitAddr);
+    public I2cConfigSnapshot GetConfig() => new(
+        (_enable & 1u) != 0,
+        (_con & 1u) != 0,                  // MASTER_MODE
+        (int)((_con >> 1) & 0x3),          // SPEED: 1=std,2=fast,3=high
+        (int)(_tar & 0x3FF),
+        (int)(_sar & 0x3FF),
+        (_con & (1u << 4)) != 0);          // IC_10BITADDR_MASTER
+
     public uint Size => 0x1000;
 
     public I2cPeripheral(CortexM0Plus? cpu = null, int irq = 0)

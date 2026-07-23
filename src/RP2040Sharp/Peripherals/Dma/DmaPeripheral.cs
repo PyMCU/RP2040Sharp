@@ -65,6 +65,14 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
     private readonly uint[] _transCount = new uint[CHANNEL_COUNT];
     private readonly uint[] _ctrl       = new uint[CHANNEL_COUNT];
 
+    // ── Read-only inspection surface (playground/tests) ──────────────────────
+    public int ChannelCount => CHANNEL_COUNT;
+    public uint GetChannelReadAddr(int ch)   => (uint)ch < CHANNEL_COUNT ? _readAddr[ch]   : 0;
+    public uint GetChannelWriteAddr(int ch)  => (uint)ch < CHANNEL_COUNT ? _writeAddr[ch]  : 0;
+    public uint GetChannelTransCount(int ch) => (uint)ch < CHANNEL_COUNT ? _transCount[ch] : 0;
+    public bool IsChannelBusy(int ch)     => (uint)ch < CHANNEL_COUNT && (_ctrl[ch] & CTRL_BUSY) != 0;
+    public bool IsChannelEnabled(int ch)  => (uint)ch < CHANNEL_COUNT && (_ctrl[ch] & CTRL_EN)   != 0;
+
     // DREQ sources: 64 DREQ lines. Null = always ready (same as PERMANENT/TREQ=63).
     // Returns true when the peripheral is ready for one data beat.
     private readonly Func<bool>?[] _dreqSources = new Func<bool>?[64];

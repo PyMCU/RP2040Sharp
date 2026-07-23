@@ -21,6 +21,18 @@ public sealed class PllPeripheral : IMemoryMappedDevice
 
     public uint Size => 0x1000;
 
+    /// <summary>Output frequency (Hz) from FBDIV/POSTDIV for the clock tree / inspection.
+    /// RP2040 REFDIV is not modelled here (stub), so assume REFDIV = 1.</summary>
+    public uint OutputHz(uint refHz)
+    {
+        var postdiv1 = (_prim >> 16) & 0x7u;
+        var postdiv2 = (_prim >> 12) & 0x7u;
+        if (postdiv1 == 0) postdiv1 = 1;
+        if (postdiv2 == 0) postdiv2 = 1;
+        var fbdiv = _fbdiv == 0 ? 1u : _fbdiv;
+        return (uint)((ulong)refHz * fbdiv / (postdiv1 * postdiv2));
+    }
+
     public uint ReadWord(uint address) => address switch
     {
         CS       => CS_LOCK,   // always locked in simulation

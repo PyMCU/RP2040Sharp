@@ -69,6 +69,20 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
         _rtcTime = ((uint)dayOfWeek << 24) | ((uint)hour << 16) | ((uint)min << 8) | (uint)sec;
     }
 
+    /// <summary>Read-only snapshot of the running RTC date/time for external inspection.</summary>
+    public readonly record struct RtcSnapshot(
+        bool Enabled, int Year, int Month, int Day, int DayOfWeek, int Hour, int Minute, int Second);
+    public RtcSnapshot GetSnapshot() => new(
+        (_ctrl & CTRL_ENABLE) != 0,
+        (int)((_rtcDate >> 16) & 0xFFF),   // YEAR
+        (int)((_rtcDate >> 8)  & 0xF),     // MONTH
+        (int)(_rtcDate & 0x1F),            // DAY
+        (int)((_rtcTime >> 24) & 0x7),     // DOTW
+        (int)((_rtcTime >> 16) & 0x1F),    // HOUR
+        (int)((_rtcTime >> 8)  & 0x3F),    // MIN
+        (int)(_rtcTime & 0x3F));           // SEC
+    public bool IsEnabled => (_ctrl & CTRL_ENABLE) != 0;
+
     // ── ITickable ─────────────────────────────────────────────────────────
 
     public void Tick(long deltaCycles)
