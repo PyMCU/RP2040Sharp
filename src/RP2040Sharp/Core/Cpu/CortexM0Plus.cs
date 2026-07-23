@@ -9,6 +9,17 @@ using RP2040.Core.Memory;
 
 namespace RP2040.Core.Cpu;
 
+/// <summary>Selects which interchangeable 16-bit decoder <see cref="CortexM0Plus.Run(int)"/> uses.</summary>
+public enum DecoderType
+{
+    /// <summary>Native function-pointer lookup table (default).</summary>
+    NativeLut,
+    /// <summary>Managed-delegate lookup table (portable; no unsafe).</summary>
+    Lut,
+    /// <summary>Switch / br_table over a per-opcode handler id.</summary>
+    Switch,
+}
+
 public sealed unsafe class CortexM0Plus
 {
     public readonly BusInterconnect Bus;
@@ -27,6 +38,25 @@ public sealed unsafe class CortexM0Plus
     public bool IsLockedUp { get; private set; }
 
     private readonly InstructionDecoder _decoder;
+
+    // ── Interchangeable 16-bit decoder (see Decoders/) ───────────────────────
+    // The execution loop is monomorphized per decoder struct; the active one is chosen with a single
+    // per-batch switch in Run. NativeLut (function-pointer table) is the default. Lut (managed-delegate
+    // table) and Switch (br_table over a handler id) exist so the fastest can be selected per runtime
+    // target (native vs WASM) — see the decoder benchmark. Behaviour is identical across all three; they
+    // are all derived from the same classification rules that build InstructionDecoder's native table.
+    private Decoders.NativeLutDecoder _nativeLutDecoder;
+    private Decoders.LutDecoder       _lutDecoder;
+    private Decoders.SwitchDecoder    _switchDecoder;
+    private DecoderType               _activeDecoder = DecoderType.NativeLut;
+
+    /// <summary>Selects the 16-bit instruction decoder used by <see cref="Run(int)"/>. Behavior is
+    /// identical across all three; only dispatch mechanism (and thus throughput) differs. Default is
+    /// <see cref="DecoderType.NativeLut"/>.</summary>
+    public void SetDecoder(DecoderType type) => _activeDecoder = type;
+
+    /// <summary>The 16-bit decoder currently selected by <see cref="SetDecoder"/>.</summary>
+    public DecoderType ActiveDecoder => _activeDecoder;
 
     private byte* _fetchPtr;
     private uint _fetchMask;
@@ -91,6 +121,9 @@ public sealed unsafe class CortexM0Plus
     {
         Bus = bus;
         _decoder = InstructionDecoder.Instance;
+        _nativeLutDecoder = Decoders.NativeLutDecoder.Create();
+        _lutDecoder       = Decoders.LutDecoder.Create();
+        _switchDecoder    = Decoders.SwitchDecoder.Create();
         Reset();
     }
 
@@ -144,11 +177,28 @@ public sealed unsafe class CortexM0Plus
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    /// <summary>
+    /// Execute up to <paramref name="instructions"/> steps using the currently selected 16-bit decoder.
+    /// The body is monomorphized per decoder struct by <see cref="RunGeneric{TDecoder}"/>; this public
+    /// entry point keeps its historical signature and picks the concrete loop with a single per-batch
+    /// switch (the selection cost is amortized over the whole batch, not paid per instruction).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Run(int instructions)
     {
-        var decoder = _decoder;
+        switch (_activeDecoder)
+        {
+            case DecoderType.NativeLut: RunGeneric(ref _nativeLutDecoder, instructions); break;
+            case DecoderType.Lut:       RunGeneric(ref _lutDecoder, instructions); break;
+            case DecoderType.Switch:    RunGeneric(ref _switchDecoder, instructions); break;
+            default:                    RunGeneric(ref _nativeLutDecoder, instructions); break;
+        }
+    }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private void RunGeneric<TDecoder>(ref TDecoder decoder, int instructions)
+        where TDecoder : struct, Decoders.IInstructionDecoder
+    {
         var fetchPtr = _fetchPtr;
         var fetchMask = _fetchMask;
         var regionId = _currentRegionId;
@@ -250,7 +300,7 @@ public sealed unsafe class CortexM0Plus
             Cycles++;
 
             // DISPATCH
-            decoder.Dispatch(opcode, this);
+            decoder.Dispatch16(opcode, this);
         }
 
         _currentRegionId = regionId;
