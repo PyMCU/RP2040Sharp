@@ -292,6 +292,7 @@ public static class BitOps
 
         valRm += (uint)((rm + 1) >> 4) << 1;
         pc = valRm & 0xFFFFFFFE;
+        // rp2040js MOV (register) with Rd == PC: base 1 (loop) + 1.
         cpu.Cycles++;
     }
 

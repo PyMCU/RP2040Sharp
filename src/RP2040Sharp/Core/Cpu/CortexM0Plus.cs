@@ -26,6 +26,30 @@ public sealed unsafe class CortexM0Plus
     public Registers Registers;
     public long Cycles;
 
+    // ── Cycle-accurate timing model (always on) ──────────────────────────────
+    // The core reproduces the EXACT per-instruction cycle model of rp2040js (cortex-m0-core.ts
+    // executeInstruction): each instruction costs a base cycle (the run loop's single Cycles++)
+    // plus the per-type penalties the real M0+ pays — taken branches, BL/BLX/BX, LDM/STM/PUSH/POP
+    // by register, MRS/MSR/barriers, WFI/WFE — added straight-line in the handler the decode table
+    // already dispatched to (no reclassification, no branch), and the memory wait-states of
+    // cyclesIO() by region. There is no opt-in flag: the accounting is part of the instruction's
+    // work, exactly as rp2040js's deltaCycles is. Verified cycle-for-cycle against rp2040js.
+
+    /// <summary>
+    /// Memory wait-states for a data access, reproducing rp2040js <c>cyclesIO(addr, write)</c>
+    /// (cortex-m0-core.ts): SIO region (0xD) is single-cycle (0 wait), the APB region (0x4) adds
+    /// 3 cycles on a read and 4 on a write, and every other region (SRAM/flash/bootrom/…) adds 1.
+    /// The value is added on top of the instruction's base cycle, exactly as rp2040js does.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static long CyclesIO(uint address, bool write)
+    {
+        var region = address >> 28;
+        if (region == 0xD) return 0;              // SIO_START_ADDRESS = 0xD0000000
+        if (region == 0x4) return write ? 4 : 3;  // APB_START_ADDRESS = 0x40000000
+        return 1;
+    }
+
     /// <summary>0 = Core0, 1 = Core1. Used by SIO to return the correct CPUID and route FIFOs.</summary>
     public int CoreId { get; set; }
 
@@ -517,7 +541,8 @@ public sealed unsafe class CortexM0Plus
         var targetPc = Bus.ReadWord(vectorAddress);
         Registers.PC = targetPc & 0xFFFFFFFE;
 
-        Cycles += 12; // Exception Entry cost (aprox 12-15 cycles)
+        // rp2040js models exception entry as 0 extra cycles: the handler's first instruction is
+        // charged its own base on the next step, so nothing is added here.
 
         OnExceptionEntry?.Invoke(exceptionNumber);
     }
@@ -701,7 +726,8 @@ public sealed unsafe class CortexM0Plus
         Registers.SP += stackFree;
         Registers.PC = retPC & 0xFFFFFFFE;
 
-        Cycles += 10;
+        // rp2040js models exception return as 0 extra cycles: the BX/POP-pc that drives it already
+        // charged its own penalty, so nothing is added here.
         // After returning from an ISR, re-check interrupts so that a still-pending
         // higher-priority IRQ (e.g. USB after SysTick) fires immediately, AND signal
         // that an event was registered so the next WFE consumes it instead of sleeping.

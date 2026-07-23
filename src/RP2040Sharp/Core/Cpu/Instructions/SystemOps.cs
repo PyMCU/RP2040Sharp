@@ -8,6 +8,7 @@ public static class SystemOps
     public static void Barrier(ushort opcodeH1, CortexM0Plus cpu)
     {
         cpu.Registers.PC += 2;
+        // rp2040js DMB/DSB/ISB: base 1 (loop) + 2 (32-bit instruction).
         cpu.Cycles += 2;
     }
 
@@ -74,6 +75,7 @@ public static class SystemOps
         }
 
         cpu.Registers[rd] = result;
+        // rp2040js MRS: base 1 (loop) + 2 (32-bit instruction).
         cpu.Cycles += 2;
     }
 
@@ -155,6 +157,7 @@ public static class SystemOps
                 }
             }
         }
+        // rp2040js MSR: base 1 (loop) + 2 (32-bit instruction).
         cpu.Cycles += 2;
     }
 
@@ -184,12 +187,16 @@ public static class SystemOps
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Wfi(ushort opcode, CortexM0Plus cpu)
     {
+        // rp2040js WFI: base 1 (loop) + 1 for the instruction itself, then it starts waiting.
+        cpu.Cycles++;
         cpu.Registers.Waiting = true;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Wfe(ushort opcode, CortexM0Plus cpu)
     {
+        // rp2040js WFE: base 1 (loop) + 1 for the instruction itself.
+        cpu.Cycles++;
         if (!cpu.Registers.EventRegistered)
             cpu.Registers.Waiting = true;
         else
