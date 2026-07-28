@@ -13,29 +13,26 @@ Licensed Work:        RP2040Sharp — the complete RP2040 emulator: the emulator
                       copyright and permission notice is retained in the LICENSE file
                       and continues to apply to those portions.
 Additional Use Grant: You may copy, modify, create derivative works of, redistribute,
-                      and make production use of the Licensed Work free of charge for
-                      any use that is not a Commercial Use, as defined below.
+                      and make production use of the Licensed Work free of charge,
+                      except that you may not distribute, sell, sublicense, host, or
+                      otherwise provide, for a fee or other commercial consideration,
+                      the Licensed Work (in whole or in part, modified or unmodified)
+                      or any product or service that embeds or bundles it. That
+                      requires a separate commercial license from the Licensor.
 
-                      A "Commercial Use" is any of the following:
-                        (a) use of the Licensed Work in an automated build, test,
-                            continuous-integration, or continuous-delivery (CI/CD)
-                            pipeline operated by or on behalf of a for-profit entity;
-                        (b) distribution, sale, sublicensing, hosting, or provision,
-                            for a fee or other commercial consideration, of the Licensed
-                            Work (in whole or in part, modified or unmodified) or of any
-                            product or service that embeds, bundles, or depends on it; or
-                        (c) internal use of the Licensed Work by, or on behalf of, a
-                            for-profit entity to develop, test, or operate a product or
-                            service that generates, or is intended to generate, revenue.
+                      This grant covers use by anyone, at any organization, whatever
+                      its size: writing, running, debugging, inspecting and profiling
+                      software with the Licensed Work on your own machine is free of
+                      charge, and so is using it in the automated pipelines of public
+                      repositories.
 
-                      For the avoidance of doubt, the following are NOT a Commercial Use
-                      and are always permitted free of charge, provided they do not fall
-                      within (a), (b), or (c) above: use by a natural person acting in a
-                      personal capacity, and use for personal, hobby, educational,
-                      academic-research, evaluation, or open-source purposes.
+                      Separately from this License, some editions of the Licensed Work
+                      check an entitlement before running inside a private continuous-
+                      integration system. That check, and the hosted service behind it,
+                      are governed by the Licensor's own terms of service rather than by
+                      this License; see the project documentation. Nothing in this
+                      paragraph restricts the rights granted above.
 
-                      Any Commercial Use requires a separate commercial license from the
-                      Licensor; contact the Licensor to arrange one.
 Change Date:          2030-07-11
 Change License:       MIT
 
