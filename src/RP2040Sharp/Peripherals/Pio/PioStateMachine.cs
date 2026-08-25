@@ -29,6 +29,13 @@ internal sealed class PioStateMachine
     // ── Execution state ──────────────────────────────────────────────
     public bool Enabled;
     public bool Stalled;         // waiting for FIFO or condition
+
+    // Stall fingerprint: what the SM could observe the last time it failed to make progress. While
+    // neither the pins it reads nor anything another SM did has changed, re-running the same blocked
+    // instruction can only block again — so the remaining cycles of the tick are skipped.
+    public uint StallInputWord;
+    public long StallMutation = -1;
+    public bool StallValid;
     /// <summary>
     /// An IN already shifted its data into the ISR and reached the autopush threshold, but the
     /// RX FIFO was full so the push could not complete. The SM stalls without re-shifting; the

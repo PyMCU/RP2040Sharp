@@ -39,6 +39,17 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
     private const uint FUNCSEL_SIO  = 5;
     private const uint FUNCSEL_PIO0 = 6;
     private const uint FUNCSEL_PIO1 = 7; // RP2040 has two PIO blocks: PIO0=6, PIO1=7
+    private const uint FUNCSEL_PWM  = 4;
+
+    /// <summary>
+    /// The PWM block, so a pad muxed to FUNCSEL 4 reports the channel level the slice is driving.
+    /// Without it a running PWM was invisible at the pin: pwm/pwm_fade.py faded an LED that never
+    /// changed state as far as any pad observer could tell.
+    /// </summary>
+    public Pwm.PwmPeripheral? Pwm { get; set; }
+
+    /// <summary>GPIO n drives slice (n >> 1) & 7, channel B on odd pins (datasheet §4.5.2).</summary>
+    private static (int slice, bool channelB) PwmChannelFor(int pin) => ((pin >> 1) & 7, (pin & 1) != 0);
 
     // IO_IRQ_BANK0 = hardware IRQ 13
     private const int IO_IRQ_BANK0 = 13;
@@ -65,6 +76,8 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
     /// <summary>Updates the pad output level driven by PIO <paramref name="block"/> (0-1).
     /// <paramref name="value"/> carries the intended pin levels; <paramref name="mask"/>
     /// the pins this block drives.</summary>
+    private void InvalidateInputWord() => _inputWordValid = false;
+
     public void SetPioOut (int block, uint value, uint mask)
     {
         _pioOut[block] = (_pioOut[block] & ~mask) | (value & mask);
@@ -96,6 +109,7 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
     /// when nothing subscribes to <see cref="PadChanged"/>.</summary>
     public void NotifyPads(uint mask)
     {
+        _inputWordValid = false;
         if (PadChanged is null) return;
         while (mask != 0)
         {
@@ -117,14 +131,61 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
     /// off-chip device's reply on the same pin) reads the device, not the SM's stale output.</summary>
     public uint GetInputWord()
     {
-        uint w = 0;
-        for (var p = 0; p < GPIO_COUNT; p++)   // RP2040 has 30 GPIOs; bits 30/31 don't exist
-        {
-            var level = GetPadOutputEnable(p) ? GetPadOutputLevel(p) : _gpioInput[p];
-            if (level) w |= 1u << p;
-        }
-        return w;
+        // Cached: the PIO asks for this on every instruction that reads pins, and the Pico W's gSPI is
+        // bit-banged PIO, so rebuilding all 30 pads each time dominated the run. The cache is dropped
+        // whenever anything that feeds it moves — and skipped entirely while a pad is muxed to PWM,
+        // whose level changes with the counter rather than with a register write.
+        if (_inputWordValid && _pwmMuxedPins == 0) return _inputWord;
+        var word = BuildInputWord();
+        _inputWord = word;
+        _inputWordValid = true;
+        return word;
     }
+
+    private uint _inputWord;
+    private bool _inputWordValid;
+
+    /// <summary>Pads currently muxed to PWM (FUNCSEL 4), whose level is time-varying, not write-driven.</summary>
+    private uint _pwmMuxedPins;
+
+    /// <summary>Pads muxed to each function, kept in step with FUNCSEL writes.</summary>
+    private uint _sioPins, _pio0Pins, _pio1Pins;
+
+    /// <summary>Levels driven onto pads from outside the chip, as a bitmask of <see cref="_gpioInput"/>.</summary>
+    private uint _externalInput;
+
+    /// <summary>
+    /// The pad input word, built from whole-word masks rather than a per-pin walk. The PIO asks for
+    /// this constantly while bit-banging, and every clock edge invalidates the cache, so the rebuild
+    /// itself has to be cheap: looping 30 pins through the function-select switch made this 16% of a
+    /// WiFi transfer on its own.
+    /// </summary>
+    private uint BuildInputWord()
+    {
+        var sioDriven  = _sio.GpioOe   & _sioPins;
+        var pio0Driven = _pioOe[0]     & _pio0Pins;
+        var pio1Driven = _pioOe[1]     & _pio1Pins;
+        var w = (_sio.GpioOut & sioDriven) | (_pioOut[0] & pio0Driven) | (_pioOut[1] & pio1Driven);
+        var driven = sioDriven | pio0Driven | pio1Driven;
+
+        // PWM pads are level-by-counter, so they keep the slow path — and there are rarely any.
+        if (_pwmMuxedPins != 0)
+        {
+            var rest = _pwmMuxedPins;
+            while (rest != 0)
+            {
+                var pin = System.Numerics.BitOperations.TrailingZeroCount(rest);
+                rest &= rest - 1;
+                if (!GetPadOutputEnable(pin)) continue;
+                driven |= 1u << pin;
+                if (GetPadOutputLevel(pin)) w |= 1u << pin;
+            }
+        }
+
+        return w | (_externalInput & ~driven & GpioMask);
+    }
+
+    private const uint GpioMask = (1u << GPIO_COUNT) - 1;
 
     /// <summary>Drive a pad's input from an off-chip device (the pad's external connection). Identical to
     /// <see cref="UpdatePinInput"/> but named for the external-device direction.</summary>
@@ -140,9 +201,8 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         return _ctrl[pin] & FUNCSEL_MASK;
     }
 
-    /// <summary>The level the pad is driven to after the GPIO function mux. SIO and the
-    /// two PIO functions are modelled; other peripheral functions report <c>false</c>
-    /// (PWM is reproduced element-side via the PWM registers). Pairs with
+    /// <summary>The level the pad is driven to after the GPIO function mux. SIO, PWM and the
+    /// two PIO functions are modelled; other peripheral functions report <c>false</c>. Pairs with
     /// <see cref="GetPadOutputEnable"/>.</summary>
     public bool GetPadOutputLevel(int pin)
     {
@@ -152,6 +212,11 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
             return (_sio.GpioOut & (1u << pin)) != 0;
         if (funcsel == FUNCSEL_PIO0 || funcsel == FUNCSEL_PIO1)
             return (_pioOut[funcsel - FUNCSEL_PIO0] & (1u << pin)) != 0;
+        if (funcsel == FUNCSEL_PWM && Pwm is { } pwm)
+        {
+            var (slice, channelB) = PwmChannelFor(pin);
+            return pwm.GetChannelOutput(slice, channelB);
+        }
         return false;
     }
 
@@ -164,6 +229,8 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
             return (_sio.GpioOe & (1u << pin)) != 0;
         if (funcsel == FUNCSEL_PIO0 || funcsel == FUNCSEL_PIO1)
             return (_pioOe[funcsel - FUNCSEL_PIO0] & (1u << pin)) != 0;
+        if (funcsel == FUNCSEL_PWM && Pwm is { } pwm)
+            return pwm.IsSliceEnabled(PwmChannelFor(pin).slice);
         return false;
     }
 
@@ -189,6 +256,12 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
 
         var old = _gpioInput[pin];
         _gpioInput[pin] = value;
+        if (old != value)
+        {
+            var bit = 1u << pin;
+            _externalInput = value ? _externalInput | bit : _externalInput & ~bit;
+            InvalidateInputWord();
+        }
 
         // The pad input buffer feeds SIO GPIO_IN regardless of the pin's function select, so a value an
         // off-chip device drives onto a pad (e.g. the CYW43439 raising its DATA-line host-wake on GPIO24,
@@ -265,7 +338,21 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         {
             var pinPair = address >> 3;
             if (pinPair >= GPIO_COUNT) return;
-            if ((address & 4) != 0) _ctrl[pinPair] = value;
+            if ((address & 4) != 0)
+            {
+                _ctrl[pinPair] = value;
+                var bit = 1u << (int)pinPair;
+                var fn = value & FUNCSEL_MASK;
+                _pwmMuxedPins = fn == FUNCSEL_PWM  ? _pwmMuxedPins | bit : _pwmMuxedPins & ~bit;
+                _sioPins      = fn == FUNCSEL_SIO  ? _sioPins      | bit : _sioPins      & ~bit;
+                _pio0Pins     = fn == FUNCSEL_PIO0 ? _pio0Pins     | bit : _pio0Pins     & ~bit;
+                _pio1Pins     = fn == FUNCSEL_PIO1 ? _pio1Pins     | bit : _pio1Pins     & ~bit;
+                // Re-muxing a pad changes what it drives without SIO or the PIO moving, so the change
+                // has to be announced here. It used to be caught incidentally, because every GPIO write
+                // re-evaluated all 30 pads; with only the changed pins re-evaluated, nothing else would
+                // ever notice a pin being switched to (or away from) its peripheral function.
+                NotifyPads(bit);
+            }
             // STATUS is read-only
             return;
         }

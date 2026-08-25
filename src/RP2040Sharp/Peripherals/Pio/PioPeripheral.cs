@@ -93,8 +93,8 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
     // FIFO helpers that notify the DREQ-resume hooks. Over-notifying is safe: ResumeDreq is
     // reentrancy-guarded and a no-op unless a channel is stalled on that exact DREQ with the source ready.
-    private void RxEnqueue(PioStateMachine sm, uint value) { sm.RxFifo.Enqueue(value); OnRxPush?.Invoke(sm.SmIndex, value); }
-    private uint TxDequeue(PioStateMachine sm) { var v = sm.TxFifo.Dequeue(); OnTxConsumed?.Invoke(sm.SmIndex); return v; }
+    private void RxEnqueue(PioStateMachine sm, uint value) { Mutated(); sm.RxFifo.Enqueue(value); OnRxPush?.Invoke(sm.SmIndex, value); }
+    private uint TxDequeue(PioStateMachine sm) { Mutated(); var v = sm.TxFifo.Dequeue(); OnTxConsumed?.Invoke(sm.SmIndex); return v; }
 
     public uint Size => 0x100000;  // up to 1 MB address space per block
 
@@ -146,7 +146,24 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             sm.FracAccum %= divisor;
 
             for (var i = 0L; i < steps; i++)
+            {
+                var pcBefore = sm.PC;
                 ExecuteStep(sm, s);
+
+                // A blocked SM re-runs the same instruction every cycle. Under a bit-banged bus (the
+                // Pico W's gSPI) that is most of the emulator's work: 64% of all PIO steps in a WiFi
+                // transfer were a WAIT re-testing an unchanged condition. If the SM made no progress
+                // and nothing it can see has moved since, the rest of this tick would do the same, so
+                // skip it — the clock still advances, because FracAccum was already charged.
+                if (!StallSkipEnabled) continue;
+                if (!sm.Stalled || sm.PC != pcBefore) { sm.StallValid = false; continue; }
+
+                var inputs = ReadGpioIn?.Invoke() ?? sm.GpioPins;
+                if (sm.StallValid && sm.StallMutation == _mutation && sm.StallInputWord == inputs) break;
+                sm.StallInputWord = inputs;
+                sm.StallMutation = _mutation;
+                sm.StallValid = true;
+            }
         }
         CheckInterrupts();
     }
@@ -243,6 +260,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             var sm = _sm[smIdx];
             if (sm.TxFifo.Count < sm.TxDepth)
             {
+                Mutated();   // the CPU feeding TX can release an SM blocked on PULL
                 sm.TxFifo.Enqueue(value);
                 OnTxPush?.Invoke(smIdx, value);
                 // Clear TXSTALL for this SM now that TX FIFO has data
@@ -263,8 +281,8 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         {
             case REG_CTRL:      WriteCtrl(value); break;
             case REG_FDEBUG:    _fdebug &= ~value; break;  // write 1 to clear
-            case REG_IRQ:       _irq &= ~value; IrqUpdated(); break;       // write 1 to clear
-            case REG_IRQ_FORCE: _irq |= value & 0xFF; IrqUpdated(); break;
+            case REG_IRQ:       Mutated(); _irq &= ~value; IrqUpdated(); break;       // write 1 to clear
+            case REG_IRQ_FORCE: Mutated(); _irq |= value & 0xFF; IrqUpdated(); break;
             case REG_IRQ0_INTE: _irq0Inte = value & 0xFFF; CheckInterrupts(); break;
             case REG_IRQ0_INTF: _irq0Intf = value & 0xFFF; CheckInterrupts(); break;
             case REG_IRQ1_INTE: _irq1Inte = value & 0xFFF; CheckInterrupts(); break;
@@ -580,6 +598,25 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
     // ── Private: instruction execution ──────────────────────────────
 
+    /// <summary>
+    /// Bumped whenever a state machine does something another one could be waiting on: driving pins or
+    /// directions, moving an IRQ flag, or touching a FIFO. A stalled SM only re-tests its condition
+    /// when this (or the pins it reads) has changed.
+    /// </summary>
+    private long _mutation;
+
+    /// <summary>Something observable by another state machine changed.</summary>
+    private void Mutated() => _mutation++;
+
+    /// <summary>
+    /// Escape hatch for the stall skip (<c>RP2040SHARP_PIO_NO_STALL_SKIP=1</c>). The skip is meant to be
+    /// invisible — it only elides re-running a blocked instruction whose inputs have not moved — so
+    /// turning it off must produce byte-identical behaviour. Keeping the switch makes that testable,
+    /// and gives a first thing to try if a PIO program ever behaves oddly.
+    /// </summary>
+    private static readonly bool StallSkipEnabled =
+        Environment.GetEnvironmentVariable("RP2040SHARP_PIO_NO_STALL_SKIP") != "1";
+
     private void ExecuteStep(PioStateMachine sm, int smIdx)
     {
         // Burn delay cycles
@@ -693,6 +730,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         }
 
         // Propagate to physical GPIO (same as SET/OUT pin operations)
+        Mutated();
         if (sidePinDir)
             WriteGpioDirs?.Invoke(sm.GpioPinDirs, pinMask);
         else
@@ -766,7 +804,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
         sm.Stalled = !condition;
         if (condition && source == 2 && polarity == 1)
-            _irq &= ~(1u << irqFlagIdx);  // clear IRQ on successful WAIT IRQ
+            Mutated(); _irq &= ~(1u << irqFlagIdx);  // clear IRQ on successful WAIT IRQ
     }
 
     // IN: bits [7:5]=source, [4:0]=bit count (0=32)
@@ -864,7 +902,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask = bitCount < 32 ? ((1u << bitCount) - 1) << outBase : 0xFFFFFFFFu;
                 var pinValue = (data & (bitCount < 32 ? (1u << bitCount) - 1 : 0xFFFFFFFFu)) << outBase;
                 sm.GpioPins = (sm.GpioPins & ~pinMask) | pinValue;
-                WriteGpioPins?.Invoke(pinValue, pinMask);
+                Mutated(); WriteGpioPins?.Invoke(pinValue, pinMask);
                 break;
             }
             case 1: sm.X = data; break;
@@ -875,7 +913,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask = bitCount < 32 ? ((1u << bitCount) - 1) << outBase : 0xFFFFFFFFu;
                 var pinValue = (data & (bitCount < 32 ? (1u << bitCount) - 1 : 0xFFFFFFFFu)) << outBase;
                 sm.GpioPinDirs = (sm.GpioPinDirs & ~pinMask) | pinValue;
-                WriteGpioDirs?.Invoke(pinValue, pinMask);
+                Mutated(); WriteGpioDirs?.Invoke(pinValue, pinMask);
                 break;
             }
             case 5: sm.PC = data & 0x1F; sm.PcJumped = true; sm.Stalled = false; return;  // PC
@@ -983,7 +1021,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask  = outCount > 0 ? ((1u << outCount) - 1) << outBase : 0xFFFFFFFFu;
                 var pinValue = outCount > 0 ? (data & ((1u << outCount) - 1)) << outBase : data;
                 sm.GpioPins = (sm.GpioPins & ~pinMask) | pinValue;
-                WriteGpioPins?.Invoke(pinValue, pinMask);
+                Mutated(); WriteGpioPins?.Invoke(pinValue, pinMask);
                 break;
             }
             case 1: sm.X = data; break;
@@ -1018,10 +1056,12 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
         if (doClear)
         {
+            Mutated();
             _irq &= ~(1u << flagIdx);
         }
         else
         {
+            Mutated();
             _irq |= 1u << flagIdx;
         }
 
@@ -1045,7 +1085,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask  = setCount > 0 ? ((1u << setCount) - 1) << setBase : 0u;
                 var pinValue = setCount > 0 ? (data & ((1u << setCount) - 1)) << setBase : 0u;
                 sm.GpioPins = (sm.GpioPins & ~pinMask) | pinValue;
-                WriteGpioPins?.Invoke(pinValue, pinMask);
+                Mutated(); WriteGpioPins?.Invoke(pinValue, pinMask);
                 break;
             }
             case 1: sm.X           = data; break;
@@ -1056,7 +1096,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask  = setCount > 0 ? ((1u << setCount) - 1) << setBase : 0u;
                 var pinValue = setCount > 0 ? (data & ((1u << setCount) - 1)) << setBase : 0u;
                 sm.GpioPinDirs = (sm.GpioPinDirs & ~pinMask) | pinValue;
-                WriteGpioDirs?.Invoke(pinValue, pinMask);
+                Mutated(); WriteGpioDirs?.Invoke(pinValue, pinMask);
                 break;
             }
         }
