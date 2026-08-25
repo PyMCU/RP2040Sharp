@@ -30,11 +30,13 @@ public sealed class CircuitPythonBootTests
         await using var runner = await CircuitPythonRunner.CreateAsync(version);
         if (runner is null) return;
 
-        for (var i = 0; i < 20 && !runner.UsbCdc.IsConnected; i++)
+        // 4 s, not 2: RunMilliseconds used to charge its budget in instructions while the timer
+        // advanced in cycles, so the old "2 s" handed the firmware nearly 3 s of simulated time.
+        for (var i = 0; i < 40 && !runner.UsbCdc.IsConnected; i++)
             runner.Simulation.RunMilliseconds(100);
 
         runner.UsbCdc.IsConnected.Should().BeTrue(
-            $"CircuitPython {version} USB CDC should complete enumeration within 2 s");
+            $"CircuitPython {version} USB CDC should complete enumeration within 4 s");
     }
 
     // ── REPL prompt ───────────────────────────────────────────────────────────

@@ -161,7 +161,12 @@ public class RP2040TestSimulation : IDisposable
         {
             var batch = (int)Math.Min(cycles, BatchSize);
             Machine.Run(batch);
-            cycles -= batch;
+            // Machine.Run's budget counts INSTRUCTIONS; the timer advances on CYCLES, and real code
+            // averages well over one cycle per instruction. Charging the budget instead of what was
+            // actually spent made "run 100 ms" hand the firmware ~143 ms of simulated time under
+            // load (and exactly 100 ms only when the core sat in WFE, where the two coincide).
+            var spent = Machine.LastElapsedCycles;
+            cycles -= spent > 0 ? spent : batch;
         }
         return this;
     }
