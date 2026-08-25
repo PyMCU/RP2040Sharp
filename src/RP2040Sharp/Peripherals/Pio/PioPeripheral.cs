@@ -130,41 +130,108 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
     public void Tick(long deltaCycles)
     {
+        // State machines run in LOCKSTEP: every SM due this cycle advances one instruction, then the
+        // next cycle begins. Running each SM's whole allowance before starting the next one (the old
+        // model) is not the same machine when two of them interact — whichever ran first got to see
+        // the other's entire tick, so a two-SM ping-pong came out lopsided instead of symmetric.
+        var maxSteps = BeginTick(deltaCycles);
+        for (var round = 0L; round < maxSteps; round++)
+        {
+            SnapshotIrq();
+            StepRound(round);
+        }
+        EndTick();
+    }
+
+    /// <summary>Clock divisor in x256 units: bits[31:16]=integer (0 means 65536), bits[15:8]=frac.</summary>
+    private static long Divisor(uint clkDiv)
+    {
+        var divInt = (int)((clkDiv >> 16) & 0xFFFF);
+        if (divInt == 0) divInt = 65536;
+        return divInt * 256 + (int)((clkDiv >> 8) & 0xFF);
+    }
+
+    /// <summary>Block-global divider phase, in x256 cycle units. Every SM measures its own divider
+    /// edges against this one clock, so identical CLKDIVs stay in step no matter when each was
+    /// enabled — a per-SM remainder let them drift a fraction of a cycle apart.</summary>
+    private long _clkAccum;
+    private readonly long[] _stepsBuf = new long[SM_COUNT];
+
+    /// <summary>Work out how many cycles each enabled SM owes this tick; returns the largest, which is
+    /// the number of lockstep rounds to run.</summary>
+    private long BeginTick(long cycles)
+    {
+        _clkAccum += cycles * 256;
+
+        var maxSteps = 0L;
         for (var s = 0; s < SM_COUNT; s++)
         {
             var sm = _sm[s];
-            if (!sm.Enabled) continue;
+            if (!sm.Enabled) { _stepsBuf[s] = 0; continue; }
 
-            // Clock divisor: bits[31:16]=integer (0=65536), bits[15:8]=frac
-            var divInt  = (int)((sm.ClkDiv >> 16) & 0xFFFF);
-            var divFrac = (int)((sm.ClkDiv >> 8) & 0xFF);
-            if (divInt == 0) divInt = 65536;
+            var edgesNow = _clkAccum / Divisor(sm.ClkDiv);
+            _stepsBuf[s] = edgesNow - sm.DivEdgesSeen;
+            sm.DivEdgesSeen = edgesNow;
+            if (_stepsBuf[s] > maxSteps) maxSteps = _stepsBuf[s];
+        }
+        return maxSteps;
+    }
 
-            var divisor = divInt * 256 + divFrac;
-            sm.FracAccum += deltaCycles * 256;
-            var steps = sm.FracAccum / divisor;
-            sm.FracAccum %= divisor;
+    /// <summary>Re-base a SM's edge count to the current phase, so enabling it (or changing its
+    /// CLKDIV) starts from the next edge instead of bursting to catch up edges it never ran.</summary>
+    private void RebaseDivider(PioStateMachine sm) => sm.DivEdgesSeen = _clkAccum / Divisor(sm.ClkDiv);
 
-            for (var i = 0L; i < steps; i++)
+    /// <summary>
+    /// IRQ flags as they stood at the start of this cycle. WAIT IRQ tests against the latch, not the
+    /// live flags, so a flag raised by another SM in the SAME cycle is not seen until the next one —
+    /// the registered latency silicon has. Without it, whichever SM happens to step second in a round
+    /// sees the first's flag with zero delay while the reverse still costs a cycle.
+    /// </summary>
+    private uint _irqSnapshot;
+
+    private void SnapshotIrq() => _irqSnapshot = _irq;
+
+    private void StepRound(long round)
+    {
+        for (var s = 0; s < SM_COUNT; s++)
+        {
+            if (round >= _stepsBuf[s]) continue;
+            var sm = _sm[s];
+
+            // A blocked SM re-runs the same instruction every cycle. Under a bit-banged bus that is
+            // most of the emulator's work and none of it changes anything: 64% of all PIO steps in a
+            // WiFi transfer were a WAIT re-testing an unchanged condition. Skipping the round costs
+            // nothing in fidelity — BeginTick already accounted for the divider edge.
+            if (StallSkipEnabled && sm.StallValid)
             {
-                var pcBefore = sm.PC;
-                ExecuteStep(sm, s);
+                var inputsNow = ReadGpioIn?.Invoke() ?? sm.GpioPins;
+                if (sm.StallMutation == _mutation && sm.StallInputWord == inputsNow
+                                                  && sm.StallIrq == _irqSnapshot)
+                    continue;
+            }
 
-                // A blocked SM re-runs the same instruction every cycle. Under a bit-banged bus (the
-                // Pico W's gSPI) that is most of the emulator's work: 64% of all PIO steps in a WiFi
-                // transfer were a WAIT re-testing an unchanged condition. If the SM made no progress
-                // and nothing it can see has moved since, the rest of this tick would do the same, so
-                // skip it — the clock still advances, because FracAccum was already charged.
-                if (!StallSkipEnabled) continue;
-                if (!sm.Stalled || sm.PC != pcBefore) { sm.StallValid = false; continue; }
+            var pcBefore = sm.PC;
+            ExecuteStep(sm, s);
 
-                var inputs = ReadGpioIn?.Invoke() ?? sm.GpioPins;
-                if (sm.StallValid && sm.StallMutation == _mutation && sm.StallInputWord == inputs) break;
-                sm.StallInputWord = inputs;
+            if (sm.Stalled && sm.PC == pcBefore)
+            {
+                sm.StallInputWord = ReadGpioIn?.Invoke() ?? sm.GpioPins;
                 sm.StallMutation = _mutation;
+                sm.StallIrq = _irqSnapshot;
                 sm.StallValid = true;
             }
+            else
+            {
+                sm.StallValid = false;
+            }
         }
+    }
+
+    /// <summary>Resync the latch to the live flags (so reads outside a tick see the current value)
+    /// and re-level the interrupt lines at tick end.</summary>
+    private void EndTick()
+    {
+        _irqSnapshot = _irq;
         CheckInterrupts();
     }
 
@@ -213,6 +280,8 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             REG_CTRL        => BuildCtrl(),
             REG_FSTAT       => BuildFstat(),
             REG_FDEBUG      => _fdebug,
+            REG_DBG_PADOUT  => _dbgPadOut,
+            REG_DBG_PADOE   => _dbgPadOe,
             REG_FLEVEL      => BuildFlevel(),
             REG_IRQ         => _irq,
             REG_IRQ_FORCE   => 0,
@@ -451,7 +520,13 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     {
         // Bits [3:0]: SM_ENABLE
         for (var i = 0; i < SM_COUNT; i++)
-            _sm[i].Enabled = (value & (1u << i)) != 0;
+        {
+            var enable = (value & (1u << i)) != 0;
+            // Coming out of disabled, start from the next divider edge rather than bursting through
+            // the edges that passed while the SM was off.
+            if (enable && !_sm[i].Enabled) RebaseDivider(_sm[i]);
+            _sm[i].Enabled = enable;
+        }
 
         // Bits [7:4]: SM_RESTART — reset PC and shift state.
         // rp2040js restart(): inputShiftCount=0, outputShiftCount=32 (full), waiting=false.
@@ -575,7 +650,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         var sm    = _sm[smIdx];
         switch (reg)
         {
-            case SM_OFF_CLKDIV:    sm.ClkDiv    = value; break;
+            case SM_OFF_CLKDIV:    sm.ClkDiv    = value; RebaseDivider(sm); break;
             // EXECCTRL bit 31 (EXEC_STALLED) is read-only hardware status;
             // writes must preserve it (rp2040js: execCtrl = (value & 0x7FFFFFFF) | (execCtrl & 0x80000000)).
             case SM_OFF_EXECCTRL:  sm.ExecCtrl  = (value & 0x7FFFFFFFu) | (sm.ExecCtrl & 0x80000000u); break;
@@ -607,6 +682,29 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
     /// <summary>Something observable by another state machine changed.</summary>
     private void Mutated() => _mutation++;
+
+    // DBG_PADOUT / DBG_PADOE: the level and output-enable this block drives onto its GPIOs. These are
+    // exactly the registers you reach for to confirm a state machine is driving a pin, and they were
+    // declared but never served — the read fell through to 0, which actively misleads PIO debugging.
+    // Latching them wherever a pad write happens keeps them and IO_BANK0 from ever disagreeing,
+    // including pindirs applied to a still-disabled SM through SM_INSTR (pico-sdk's
+    // set_consecutive_pindirs-before-enable flow, which silicon drives too).
+    private uint _dbgPadOut;
+    private uint _dbgPadOe;
+
+    private void DriveGpioPins(uint value, uint mask)
+    {
+        Mutated();
+        _dbgPadOut = (_dbgPadOut & ~mask) | (value & mask);
+        WriteGpioPins?.Invoke(value, mask);
+    }
+
+    private void DriveGpioDirs(uint value, uint mask)
+    {
+        Mutated();
+        _dbgPadOe = (_dbgPadOe & ~mask) | (value & mask);
+        WriteGpioDirs?.Invoke(value, mask);
+    }
 
     /// <summary>
     /// Escape hatch for the stall skip (<c>RP2040SHARP_PIO_NO_STALL_SKIP=1</c>). The skip is meant to be
@@ -732,9 +830,9 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         // Propagate to physical GPIO (same as SET/OUT pin operations)
         Mutated();
         if (sidePinDir)
-            WriteGpioDirs?.Invoke(sm.GpioPinDirs, pinMask);
+            DriveGpioDirs(sm.GpioPinDirs, pinMask);
         else
-            WriteGpioPins?.Invoke(sm.GpioPins, pinMask);
+            DriveGpioPins(sm.GpioPins, pinMask);
     }
 
     private void ExecuteInstr(PioStateMachine sm, ushort instr, int opcode)
@@ -798,7 +896,10 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         {
             0 => (((ReadGpioIn?.Invoke() ?? sm.GpioPins) >> (int)index) & 1) == polarity,  // GPIO (absolute)
             1 => (((ReadGpioIn?.Invoke() ?? sm.GpioPins) >> (int)((index + sm.InBase) & 0x1F)) & 1) == polarity,  // PIN relative to IN_BASE
-            2 => ((_irq >> irqFlagIdx) & 1) == polarity,   // IRQ flag
+            // Against the start-of-cycle latch, not the live flags: a flag another SM raises in this
+            // same cycle only becomes visible next cycle, which is the latency silicon has and what
+            // keeps a two-SM handshake symmetric regardless of the order they step in a round.
+            2 => ((_irqSnapshot >> irqFlagIdx) & 1) == polarity,   // IRQ flag
             _ => EmuStrict.NoteRet ("pio.wait.src-reserved", $"src={source}", true),  // 3 = reserved
         };
 
@@ -902,7 +1003,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask = bitCount < 32 ? ((1u << bitCount) - 1) << outBase : 0xFFFFFFFFu;
                 var pinValue = (data & (bitCount < 32 ? (1u << bitCount) - 1 : 0xFFFFFFFFu)) << outBase;
                 sm.GpioPins = (sm.GpioPins & ~pinMask) | pinValue;
-                Mutated(); WriteGpioPins?.Invoke(pinValue, pinMask);
+                DriveGpioPins(pinValue, pinMask);
                 break;
             }
             case 1: sm.X = data; break;
@@ -913,7 +1014,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask = bitCount < 32 ? ((1u << bitCount) - 1) << outBase : 0xFFFFFFFFu;
                 var pinValue = (data & (bitCount < 32 ? (1u << bitCount) - 1 : 0xFFFFFFFFu)) << outBase;
                 sm.GpioPinDirs = (sm.GpioPinDirs & ~pinMask) | pinValue;
-                Mutated(); WriteGpioDirs?.Invoke(pinValue, pinMask);
+                DriveGpioDirs(pinValue, pinMask);
                 break;
             }
             case 5: sm.PC = data & 0x1F; sm.PcJumped = true; sm.Stalled = false; return;  // PC
@@ -1021,7 +1122,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask  = outCount > 0 ? ((1u << outCount) - 1) << outBase : 0xFFFFFFFFu;
                 var pinValue = outCount > 0 ? (data & ((1u << outCount) - 1)) << outBase : data;
                 sm.GpioPins = (sm.GpioPins & ~pinMask) | pinValue;
-                Mutated(); WriteGpioPins?.Invoke(pinValue, pinMask);
+                DriveGpioPins(pinValue, pinMask);
                 break;
             }
             case 1: sm.X = data; break;
@@ -1085,7 +1186,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask  = setCount > 0 ? ((1u << setCount) - 1) << setBase : 0u;
                 var pinValue = setCount > 0 ? (data & ((1u << setCount) - 1)) << setBase : 0u;
                 sm.GpioPins = (sm.GpioPins & ~pinMask) | pinValue;
-                Mutated(); WriteGpioPins?.Invoke(pinValue, pinMask);
+                DriveGpioPins(pinValue, pinMask);
                 break;
             }
             case 1: sm.X           = data; break;
@@ -1096,7 +1197,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 var pinMask  = setCount > 0 ? ((1u << setCount) - 1) << setBase : 0u;
                 var pinValue = setCount > 0 ? (data & ((1u << setCount) - 1)) << setBase : 0u;
                 sm.GpioPinDirs = (sm.GpioPinDirs & ~pinMask) | pinValue;
-                Mutated(); WriteGpioDirs?.Invoke(pinValue, pinMask);
+                DriveGpioDirs(pinValue, pinMask);
                 break;
             }
         }

@@ -356,7 +356,11 @@ public sealed class RP2040Machine : IDisposable
 
         // ── PIO GPIO integration ───────────────────────────────────────────
         // Shared helpers: read physical GPIO levels; update SIO output and notify IoBank0
-        uint ReadGpio() => Sio.GpioIn | Sio.GpioOut;
+        // The PIO samples the PAD, not a guess: `in pins`, `wait gpio/pin` and `jmp pin` read what the
+        // pin is actually at, which may be driven by another SM, by a peripheral, or by an off-chip
+        // device (SetExternalInput). OR-ing SIO's input and output words instead reported a 1 whenever
+        // either said so, so a pad driven low by one source read high because the other still held it.
+        uint ReadGpio() => IoBank0.GetInputWord();
 
         void ApplyPins(int block, uint value, uint mask)
         {

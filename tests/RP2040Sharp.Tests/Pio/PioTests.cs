@@ -250,8 +250,8 @@ public abstract class PioTests
     public class FifoJoin
     {
         private const uint SM0_SHIFTCTRL = 0x0D0;
-        private const uint FJOIN_TX = 1u << 31;  // double TX to 8 entries
-        private const uint FJOIN_RX = 1u << 30;  // double RX to 8 entries
+        private const uint FJOIN_TX = 1u << 30;  // SHIFTCTRL bit 30 (pico-sdk PIO_SM0_SHIFTCTRL_FJOIN_TX_LSB)
+        private const uint FJOIN_RX = 1u << 31;  // SHIFTCTRL bit 31 (pico-sdk PIO_SM0_SHIFTCTRL_FJOIN_RX_LSB)
 
         [Fact]
         public void FJOIN_TX_allows_8_entries_in_TX_FIFO()
