@@ -206,7 +206,8 @@ public static class SystemOps
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Sev(ushort opcode, CortexM0Plus cpu)
     {
-        cpu.Registers.EventRegistered = true;
+        // SEV is cluster-wide: it sets the event register of BOTH cores, not just the issuer.
+        cpu.SignalEvent();
     }
 
     // ================================================================

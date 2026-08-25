@@ -117,6 +117,11 @@ public sealed class RP2040Machine : IDisposable
         Cpu  = new CortexM0Plus(Bus) { CoreId = 0 };
         Cpu1 = new CortexM0Plus(Bus) { CoreId = 1 };
 
+        // Every shared peripheral IRQ line reaches both interrupt controllers on silicon, and SEV
+        // is an event for the whole cluster — pair the cores so neither is invisible to the other.
+        Cpu.SiblingCore  = Cpu1;
+        Cpu1.SiblingCore = Cpu;
+
         // ── PPB (0xE) ────────────────────────────────────────────────────
         Ppb  = new PpbPeripheral(Cpu);
         Ppb1 = new PpbPeripheral(Cpu1);
@@ -164,6 +169,7 @@ public sealed class RP2040Machine : IDisposable
         // PADS_BANK0 @ 0x4001C000 (slot 7), PADS_QSPI @ 0x40020000 (slot 8)
         PadsBank0 = new PadsPeripheral();
         apb.Register(0x4001C000, PadsBank0);
+        Sio.PadsBank0 = PadsBank0;   // floating inputs settle on their pull resistor
 
         PadsQspi = new PadsPeripheral();
         apb.Register(0x40020000, PadsQspi);
@@ -212,6 +218,7 @@ public sealed class RP2040Machine : IDisposable
         // PWM @ 0x40050000 (slot 20)
         Pwm = new PwmPeripheral(Cpu);
         apb.Register(0x40050000, Pwm);
+        IoBank0.Pwm = Pwm;   // let a pad muxed to PWM report the channel level it is driving
 
         // B-pin inputs for the PWM gated/edge-count DIVMODEs: odd GPIOs muxed to PWM (FUNCSEL 4)
         // feed slice (pin >> 1) & 7 — what CircuitPython's countio counts.
@@ -271,7 +278,10 @@ public sealed class RP2040Machine : IDisposable
         // pico-sdk's irq_set_enabled does ICPR then ISER, the USB level-triggered
         // IRQ is re-asserted correctly (see: NVIC_ICPR clears pending bit, but
         // hardware IRQ line stays asserted — we simulate this via RecheckInterrupts).
-        Ppb.OnInterruptEnable += Usb.RecheckInterrupts;
+        // Core 1's NVIC gets the same treatment: a driver that enables USBCTRL_IRQ there must
+        // see the still-asserted line re-latched, exactly as Core 0 does.
+        Ppb.OnInterruptEnable  += Usb.RecheckInterrupts;
+        Ppb1.OnInterruptEnable += Usb.RecheckInterrupts;
 
         // When firmware resets the USBCTRL block (rp2040_usb_init → reset_block/unreset_block),
         // reset the USB peripheral emulator state so the next CONTROLLER_EN write re-triggers
@@ -351,7 +361,7 @@ public sealed class RP2040Machine : IDisposable
         void ApplyPins(int block, uint value, uint mask)
         {
             // PIO output: update SIO GpioIn so physical level is visible to CPU reads
-            Sio.GpioIn = (Sio.GpioIn & ~mask) | (value & mask);
+            Sio.DriveGpioIn(value, mask);
             // Route to the GPIO function mux so a pad muxed to PIO reflects the SM output
             // (the level a circuit host reads via IoBank0.GetPadOutputLevel).
             IoBank0.SetPioOut(block, value, mask);
@@ -405,7 +415,11 @@ public sealed class RP2040Machine : IDisposable
             // The ROM images ship without their float library (see BootromFloat and
             // NOTICE.txt): install native implementations behind the 'SF'/'SD' tables so
             // firmware that resolves them through rom_data_lookup keeps working.
+            // Both cores, not just Core 0: the stripped window is filled with BKPT, so a Core 1
+            // thread doing float work (MicroPython's _thread + time.sleep(float)) would execute
+            // it and HardFault straight into lockup.
             BootromFloat.Install(Cpu, Bus.PtrBootRom);
+            BootromFloat.Install(Cpu1, Bus.PtrBootRom);
 
             if (TryFindVectorTable(Bus.PtrFlash, (int)image.Length, out var sp, out var resetPc,
                     out var vectorTableOffset))
@@ -420,6 +434,13 @@ public sealed class RP2040Machine : IDisposable
             // addresses so MicroPython's LittleFS formatter can modify emulated flash.
             Cpu.RegisterNativeHook(0x237C, FlashEraseHook);
             Cpu.RegisterNativeHook(0x23C4, FlashProgramHook);
+            Cpu1.RegisterNativeHook(0x237C, FlashEraseHook);
+            Cpu1.RegisterNativeHook(0x23C4, FlashProgramHook);
+
+            // Where Core 1 lands when its entry function returns (see LaunchCore1).
+            _core1WaitForVector = RomFuncLookup(Bus.PtrBootRom, 'W', 'V');
+            if (_core1WaitForVector != 0)
+                Cpu1.RegisterNativeHook(_core1WaitForVector & ~1u, Core1ReturnedToBootrom);
         }
 
         Cpu.Reset();
@@ -966,8 +987,54 @@ public sealed class RP2040Machine : IDisposable
         Cpu1.Registers.VTOR = vtor;
         Cpu1.Registers.SP   = sp;
         Cpu1.Registers.PC   = entry & 0xFFFFFFFEu; // strip Thumb bit
+        // The bootrom branches to the received entry point with LR still pointing at its own
+        // wait_for_vector loop, so a Core 1 entry function that RETURNS lands back in the bootrom
+        // and waits for the next launch. pico-sdk relies on that: core1_wrapper() is a plain
+        // `push {r4, lr}` … `pop {r4, pc}` function, so MicroPython's _thread ends by returning
+        // through it. Leaving LR at its reset value pops PC = 0 instead, and since MicroPython's
+        // HardFault handler is a bkpt, every finished thread ended in lockup.
+        if (_core1WaitForVector != 0)
+            Cpu1.Registers.LR = _core1WaitForVector;
         // The Run() loop will auto-update the fetch cache on the first instruction.
         _core1Launched = true;
+    }
+
+    /// <summary>Bootrom <c>wait_for_vector</c> ('W','V'), Thumb-encoded; 0 when the ROM lacks it.</summary>
+    private uint _core1WaitForVector;
+
+    /// <summary>
+    /// Core 1's entry function returned into the bootrom's <c>wait_for_vector</c> loop. That loop's
+    /// side of the §2.8.3 handshake is what <see cref="SioPeripheral"/> already plays, so rather
+    /// than execute it we park Core 1: it stops stepping until the next launch sequence, which is
+    /// exactly what "sitting in the bootrom waiting for a vector" looks like from Core 0.
+    /// </summary>
+    private void Core1ReturnedToBootrom(CortexM0Plus cpu)
+    {
+        _core1Launched = false;
+        Sio.ResetMulticoreLaunch();
+        // wait_for_vector is a WFE loop, so park Core 1 in it rather than let the hook's automatic
+        // `PC = LR` carry it back into the finished thread. LR points at the loop too, which keeps
+        // the core in place for the rest of the batch already in flight — Run() bails out of a
+        // waiting core on its next step, and Machine.Run stops stepping it once launched is clear.
+        cpu.Registers.LR = _core1WaitForVector;
+        cpu.Registers.EventRegistered = false;
+        cpu.Registers.Waiting = true;
+    }
+
+    /// <summary>
+    /// Resolves a bootrom function address through the ROM's own function table (pointer at offset
+    /// 0x14), mirroring <c>rom_func_lookup</c>. Returns the Thumb-encoded address, or 0 if absent.
+    /// </summary>
+    private static unsafe uint RomFuncLookup(byte* rom, char a, char b)
+    {
+        var code = (ushort)(a | (b << 8));
+        for (int p = rom[0x14] | (rom[0x15] << 8); p < 16 * 1024 - 4; p += 4)
+        {
+            var entry = (ushort)(rom[p] | (rom[p + 1] << 8));
+            if (entry == 0) break;
+            if (entry == code) return (uint)(rom[p + 2] | (rom[p + 3] << 8));
+        }
+        return 0;
     }
 
     /// <summary>

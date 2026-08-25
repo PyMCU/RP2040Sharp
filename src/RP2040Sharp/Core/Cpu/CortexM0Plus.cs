@@ -551,15 +551,50 @@ public sealed unsafe class CortexM0Plus
     // Interrupt / Exception management (called by PPB peripheral)
     // ================================================================
 
+    /// <summary>
+    /// The other processor. On silicon a system peripheral's IRQ line is wired to BOTH cores'
+    /// interrupt controllers (RP2040 datasheet §2.3.2): each NVIC independently enables or masks
+    /// it, and a core that has it disabled simply latches a pending bit it never takes. Without
+    /// the peer, an ISR registered on Core 1 — or a Core 1 <c>WFE</c> waiting for a timer alarm,
+    /// which is what <c>_thread</c> + <c>time.sleep()</c> comes down to — is never woken.
+    /// SEV also crosses here: it is an event for the whole cluster, not for the issuing core.
+    /// </summary>
+    public CortexM0Plus? SiblingCore;
+
+    /// <summary>
+    /// SIO_IRQ_PROC0 / SIO_IRQ_PROC1: the only two RP2040 IRQ numbers that are per-core rather
+    /// than shared, so they must NOT reach the other core's NVIC.
+    /// </summary>
+    private const int IRQ_SIO_PROC0 = 15, IRQ_SIO_PROC1 = 16;
+
     public void SetInterrupt(int irq, bool pending)
     {
         if (irq is < 0 or > 25) return;
+        if (irq is not (IRQ_SIO_PROC0 or IRQ_SIO_PROC1))
+            SiblingCore?.SetInterruptLine(irq, pending);
+        SetInterruptLine(irq, pending);
+    }
+
+    /// <summary>Drives this core's NVIC line only — never crosses to the sibling.</summary>
+    private void SetInterruptLine(int irq, bool pending)
+    {
         var bit = 1u << irq;
         if (pending)
             Registers.PendingInterrupts |= bit;
         else
             Registers.PendingInterrupts &= ~bit;
         Registers.InterruptsUpdated = true;
+    }
+
+    /// <summary>
+    /// SEV: sets the event register of every processor in the cluster (ARMv6-M §B1.5.19). On the
+    /// RP2040 this is how pico-sdk's alarm callback (<c>sleep_until_callback</c> → <c>__sev()</c>,
+    /// serviced on Core 0) releases the other core from <c>best_effort_wfe_or_timeout</c>'s WFE.
+    /// </summary>
+    public void SignalEvent()
+    {
+        Registers.EventRegistered = true;
+        if (SiblingCore is { } peer) peer.Registers.EventRegistered = true;
     }
 
     public void TriggerNmi() { Registers.PendingNMI = true; Registers.InterruptsUpdated = true; }
