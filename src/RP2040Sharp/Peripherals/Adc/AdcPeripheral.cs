@@ -157,12 +157,26 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
         WriteWord(aligned, (ReadWord(aligned) & ~(0xFFu << shift)) | ((uint)value << shift));
     }
 
+    /// <summary>AINSEL value that selects the internal temperature sensor.</summary>
+    private const int TEMP_SENSOR_CHANNEL = 4;
+
+    /// <summary>CS.TS_EN — powers the temperature sensor.</summary>
+    private const uint CS_TS_EN = 1u << 1;
+
+    /// <summary>12-bit code for Vbe = 0.706 V on a 3.3 V reference, i.e. 27 °C (datasheet §4.9.5).</summary>
+    private const ushort TempSensor27C = 876;
+
     private void PerformConversion()
     {
         var channel = (int)((_cs >> 12) & 0x7);
         if (channel >= CHANNEL_COUNT) channel = 0;
 
-        _result = ReadChannel?.Invoke(channel) ?? 0;
+        // Channel 4 is the on-die temperature sensor, not a pin: with no provider it must still read
+        // like silicon or every temperature reading comes out as hundreds of degrees. §4.9.5 gives
+        // Vbe = 0.706 V at 27 °C, which is code 0.706/3.3 * 4096 = 876 — what adc/temperature.py
+        // turns back into ~27 °C. TS_EN (CS bit 1) gates it, as on hardware.
+        _result = ReadChannel?.Invoke(channel)
+                  ?? (channel == TEMP_SENSOR_CHANNEL && (_cs & CS_TS_EN) != 0 ? TempSensor27C : (ushort)0);
         _result &= 0xFFF;
 
         // Clear START_ONCE (READY is always 1 in ReadWord, no need to set it here)

@@ -98,6 +98,13 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
     private readonly Queue<byte> _slaveTxFifo = new(FIFO_DEPTH);
 
     /// <summary>Called on each byte write: (targetAddress, data).</summary>
+    /// <summary>
+    /// Whether a device answers at the addressed 7-bit address. When null the bus is taken to hold a
+    /// device exactly when something is listening on <see cref="OnWrite"/> / <see cref="OnRead"/>.
+    /// An unanswered address NACKs, as silicon does — see <see cref="HandleDataCmd"/>.
+    /// </summary>
+    public Func<byte, bool>? DeviceResponds;
+
     public Action<byte, byte>? OnWrite;
 
     /// <summary>Called on each byte read request: (targetAddress) → rx byte.</summary>
@@ -247,12 +254,31 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
 
     private bool IsEnabled => (_enable & 1) != 0;
 
+    private bool DeviceAnswers(byte addr) =>
+        DeviceResponds?.Invoke(addr) ?? (OnWrite is not null || OnRead is not null);
+
     private void HandleDataCmd(uint value)
     {
         if (!IsEnabled) return;
 
         var isRead = (value & (1u << 8)) != 0;
         var addr   = (byte)(_tar & 0x7F);
+
+        // Nothing on the bus at this address: the address phase goes unacknowledged. Silicon raises
+        // TX_ABRT, and every driver waits for either that or a completed transfer — pico-sdk's
+        // i2c_write_blocking (and so MicroPython's I2C.scan()/writeto()) spins forever without it,
+        // which is what hung the i2c and sh1106 examples on an empty bus.
+        if (!_inSlaveTransmit && !DeviceAnswers(addr))
+        {
+            SignalAddressNack();
+            if ((value & (1u << 9)) != 0)
+            {
+                OnStop?.Invoke();
+                _rawIntr |= 1u << 9;   // STOP_DET still follows the aborted transfer
+                CheckInterrupts();
+            }
+            return;
+        }
 
         if (isRead)
         {
@@ -345,7 +371,10 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
     {
         _txAbrtSource |= ABRT_7B_ADDR_NOACK;
         _rawIntr      |= INTR_TX_ABRT;
-        // The abort flushes the TX FIFO on real hardware; our TX is already drained.
+        // The abort flushes the TX FIFO, which raises TX_EMPTY. Drivers wait on TX_EMPTY FIRST and
+        // only then read IC_TX_ABRT_SOURCE (pico-sdk's i2c_write_blocking_internal does exactly
+        // that), so raising TX_ABRT alone leaves them spinning on a flag that never comes.
+        _rawIntr      |= 1u << 4;   // TX_EMPTY
         CheckInterrupts();
     }
 
