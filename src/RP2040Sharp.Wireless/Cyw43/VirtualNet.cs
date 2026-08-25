@@ -15,7 +15,7 @@ namespace RP2040Sharp.Wireless.Cyw43;
 /// </summary>
 public sealed class VirtualNet
 {
-    private readonly Sdpcm _sdpcm;
+    private Sdpcm? _sdpcm;   // the first station attached; the delivery fallback when no MAC is known
 
     public byte[] GatewayMac { get; }
     public byte[] GatewayIp { get; }
@@ -73,18 +73,21 @@ public sealed class VirtualNet
     private int _nextLease = 2;
 
     public VirtualNet(Sdpcm sdpcm, byte[]? gatewayIp = null, byte[]? clientIp = null, byte[]? gatewayMac = null)
+        : this(gatewayIp, clientIp, gatewayMac) => AddDevice(sdpcm);
+
+    /// <summary>An empty LAN; attach stations with <see cref="AddDevice"/> as they are created.</summary>
+    public VirtualNet(byte[]? gatewayIp = null, byte[]? clientIp = null, byte[]? gatewayMac = null)
     {
-        _sdpcm = sdpcm;
         GatewayIp = gatewayIp ?? [192, 168, 4, 1];
         ClientIp = clientIp ?? [192, 168, 4, 2];
         GatewayMac = gatewayMac ?? [0x02, 0x00, 0x5E, 0x00, 0x04, 0x01];
-        AddDevice(sdpcm);
     }
 
     /// <summary>Attach another station (a second Pico 2 W) to the same virtual LAN. It gets its own
     /// DHCP lease and can exchange frames with the others through the L2 switch.</summary>
     public void AddDevice(Sdpcm sdpcm)
     {
+        _sdpcm ??= sdpcm;
         _devices.Add(sdpcm);
         sdpcm.OnHostEthernet += (itf, frame) => HandleGuestFrame(sdpcm, itf, frame);
     }
@@ -142,7 +145,7 @@ public sealed class VirtualNet
         Array.Copy(senderMac, 0, reply, 14 + 18, 6);
         Array.Copy(senderIp, 0, reply, 14 + 24, 4);
         _macToDevice.TryGetValue(MacKey(senderMac, 0), out var dev);
-        (dev ?? _sdpcm).EnqueueEthernet(itf, reply);
+        (dev ?? _sdpcm)?.EnqueueEthernet(itf, reply);
     }
 
     // ── IPv4 / UDP / DHCP ──────────────────────────────────────────────────
@@ -156,12 +159,106 @@ public sealed class VirtualNet
         if (proto == 17)                           // UDP
         {
             if (f.Length < l4 + 8) return;
-            if (Be16(f, l4 + 2) == 67) HandleDhcp(itf, f, l4 + 8); // DHCP server port
+            var dstPort = Be16(f, l4 + 2);
+            if (dstPort == 67) { HandleDhcp(itf, f, l4 + 8); return; }   // DHCP server port
+            HandleUdp(itf, f, ip, l4, dstPort);
         }
         else if (proto == 6)                       // TCP
         {
             HandleTcp(itf, f, ip, l4);
         }
+    }
+
+    // ── UDP services (DNS and anything else the guest dials) ────────────────
+
+    /// <summary>
+    /// Answer UDP on <paramref name="port"/>: the handler turns the received datagram into the reply
+    /// to send back (null = stay silent). This is what lets the guest use NTP, syslog, or its own
+    /// protocol — DHCP (67) and DNS (53) are served built-in and cannot be overridden here.
+    /// </summary>
+    public void ListenUdp(ushort port, Func<byte[], byte[]?> onDatagram) => _udpListeners[port] = onDatagram;
+
+    private readonly Dictionary<ushort, Func<byte[], byte[]?>> _udpListeners = new();
+
+    /// <summary>
+    /// Names the built-in DNS server resolves (the DHCP lease already points the guest here via
+    /// option 6). Anything not listed falls back to <see cref="DnsDefault"/>, or is answered NXDOMAIN.
+    /// </summary>
+    public readonly Dictionary<string, byte[]> DnsRecords = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Address for names not in <see cref="DnsRecords"/>; null answers NXDOMAIN instead.</summary>
+    public byte[]? DnsDefault;
+
+    /// <summary>Diagnostics: a DNS query arrived. Arguments: queried name, answer (null = NXDOMAIN).</summary>
+    public Action<string, byte[]?>? OnDnsQuery;
+
+    private void HandleUdp(int itf, byte[] f, int ipOff, int l4, ushort dstPort)
+    {
+        var payload = f[(l4 + 8)..];
+        var reply = dstPort == 53 ? BuildDnsReply(payload)
+                  : _udpListeners.TryGetValue(dstPort, out var h) ? h(payload)
+                  : null;
+        if (reply is not { Length: > 0 }) return;
+
+        var srcPort  = Be16(f, l4);
+        var clientIp = f[(ipOff + 12)..(ipOff + 16)];
+        var udp   = BuildUdp(dstPort, srcPort, reply);
+        var ipPkt = BuildIpv4(17, GatewayIp, clientIp, udp);
+        var frame = new byte[14 + ipPkt.Length];
+        WriteEthHeader(frame, f[6..12], GatewayMac, 0x0800);
+        Array.Copy(ipPkt, 0, frame, 14, ipPkt.Length);
+        _macToDevice.TryGetValue(MacKey(f, 6), out var dev);
+        (dev ?? _sdpcm)?.EnqueueEthernet(itf, frame);
+    }
+
+    /// <summary>
+    /// Minimal DNS responder: answers a single A-record question with one answer (name compressed to
+    /// the 0xC00C pointer at the question). Enough for getaddrinfo(), which is the gate every name-based
+    /// client (urequests, umqtt, ntptime) has to pass before it can open a socket.
+    /// </summary>
+    private byte[]? BuildDnsReply(byte[] q)
+    {
+        if (q.Length < 12) return null;
+        if ((q[2] & 0x80) != 0) return null;              // already a response
+        if (Be16(q, 4) != 1) return null;                 // exactly one question
+
+        // Walk the QNAME labels from offset 12.
+        var name = new System.Text.StringBuilder();
+        var o = 12;
+        while (o < q.Length && q[o] != 0)
+        {
+            int len = q[o];
+            if (len > 63 || o + 1 + len > q.Length) return null;   // compression/truncation: not ours
+            if (name.Length > 0) name.Append('.');
+            name.Append(System.Text.Encoding.ASCII.GetString(q, o + 1, len));
+            o += 1 + len;
+        }
+        if (o >= q.Length) return null;
+        o++;                                              // the root label
+        if (o + 4 > q.Length) return null;
+        var qtype = Be16(q, o);
+        var questionEnd = o + 4;
+
+        var answer = DnsRecords.TryGetValue(name.ToString(), out var ip) ? ip : DnsDefault;
+        OnDnsQuery?.Invoke(name.ToString(), qtype == 1 ? answer : null);
+        if (qtype != 1) answer = null;                    // only A records are modelled
+
+        var size = questionEnd + (answer is null ? 0 : 16);
+        var r = new byte[size];
+        Array.Copy(q, r, questionEnd);
+        r[2] = 0x81;                                       // QR=1, RD copied as 1
+        r[3] = (byte)(answer is null ? 0x83 : 0x80);       // NXDOMAIN (rcode 3) or NOERROR
+        r[6] = 0; r[7] = (byte)(answer is null ? 0 : 1);   // ANCOUNT
+        if (answer is null) return r;
+
+        var a = questionEnd;
+        r[a] = 0xC0; r[a + 1] = 0x0C;                      // NAME → pointer to the question
+        r[a + 2] = 0; r[a + 3] = 1;                        // TYPE  = A
+        r[a + 4] = 0; r[a + 5] = 1;                        // CLASS = IN
+        r[a + 6] = 0; r[a + 7] = 0; r[a + 8] = 0; r[a + 9] = 60;   // TTL = 60 s
+        r[a + 10] = 0; r[a + 11] = 4;                      // RDLENGTH
+        Array.Copy(answer, 0, r, a + 12, 4);
+        return r;
     }
 
     private void HandleDhcp(int itf, byte[] f, int d)
@@ -193,7 +290,7 @@ public sealed class VirtualNet
         WriteEthHeader(frame, clientMac, GatewayMac, 0x0800);
         Array.Copy(ipPkt, 0, frame, 14, ipPkt.Length);
         _macToDevice.TryGetValue(MacKey(clientMac, 0), out var dev);
-        (dev ?? _sdpcm).EnqueueEthernet(itf, frame);
+        (dev ?? _sdpcm)?.EnqueueEthernet(itf, frame);
 
         if (replyType == 5) OnDhcpLeased?.Invoke(lease);
     }
@@ -213,9 +310,237 @@ public sealed class VirtualNet
     }
 
     // ── TCP client state machine ───────────────────────────────────────────
+    // ── TCP server (the guest connects out to us) ──────────────────────────
+
+    /// <summary>
+    /// Serve TCP on <paramref name="port"/> so the guest can <c>connect()</c> outwards — an HTTP
+    /// client, MQTT, NTP and anything else that dials a server rather than waiting to be dialled.
+    /// The handler turns the bytes received so far into the reply to send; return null (or empty) to
+    /// keep waiting for more of the request. Sending a reply also closes the connection.
+    /// </summary>
+    public void ListenTcp(ushort port, Func<byte[], byte[]?> onRequest) => _listeners[port] = onRequest;
+
+    /// <summary>An inbound connection delivered a request. Arguments: server port, bytes received.</summary>
+    public Action<ushort, byte[]>? OnServerRequest;
+
+    private sealed class InboundConn
+    {
+        public byte[] ClientIp = [], ClientMac = [];
+        public ushort ClientPort, ServerPort;
+        public int Itf;
+        public uint Seq, Ack;
+        public bool Established, Replied, RemoteClosed;
+        public readonly List<byte> Rx = [];
+        public System.Net.Sockets.Socket? Bridge;
+        public int ToRemote, FromRemote;
+    }
+
+    private readonly Dictionary<ushort, Func<byte[], byte[]?>> _listeners = new();
+    private readonly Dictionary<string, InboundConn> _inbound = new();
+
+    // ── Bridged ports: the virtual gateway relays to a real socket ─────────
+
+    /// <summary>
+    /// Relay TCP on <paramref name="localPort"/> to a real server. A guest connecting to the gateway on
+    /// that port is proxied byte-for-byte to <paramref name="remoteHost"/>:<paramref name="remotePort"/>,
+    /// so firmware can speak to services outside the simulation — a public MQTT broker, an HTTP API —
+    /// over its own TCP/IP stack rather than a stubbed one.
+    /// Call <see cref="Poll"/> from the run loop to pump traffic coming back the other way.
+    /// </summary>
+    public void BridgeTcp(ushort localPort, string remoteHost, int remotePort) =>
+        _bridges[localPort] = (remoteHost, remotePort);
+
+    /// <summary>Diagnostics: bytes relayed. Arguments: local port, to-remote count, from-remote count.</summary>
+    public Action<ushort, int, int>? OnBridgeTraffic;
+
+    private readonly Dictionary<ushort, (string Host, int Port)> _bridges = new();
+
+    /// <summary>
+    /// Move bytes waiting on the real sockets into the guest. Nothing else drives them: the simulation
+    /// is single-threaded, so the run loop has to give the bridge a turn.
+    /// </summary>
+    public void Poll()
+    {
+        foreach (var conn in _inbound.Values.ToArray())
+        {
+            var sock = conn.Bridge;
+            if (sock is null) continue;
+            try
+            {
+                while (sock.Connected && sock.Available > 0)
+                {
+                    var take = Math.Min(sock.Available, 512);   // one segment at a time; no MSS games
+                    var buf = new byte[take];
+                    var n = sock.Receive(buf, 0, take, System.Net.Sockets.SocketFlags.None);
+                    if (n <= 0) break;
+                    conn.FromRemote += n;
+                    SendTcpTo(conn, TCP_PSH | TCP_ACK, buf[..n]);
+                    conn.Seq += (uint)n;
+                    OnBridgeTraffic?.Invoke(conn.ServerPort, conn.ToRemote, conn.FromRemote);
+                }
+                if (!sock.Connected && !conn.RemoteClosed)
+                {
+                    conn.RemoteClosed = true;
+                    SendTcpTo(conn, TCP_FIN | TCP_ACK, []);
+                    conn.Seq += 1;
+                }
+            }
+            catch (System.Net.Sockets.SocketException) { CloseBridge(conn); }
+            catch (ObjectDisposedException) { CloseBridge(conn); }
+        }
+    }
+
+    private void CloseBridge(InboundConn conn)
+    {
+        try { conn.Bridge?.Close(); } catch { /* already gone */ }
+        conn.Bridge = null;
+        if (conn.RemoteClosed) return;
+        conn.RemoteClosed = true;
+        SendTcpTo(conn, TCP_FIN | TCP_ACK, []);
+        conn.Seq += 1;
+    }
+
+    private static string ConnKey(byte[] ip, ushort clientPort, ushort serverPort) =>
+        $"{ip[0]}.{ip[1]}.{ip[2]}.{ip[3]}:{clientPort}>{serverPort}";
+
+    /// <summary>Handles a segment addressed to a listening port. Returns false if nothing listens there.</summary>
+    private bool HandleInboundTcp(int itf, byte[] f, int ipOff, int tcpOff)
+    {
+        var srcPort = Be16(f, tcpOff);
+        var dstPort = Be16(f, tcpOff + 2);
+        var bridged = _bridges.ContainsKey(dstPort);
+        _listeners.TryGetValue(dstPort, out var handler);
+        if (!bridged && handler is null) return false;
+        handler ??= _ => null;
+
+        var clientIp  = f[(ipOff + 12)..(ipOff + 16)];
+        var clientMac = f[6..12];
+        var seq   = Be32(f, tcpOff + 4);
+        var flags = f[tcpOff + 13];
+        var dataOff    = (f[tcpOff + 12] >> 4) * 4;
+        var payloadOff = tcpOff + dataOff;
+        var payloadLen = ipOff + Be16(f, ipOff + 2) - payloadOff;
+        var key = ConnKey(clientIp, srcPort, dstPort);
+
+        if ((flags & TCP_RST) != 0) { _inbound.Remove(key); return true; }
+
+        if ((flags & TCP_SYN) != 0 && (flags & TCP_ACK) == 0)
+        {
+            // Passive open. Our ISN is arbitrary; the SYN we send occupies it, so data starts at ISN+1.
+            var fresh = new InboundConn
+            {
+                ClientIp = clientIp, ClientMac = clientMac, ClientPort = srcPort, ServerPort = dstPort,
+                Itf = itf, Seq = 5000, Ack = seq + 1,
+            };
+            if (bridged)
+            {
+                var (host, port) = _bridges[dstPort];
+                try
+                {
+                    var sock = new System.Net.Sockets.Socket(
+                        System.Net.Sockets.AddressFamily.InterNetwork,
+                        System.Net.Sockets.SocketType.Stream,
+                        System.Net.Sockets.ProtocolType.Tcp) { NoDelay = true };
+                    sock.Connect(host, port);
+                    sock.Blocking = false;
+                    fresh.Bridge = sock;
+                }
+                catch (System.Net.Sockets.SocketException)
+                {
+                    // The real service is unreachable: refuse the connection instead of leaving the
+                    // guest's connect() hanging until its own timeout.
+                    fresh.Seq = 0;
+                    SendTcpTo(fresh, TCP_RST | TCP_ACK, []);
+                    _inbound.Remove(key);
+                    return true;
+                }
+            }
+            _inbound[key] = fresh;
+            SendTcpTo(fresh, TCP_SYN | TCP_ACK, []);
+            fresh.Seq = 5001;
+            return true;
+        }
+
+        if (!_inbound.TryGetValue(key, out var conn)) return true;   // stray segment for a closed connection
+        if ((flags & TCP_ACK) != 0) conn.Established = true;
+
+        if (payloadLen > 0)
+        {
+            if (seq == conn.Ack)
+            {
+                for (var i = 0; i < payloadLen; i++) conn.Rx.Add(f[payloadOff + i]);
+                conn.Ack = seq + (uint)payloadLen;
+            }
+            SendTcpTo(conn, TCP_ACK, []);
+
+            if (conn.Bridge is { } bridgeSock)
+            {
+                // Relay straight through; the reply comes back asynchronously via Poll().
+                try
+                {
+                    var chunk = f[payloadOff..(payloadOff + payloadLen)];
+                    var sent = 0;
+                    while (sent < chunk.Length)
+                        sent += bridgeSock.Send(chunk, sent, chunk.Length - sent,
+                                                System.Net.Sockets.SocketFlags.None);
+                    conn.ToRemote += chunk.Length;
+                    OnBridgeTraffic?.Invoke(conn.ServerPort, conn.ToRemote, conn.FromRemote);
+                }
+                catch (System.Net.Sockets.SocketException) { CloseBridge(conn); }
+            }
+            else if (!conn.Replied)
+            {
+                var request = conn.Rx.ToArray();
+                OnServerRequest?.Invoke(dstPort, request);
+                if (handler(request) is { Length: > 0 } reply)
+                {
+                    conn.Replied = true;
+                    SendTcpTo(conn, TCP_PSH | TCP_ACK, reply);
+                    conn.Seq += (uint)reply.Length;
+                    SendTcpTo(conn, TCP_FIN | TCP_ACK, []);
+                    conn.Seq += 1;
+                }
+            }
+        }
+
+        if ((flags & TCP_FIN) != 0)
+        {
+            conn.Ack = seq + (uint)payloadLen + 1;   // FIN consumes one sequence number
+            SendTcpTo(conn, TCP_ACK | TCP_FIN, []);
+            try { conn.Bridge?.Close(); } catch { /* already gone */ }
+            _inbound.Remove(key);
+        }
+        return true;
+    }
+
+    private void SendTcpTo(InboundConn c, byte flags, byte[] payload)
+    {
+        var tcp = new byte[20 + payload.Length];
+        tcp[0] = (byte)(c.ServerPort >> 8); tcp[1] = (byte)c.ServerPort;
+        tcp[2] = (byte)(c.ClientPort >> 8); tcp[3] = (byte)c.ClientPort;
+        WriteBe32(tcp, 4, c.Seq);
+        WriteBe32(tcp, 8, c.Ack);
+        tcp[12] = 5 << 4;
+        tcp[13] = flags;
+        tcp[14] = 0x20; tcp[15] = 0x00;   // window = 8192
+        Array.Copy(payload, 0, tcp, 20, payload.Length);
+        var csum = TcpChecksum(GatewayIp, c.ClientIp, tcp);
+        tcp[16] = (byte)(csum >> 8); tcp[17] = (byte)csum;
+
+        var ipPkt = BuildIpv4(6, GatewayIp, c.ClientIp, tcp);
+        var frame = new byte[14 + ipPkt.Length];
+        WriteEthHeader(frame, c.ClientMac, GatewayMac, 0x0800);
+        Array.Copy(ipPkt, 0, frame, 14, ipPkt.Length);
+        _macToDevice.TryGetValue(MacKey(c.ClientMac, 0), out var dev);
+        (dev ?? _sdpcm)?.EnqueueEthernet(c.Itf, frame);
+    }
+
+    // ── TCP client state machine ───────────────────────────────────────────
+
     private void HandleTcp(int itf, byte[] f, int ipOff, int tcpOff)
     {
         if (f.Length < tcpOff + 20) return;
+        if (HandleInboundTcp(itf, f, ipOff, tcpOff)) return;
         var srcPort = Be16(f, tcpOff);
         var dstPort = Be16(f, tcpOff + 2);
         if (dstPort != _tcpClientPort || srcPort != _tcpServerPort) return; // not our connection
@@ -289,7 +614,7 @@ public sealed class VirtualNet
         var frame = new byte[14 + ipPkt.Length];
         WriteEthHeader(frame, _serverMac ?? new byte[6], GatewayMac, 0x0800);
         Array.Copy(ipPkt, 0, frame, 14, ipPkt.Length);
-        _sdpcm.EnqueueEthernet(_tcpItf, frame);
+        _sdpcm?.EnqueueEthernet(_tcpItf, frame);
     }
 
     private byte[]? _serverMac;  // learned guest MAC (from any guest frame) for unicast delivery

@@ -43,6 +43,31 @@ public sealed class Sdpcm
     private const uint EV_AUTH = 3;
     private const uint EV_LINK = 16;
     private const uint EV_ESCAN_RESULT = 69;
+    private const uint EV_DISASSOC = 12;
+
+    /// <summary>WLC_DISASSOC — cyw43_wifi_leave()'s way of dropping the association.</summary>
+    private const uint WLC_DISASSOC = 52;
+
+    /// <summary>WLC_GET_RSSI — returns the associated AP's signal level as a little-endian int32.</summary>
+    private const uint WLC_GET_RSSI = 127;
+
+    /// <summary>The AP this station is currently associated with, or null when not joined.</summary>
+    private VirtualAp? _joinedAp;
+
+    /// <summary>EV_PSK_SUP — the WPA supplicant's progress report.</summary>
+    private const uint EV_PSK_SUP = 46;
+
+    /// <summary>WLC_SUP_KEYED: the four-way handshake finished and the keys are installed.</summary>
+    private const uint SUP_KEYED = 6;
+
+    /// <summary>WLC_SUP_KEYXCHANGE_WAIT_M1: where the supplicant stalls when the passphrase is wrong.</summary>
+    private const uint SUP_KEYXCHANGE_WAIT_M1 = 4;
+
+    /// <summary>WLC_SET_WSEC_PMK — carries the WPA passphrase; a plain ioctl, not an iovar.</summary>
+    private const uint WLC_SET_WSEC_PMK = 268;
+
+    /// <summary>Passphrase from the host's most recent WLC_SET_WSEC_PMK, checked at join time.</summary>
+    private string? _pendingPassphrase;
     private const uint STATUS_SUCCESS = 0;
     private const uint STATUS_NO_NETWORKS = 3; // EV_SET_SSID status: no matching SSID
     private const uint STATUS_PARTIAL = 8;
@@ -52,13 +77,34 @@ public sealed class Sdpcm
 
     /// <summary>A Wi-Fi network the emulated chip "sees" on the air. Populated by the virtual radio
     /// (Fase 5/6) so <c>scan()</c> returns real BSSes; an empty list yields an empty scan.</summary>
-    public sealed record VirtualAp(string Ssid, byte[] Bssid, int Channel, int Rssi, bool Secured);
+    /// <summary>
+    /// An access point in the virtual air. <paramref name="Secured"/> marks it WPA2-PSK, which makes the
+    /// chip run the supplicant handshake the driver waits on; <paramref name="Passphrase"/> is checked
+    /// against the PMK the host sets (null accepts any passphrase).
+    /// </summary>
+    public sealed record VirtualAp(string Ssid, byte[] Bssid, int Channel, int Rssi, bool Secured,
+                                   string? Passphrase = null);
 
     /// <summary>Networks visible to this chip; the escan ioctl reports each as an ESCAN_RESULT event.</summary>
     public readonly List<VirtualAp> VisibleAps = new();
 
     /// <summary>Chip MAC (locally-administered). Per-device so multiple Pico 2 W instances differ.</summary>
-    public byte[] MacAddress { get; set; } = [0x02, 0x12, 0x34, 0x00, 0x00, 0x01];
+    /// <summary>
+    /// The station MAC. Every chip gets its own, the way each CYW43439 gets one from OTP: a shared
+    /// default makes two boards on one virtual LAN indistinguishable, so ARP and the DHCP server hand
+    /// them the same lease and only whichever answered last is reachable. Settable for tests that need
+    /// a fixed address.
+    /// </summary>
+    public byte[] MacAddress { get; set; } = NextMacAddress();
+
+    private static int _macCounter;
+
+    /// <summary>Locally-administered unicast address (02:12:34:00:xx:yy), unique per chip instance.</summary>
+    private static byte[] NextMacAddress()
+    {
+        var n = System.Threading.Interlocked.Increment(ref _macCounter);
+        return [0x02, 0x12, 0x34, 0x00, (byte)(n >> 8), (byte)n];
+    }
 
     /// <summary>Pending chip→host SDPCM packets, oldest first. The host drains these over F2 reads.</summary>
     private readonly Queue<byte[]> _txq = new();
@@ -168,6 +214,15 @@ public sealed class Sdpcm
             HandleJoin(payload, 0);
         else if (cmd == WLC_SET_VAR && varName == "join")
             HandleJoin(payload, varName.Length + 1);
+        // Leaving the network: cyw43_wifi_leave() issues WLC_DISASSOC. The link must actually drop, or
+        // WLAN.disconnect() leaves status() still reporting GOT_IP and isconnected() still true.
+        else if (cmd == WLC_DISASSOC)
+        {
+            _joinedAp = null;
+            EnqueueAsyncEvent(BuildBcmEvent(EV_LINK, STATUS_SUCCESS, 0, 0, 0));   // flags&1 = 0 → link down
+            EnqueueAsyncEvent(BuildBcmEvent(EV_DISASSOC, STATUS_SUCCESS, 0, 0, 0));
+            OnStaJoin?.Invoke(null);
+        }
         // SoftAP SSID: cyw43_ll_wifi_ap_init sends iovar "bsscfg:ssid" = u32(ap iface) u32(ssid_len) ssid[32].
         // Capture it so the virtual air can advertise this guest's own AP to other stations' scans.
         else if (cmd == WLC_SET_VAR && varName == "bsscfg:ssid")
@@ -192,6 +247,14 @@ public sealed class Sdpcm
                 EnqueueAsyncEvent(BuildBcmEvent(EV_LINK, STATUS_SUCCESS, (ushort)(up != 0 ? 1 : 0), 0, 1));
                 OnApUp?.Invoke(up != 0);
             }
+        }
+        // WPA2 passphrase: cyw43_ll_wifi_join() sends WLC_SET_WSEC_PMK with { u16 key_len; u16 flags;
+        // u8 key[64] } and the passphrase in the clear. Held until the join so a wrong one can be
+        // rejected the way silicon does — by stalling the supplicant, not by failing the association.
+        else if (cmd == WLC_SET_WSEC_PMK && payload.Length >= 4)
+        {
+            var keyLen = Math.Min(payload[0] | (payload[1] << 8), Math.Max(0, payload.Length - 4));
+            _pendingPassphrase = keyLen > 0 ? Encoding.UTF8.GetString(payload, 4, keyLen) : null;
         }
         // Any other iovar SET is accepted (ACKed above) but its effect is not modelled — usually benign
         // radio/config (ampdu, mfp, country, …), but recorded so the unmodelled surface stays visible.
@@ -219,15 +282,35 @@ public sealed class Sdpcm
         var ap = VisibleAps.Find(a => a.Ssid == ssid);
         if (ap == null) { EmitJoinFail(ssid); return; }
 
-        // Open-network association chain. (WPA/PSK would add an EV_PSK_SUP(WLC_SUP_KEYED) step.)
+        // A secured AP whose passphrase does not match: the supplicant never gets past the key
+        // exchange. The driver reads that as WIFI_JOIN_STATE_BADAUTH, which is what surfaces to
+        // MicroPython as a failed connect() rather than a silent hang.
+        if (ap.Secured && ap.Passphrase is not null && _pendingPassphrase != ap.Passphrase)
+        {
+            _joinedAp = null;
+            EnqueueAsyncEvent(BuildBcmEvent(EV_SET_SSID, STATUS_SUCCESS, 0, 0, 0));
+            EnqueueAsyncEvent(BuildBcmEvent(EV_AUTH, STATUS_SUCCESS, 0, 0, 0));
+            EnqueueAsyncEvent(BuildBcmEvent(EV_PSK_SUP, SUP_KEYXCHANGE_WAIT_M1, 0, 0, 0));
+            OnStaJoin?.Invoke(null);
+            return;
+        }
+
+        // Association chain. An open network is KEYED from the start as far as the driver is concerned;
+        // a WPA2 network only reaches WIFI_JOIN_STATE_ALL once the supplicant reports WLC_SUP_KEYED, so
+        // without that event connect() to any password-protected AP times out — which is every real
+        // network, and the official wireless/webserver.py example.
         EnqueueAsyncEvent(BuildBcmEvent(EV_SET_SSID, STATUS_SUCCESS, 0, 0, 0));
         EnqueueAsyncEvent(BuildBcmEvent(EV_AUTH, STATUS_SUCCESS, 0, 0, 0));
+        if (ap.Secured)
+            EnqueueAsyncEvent(BuildBcmEvent(EV_PSK_SUP, SUP_KEYED, 0, 0, 0));
         EnqueueAsyncEvent(BuildBcmEvent(EV_LINK, STATUS_SUCCESS, 1, 0, 0)); // flags&1 = link up
+        _joinedAp = ap;
         OnStaJoin?.Invoke(ssid);
     }
 
     private void EmitJoinFail(string? ssid = null)
     {
+        _joinedAp = null;
         EnqueueAsyncEvent(BuildBcmEvent(EV_SET_SSID, STATUS_NO_NETWORKS, 0, 0, 0));
         OnStaJoin?.Invoke(null);
     }
@@ -300,6 +383,15 @@ public sealed class Sdpcm
         if (kind != SDPCM_GET) return [];
 
         var buf = new byte[Math.Max(outLen, 4)];
+        if (cmd == WLC_GET_RSSI)
+        {
+            // int32 LE, dBm. Reporting the associated AP's level instead of a flat 0 is what makes
+            // WLAN.status('rssi') mean anything.
+            var rssi = _joinedAp?.Rssi ?? 0;
+            buf[0] = (byte)rssi; buf[1] = (byte)(rssi >> 8);
+            buf[2] = (byte)(rssi >> 16); buf[3] = (byte)(rssi >> 24);
+            return buf;
+        }
         if (cmd == WLC_GET_VAR)
         {
             switch (varName)

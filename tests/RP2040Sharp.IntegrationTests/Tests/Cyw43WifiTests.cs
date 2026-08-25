@@ -11,15 +11,8 @@ namespace RP2040Sharp.IntegrationTests.Tests;
 
 /// <summary>
 /// WiFi bring-up on the Pico W: real MicroPython on the emulated CYW43439 brings up the WLAN interface
-/// (firmware download over the gSPI backplane, then SDPCM/WLC ioctls) and scans, seeing a virtual AP.
-///
-/// SKIPPED (in-progress WiFi gap; BLE on the same chip already works — see Cyw43BleTests): the first WLAN
-/// SDPCM ioctl ('clmload') is received by the emulated chip and a 28-byte response is queued
-/// (OnPacketReadyChanged), but the firmware's cyw43_ll do_ioctl poll never issues the F2 read — it gates
-/// on the WL_HOST_WAKE pin (GPIO24) reading high at the moment it polls, and the gSPI F2 host-wake/poll
-/// timing isn't satisfied (the BT shared bus works because it reads SDIO_INT_STATUS over F1, never GPIO24).
-/// Result: "[CYW43] do_ioctl/STALL timeout, CLM load failed". Next: fix the GPIO24 host-wake level held
-/// between gSPI transactions for the F2 poll path (GSpiSlave). Unskip once WLAN.active(True) + scan work.
+/// (firmware download over the gSPI backplane, then SDPCM/WLC ioctls), scans and sees a virtual AP,
+/// associates, takes a DHCP lease, and reports signal strength — then drops the link on disconnect().
 /// </summary>
 public class Cyw43WifiTests(ITestOutputHelper output)
 {
@@ -33,11 +26,12 @@ public class Cyw43WifiTests(ITestOutputHelper output)
                  "HTTP-RX on the same chip do pass against the official firmware (see Cyw43BleTests / Cyw43HttpRxTests).")]
     public void Wlan_brings_up_and_scans()
     {
-        if (!File.Exists(PicoW)) { output.WriteLine("skip"); return; }
-        using var sim = RP2040TestSimulation.Create().WithBinary(Uf2Reader.ToFlashImage(File.ReadAllBytes(PicoW)));
+        var picoW = PicoW;
+        if (picoW is null) { output.WriteLine("Pico W firmware unavailable (offline) — skipped"); return; }
+        using var sim = RP2040TestSimulation.Create().WithBinary(Uf2Reader.ToFlashImage(File.ReadAllBytes(picoW)));
         sim.Rp2040.Pio0.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
         sim.Rp2040.Pio1.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
-        sim.Rp2040.Sio.OnGpioChanged += () => sim.Rp2040.IoBank0.NotifyPads(0xFFFFFFFFu);
+        sim.Rp2040.Sio.OnGpioChanged += mask => sim.Rp2040.IoBank0.NotifyPads(mask);
 
         var dev = new Cyw43439Device(sim.Rp2040.IoBank0);
         dev.Sdpcm.VisibleAps.Add(new Sdpcm.VirtualAp("RP2040Sharp-AP", [0x02, 0, 0x5E, 0, 4, 1], 6, -50, false));
@@ -64,8 +58,7 @@ public class Cyw43WifiTests(ITestOutputHelper output)
         int at = rx.Length;
         Step(3_000_000_000, () => rx.ToString(at, rx.Length - at).Contains("SCAN ") || rx.ToString(at, rx.Length - at).Contains("Error"));
 
-        File.WriteAllText("/tmp/rp2040_wifi.txt", "REPL:\n" + rx + "\n\nFirmwareBytes=" + dev.FirmwareBytes +
-            " WlanCoreUp=" + dev.DebugWlanCoreUp + "\nIOCTLS:\n  " + string.Join("\n  ", ioctls));
+        output.WriteLine($"FirmwareBytes={dev.FirmwareBytes} WlanCoreUp={dev.DebugWlanCoreUp}");
         output.WriteLine(rx.ToString()[at..]);
 
         rx.ToString().Should().Contain("WLAN True", "WLAN.active(True) must bring the interface up");
