@@ -182,7 +182,11 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
             }
         }
 
-        return w | (_externalInput & ~driven & GpioMask);
+        // Undriven pads take their level from SIO's view, which is the one that knows about the pad's
+        // pull resistor — _externalInput alone only holds what something outside actually drives, so a
+        // floating input with a pull-up read 0. Two sources of truth for the same pin is how the PIO
+        // came to see pulled-up pins as low the moment it started reading pads through here.
+        return w | (_sio.GpioIn & ~driven & GpioMask);
     }
 
     private const uint GpioMask = (1u << GPIO_COUNT) - 1;
