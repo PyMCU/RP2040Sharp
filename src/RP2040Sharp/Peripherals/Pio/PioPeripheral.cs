@@ -167,6 +167,15 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         for (var s = 0; s < SM_COUNT; s++)
         {
             var sm = _sm[s];
+
+            // Every tick starts with one honest re-evaluation: the stall fingerprint is only trusted
+            // WITHIN a tick, never across one. Between ticks the CPU, DMA and any off-chip device have
+            // all had a turn, and not every way they can unblock a state machine is something this
+            // block sees — so a fingerprint that survived the boundary could park an SM forever on a
+            // condition that had, in fact, changed. Skipping the other few hundred steps of the tick
+            // is where essentially all of the saving is anyway.
+            sm.StallValid = false;
+
             if (!sm.Enabled) { _stepsBuf[s] = 0; continue; }
 
             var edgesNow = _clkAccum / Divisor(sm.ClkDiv);
