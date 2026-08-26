@@ -176,7 +176,7 @@ public static class FirmwareCache
     /// <see cref="FirmwareManifest.PicoWUrl"/> if not cached. Returns <c>null</c> when the version has no
     /// known URL or the download fails (offline). Throws on a SHA-256 mismatch.
     /// </summary>
-    public static async Task<string?> GetMicroPythonPicoWAsync(string version)
+    public static async Task<string?> GetMicroPythonPicoWAsync(string version = "v1.28.0")
     {
         Directory.CreateDirectory(CacheDir);
 

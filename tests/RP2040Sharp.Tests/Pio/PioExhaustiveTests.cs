@@ -665,7 +665,7 @@ public sealed class PioExhaustiveTests
         public void Join_rx_gives_8_deep_rx()
         {
             using var f = new Fixture();
-            f.Pio.WriteWord(SHIFTCTRL(0), 1u << 30); // FJOIN_RX
+            f.Pio.WriteWord(SHIFTCTRL(0), 1u << 31); // FJOIN_RX (bit 31)
             for (uint i = 0; i < 8; i++) f.Pio.InjectRxData(0, i);
             ((f.Pio.ReadWord(FLEVEL) >> 4) & 0xF).Should().Be(8u, "RX FIFO is 8 deep with FJOIN_RX");
         }
@@ -674,7 +674,7 @@ public sealed class PioExhaustiveTests
         public void Join_tx_disables_rx()
         {
             using var f = new Fixture();
-            f.Pio.WriteWord(SHIFTCTRL(0), 1u << 31); // FJOIN_TX
+            f.Pio.WriteWord(SHIFTCTRL(0), 1u << 30); // FJOIN_TX (bit 30)
             f.Pio.InjectRxData(0, 1); // RX depth 0 → rejected
             f.Pio.RxFifoEmpty(0).Should().BeTrue("RX FIFO disabled under FJOIN_TX");
         }

@@ -46,7 +46,7 @@ public class PyMcuVsMicroPythonBenchmark
         var sio = pico.Rp2040.Sio;
         bool prev = sio.GetGpioOut(25);
         long edges = 0;
-        sio.OnGpioChanged = () =>
+        sio.OnGpioChanged = _ =>
         {
             bool cur = sio.GetGpioOut(25);
             if (cur != prev) { edges++; prev = cur; }

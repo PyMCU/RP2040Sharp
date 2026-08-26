@@ -75,6 +75,20 @@ public sealed class UartPeripheral : IMemoryMappedDevice
     /// <summary>DREQ source for DMA RX: true when RX FIFO has data to read.</summary>
     public bool RxDataAvailable => _rxFifo.Count > 0;
 
+    /// <summary>Read-only snapshot of the UART line configuration for external inspection.</summary>
+    public readonly record struct UartConfigSnapshot(
+        bool Enabled, bool TxEnabled, bool RxEnabled, uint Ibrd, uint Fbrd,
+        int DataBits, int StopBits, int Parity);   // Parity: 0=none,1=odd,2=even
+    public UartConfigSnapshot GetConfig() => new(
+        (_cr & 1u) != 0,                                   // UARTEN
+        (_cr & (1u << 8)) != 0,                            // TXE
+        (_cr & (1u << 9)) != 0,                            // RXE
+        _ibrd, _fbrd,
+        5 + (int)((_lcrH >> 5) & 0x3),                     // WLEN 5..8
+        (_lcrH & (1u << 3)) != 0 ? 2 : 1,                  // STP2
+        (_lcrH & (1u << 1)) == 0 ? 0
+            : ((_lcrH & (1u << 2)) != 0 ? 2 : 1));
+
     public uint ReadWord(uint address)
     {
         return address switch

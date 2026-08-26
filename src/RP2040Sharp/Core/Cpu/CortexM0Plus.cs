@@ -9,11 +9,46 @@ using RP2040.Core.Memory;
 
 namespace RP2040.Core.Cpu;
 
+/// <summary>Selects which interchangeable 16-bit decoder <see cref="CortexM0Plus.Run(int)"/> uses.</summary>
+public enum DecoderType
+{
+    /// <summary>Native function-pointer lookup table (default).</summary>
+    NativeLut,
+    /// <summary>Managed-delegate lookup table (portable; no unsafe).</summary>
+    Lut,
+    /// <summary>Switch / br_table over a per-opcode handler id.</summary>
+    Switch,
+}
+
 public sealed unsafe class CortexM0Plus
 {
     public readonly BusInterconnect Bus;
     public Registers Registers;
     public long Cycles;
+
+    // ── Cycle-accurate timing model (always on) ──────────────────────────────
+    // The core reproduces the EXACT per-instruction cycle model of rp2040js (cortex-m0-core.ts
+    // executeInstruction): each instruction costs a base cycle (the run loop's single Cycles++)
+    // plus the per-type penalties the real M0+ pays — taken branches, BL/BLX/BX, LDM/STM/PUSH/POP
+    // by register, MRS/MSR/barriers, WFI/WFE — added straight-line in the handler the decode table
+    // already dispatched to (no reclassification, no branch), and the memory wait-states of
+    // cyclesIO() by region. There is no opt-in flag: the accounting is part of the instruction's
+    // work, exactly as rp2040js's deltaCycles is. Verified cycle-for-cycle against rp2040js.
+
+    /// <summary>
+    /// Memory wait-states for a data access, reproducing rp2040js <c>cyclesIO(addr, write)</c>
+    /// (cortex-m0-core.ts): SIO region (0xD) is single-cycle (0 wait), the APB region (0x4) adds
+    /// 3 cycles on a read and 4 on a write, and every other region (SRAM/flash/bootrom/…) adds 1.
+    /// The value is added on top of the instruction's base cycle, exactly as rp2040js does.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static long CyclesIO(uint address, bool write)
+    {
+        var region = address >> 28;
+        if (region == 0xD) return 0;              // SIO_START_ADDRESS = 0xD0000000
+        if (region == 0x4) return write ? 4 : 3;  // APB_START_ADDRESS = 0x40000000
+        return 1;
+    }
 
     /// <summary>0 = Core0, 1 = Core1. Used by SIO to return the correct CPUID and route FIFOs.</summary>
     public int CoreId { get; set; }
@@ -27,6 +62,25 @@ public sealed unsafe class CortexM0Plus
     public bool IsLockedUp { get; private set; }
 
     private readonly InstructionDecoder _decoder;
+
+    // ── Interchangeable 16-bit decoder (see Decoders/) ───────────────────────
+    // The execution loop is monomorphized per decoder struct; the active one is chosen with a single
+    // per-batch switch in Run. NativeLut (function-pointer table) is the default. Lut (managed-delegate
+    // table) and Switch (br_table over a handler id) exist so the fastest can be selected per runtime
+    // target (native vs WASM) — see the decoder benchmark. Behaviour is identical across all three; they
+    // are all derived from the same classification rules that build InstructionDecoder's native table.
+    private Decoders.NativeLutDecoder _nativeLutDecoder;
+    private Decoders.LutDecoder       _lutDecoder;
+    private Decoders.SwitchDecoder    _switchDecoder;
+    private DecoderType               _activeDecoder = DecoderType.NativeLut;
+
+    /// <summary>Selects the 16-bit instruction decoder used by <see cref="Run(int)"/>. Behavior is
+    /// identical across all three; only dispatch mechanism (and thus throughput) differs. Default is
+    /// <see cref="DecoderType.NativeLut"/>.</summary>
+    public void SetDecoder(DecoderType type) => _activeDecoder = type;
+
+    /// <summary>The 16-bit decoder currently selected by <see cref="SetDecoder"/>.</summary>
+    public DecoderType ActiveDecoder => _activeDecoder;
 
     private byte* _fetchPtr;
     private uint _fetchMask;
@@ -91,6 +145,9 @@ public sealed unsafe class CortexM0Plus
     {
         Bus = bus;
         _decoder = InstructionDecoder.Instance;
+        _nativeLutDecoder = Decoders.NativeLutDecoder.Create();
+        _lutDecoder       = Decoders.LutDecoder.Create();
+        _switchDecoder    = Decoders.SwitchDecoder.Create();
         Reset();
     }
 
@@ -144,11 +201,28 @@ public sealed unsafe class CortexM0Plus
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    /// <summary>
+    /// Execute up to <paramref name="instructions"/> steps using the currently selected 16-bit decoder.
+    /// The body is monomorphized per decoder struct by <see cref="RunGeneric{TDecoder}"/>; this public
+    /// entry point keeps its historical signature and picks the concrete loop with a single per-batch
+    /// switch (the selection cost is amortized over the whole batch, not paid per instruction).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Run(int instructions)
     {
-        var decoder = _decoder;
+        switch (_activeDecoder)
+        {
+            case DecoderType.NativeLut: RunGeneric(ref _nativeLutDecoder, instructions); break;
+            case DecoderType.Lut:       RunGeneric(ref _lutDecoder, instructions); break;
+            case DecoderType.Switch:    RunGeneric(ref _switchDecoder, instructions); break;
+            default:                    RunGeneric(ref _nativeLutDecoder, instructions); break;
+        }
+    }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private void RunGeneric<TDecoder>(ref TDecoder decoder, int instructions)
+        where TDecoder : struct, Decoders.IInstructionDecoder
+    {
         var fetchPtr = _fetchPtr;
         var fetchMask = _fetchMask;
         var regionId = _currentRegionId;
@@ -250,7 +324,7 @@ public sealed unsafe class CortexM0Plus
             Cycles++;
 
             // DISPATCH
-            decoder.Dispatch(opcode, this);
+            decoder.Dispatch16(opcode, this);
         }
 
         _currentRegionId = regionId;
@@ -467,7 +541,8 @@ public sealed unsafe class CortexM0Plus
         var targetPc = Bus.ReadWord(vectorAddress);
         Registers.PC = targetPc & 0xFFFFFFFE;
 
-        Cycles += 12; // Exception Entry cost (aprox 12-15 cycles)
+        // rp2040js models exception entry as 0 extra cycles: the handler's first instruction is
+        // charged its own base on the next step, so nothing is added here.
 
         OnExceptionEntry?.Invoke(exceptionNumber);
     }
@@ -476,15 +551,50 @@ public sealed unsafe class CortexM0Plus
     // Interrupt / Exception management (called by PPB peripheral)
     // ================================================================
 
+    /// <summary>
+    /// The other processor. On silicon a system peripheral's IRQ line is wired to BOTH cores'
+    /// interrupt controllers (RP2040 datasheet §2.3.2): each NVIC independently enables or masks
+    /// it, and a core that has it disabled simply latches a pending bit it never takes. Without
+    /// the peer, an ISR registered on Core 1 — or a Core 1 <c>WFE</c> waiting for a timer alarm,
+    /// which is what <c>_thread</c> + <c>time.sleep()</c> comes down to — is never woken.
+    /// SEV also crosses here: it is an event for the whole cluster, not for the issuing core.
+    /// </summary>
+    public CortexM0Plus? SiblingCore;
+
+    /// <summary>
+    /// SIO_IRQ_PROC0 / SIO_IRQ_PROC1: the only two RP2040 IRQ numbers that are per-core rather
+    /// than shared, so they must NOT reach the other core's NVIC.
+    /// </summary>
+    private const int IRQ_SIO_PROC0 = 15, IRQ_SIO_PROC1 = 16;
+
     public void SetInterrupt(int irq, bool pending)
     {
         if (irq is < 0 or > 25) return;
+        if (irq is not (IRQ_SIO_PROC0 or IRQ_SIO_PROC1))
+            SiblingCore?.SetInterruptLine(irq, pending);
+        SetInterruptLine(irq, pending);
+    }
+
+    /// <summary>Drives this core's NVIC line only — never crosses to the sibling.</summary>
+    private void SetInterruptLine(int irq, bool pending)
+    {
         var bit = 1u << irq;
         if (pending)
             Registers.PendingInterrupts |= bit;
         else
             Registers.PendingInterrupts &= ~bit;
         Registers.InterruptsUpdated = true;
+    }
+
+    /// <summary>
+    /// SEV: sets the event register of every processor in the cluster (ARMv6-M §B1.5.19). On the
+    /// RP2040 this is how pico-sdk's alarm callback (<c>sleep_until_callback</c> → <c>__sev()</c>,
+    /// serviced on Core 0) releases the other core from <c>best_effort_wfe_or_timeout</c>'s WFE.
+    /// </summary>
+    public void SignalEvent()
+    {
+        Registers.EventRegistered = true;
+        if (SiblingCore is { } peer) peer.Registers.EventRegistered = true;
     }
 
     public void TriggerNmi() { Registers.PendingNMI = true; Registers.InterruptsUpdated = true; }
@@ -651,7 +761,8 @@ public sealed unsafe class CortexM0Plus
         Registers.SP += stackFree;
         Registers.PC = retPC & 0xFFFFFFFE;
 
-        Cycles += 10;
+        // rp2040js models exception return as 0 extra cycles: the BX/POP-pc that drives it already
+        // charged its own penalty, so nothing is added here.
         // After returning from an ISR, re-check interrupts so that a still-pending
         // higher-priority IRQ (e.g. USB after SysTick) fires immediately, AND signal
         // that an event was registered so the next WFE consumes it instead of sleeping.

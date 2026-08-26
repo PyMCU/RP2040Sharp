@@ -48,7 +48,7 @@ public sealed class GpioPin
     public void ForceInput(bool high)
     {
         var mask = 1u << _pinIndex;
-        _sio.GpioIn = high ? (_sio.GpioIn | mask) : (_sio.GpioIn & ~mask);
+        _sio.DriveGpioIn(high ? mask : 0u, mask);
         _ioBank0?.UpdatePinInput(_pinIndex, high);
     }
 }

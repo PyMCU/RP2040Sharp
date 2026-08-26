@@ -61,6 +61,12 @@ public class RP2040TestSimulation : IDisposable
 
     protected RP2040TestSimulation()
     {
+        // Every simulation, including the board presets, is built through here — so this is
+        // the one place the entitlement check belongs. Free locally and on public
+        // repositories; private CI needs a licence. Cached per process, so a suite of
+        // thousands pays for one check.
+        SiliconTwin.Licensing.Entitlement.Require("rp2040");
+
         Machine = new RP2040Machine();
         // Install a capturing breakpoint handler so BKPT does not escalate to HardFault.
         // This is the correct ARMv6-M behaviour when a debugger/monitor is attached.
@@ -155,7 +161,12 @@ public class RP2040TestSimulation : IDisposable
         {
             var batch = (int)Math.Min(cycles, BatchSize);
             Machine.Run(batch);
-            cycles -= batch;
+            // Machine.Run's budget counts INSTRUCTIONS; the timer advances on CYCLES, and real code
+            // averages well over one cycle per instruction. Charging the budget instead of what was
+            // actually spent made "run 100 ms" hand the firmware ~143 ms of simulated time under
+            // load (and exactly 100 ms only when the core sat in WFE, where the two coincide).
+            var spent = Machine.LastElapsedCycles;
+            cycles -= spent > 0 ? spent : batch;
         }
         return this;
     }

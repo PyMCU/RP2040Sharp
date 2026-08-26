@@ -95,9 +95,10 @@ public sealed class SioPeripheral : IMemoryMappedDevice
     private uint _gpioHiOut;
     private uint _gpioHiOe;
 
-    // Divider state
-    private uint _divUdividend, _divUdivisor;
-    private int  _divSdividend, _divSdivisor;
+    // Divider state. UDIVIDEND and SDIVIDEND are two views of ONE physical register (same for the
+    // two divisors, §2.3.1.5): the alias only selects how the operands are interpreted. Keeping
+    // them apart made a signed write invisible to a later unsigned one, and vice versa.
+    private uint _divDividend, _divDivisor;
     private uint _divQuotient, _divRemainder;
     private uint _divCsr;
     private bool _divSigned;
@@ -138,7 +139,13 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
     /// <summary>Raised whenever a SIO GPIO output level or output-enable register changes, so a board can
     /// forward SIO-driven pad changes to an attached external device (the CYW43439 wires REG_ON/CS to SIO).</summary>
-    public Action? OnGpioChanged { get; set; }
+    /// <summary>
+    /// Raised when SIO changes what the pads are driving, with a mask of the bits that actually
+    /// changed. A board forwards this to IO_BANK0 so an attached external device (the Pico W's radio)
+    /// sees the edges. The mask matters: re-evaluating all 30 pads on every GPIO write cost about 40%
+    /// of the emulator's throughput on a Pico W, for pins that had not moved.
+    /// </summary>
+    public Action<uint>? OnGpioChanged { get; set; }
 
     // Interpolators
     private InterpState _interp0;
@@ -146,11 +153,58 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
     public uint Size => 0x10000;  // wide enough to cover spinlocks at 0x100–0x17C
 
+    /// <summary>
+    /// PADS_BANK0, so a floating input reads the level its pull resistor sets. Without it every
+    /// unconnected pin read as 0 — <c>Pin(n, Pin.IN, Pin.PULL_UP)</c> looked permanently pressed,
+    /// and MicroPython's soft-I2C (which <c>I2C.scan()</c> uses for its zero-length writes) hung
+    /// forever waiting for the SCL it had released to rise.
+    /// </summary>
+    public Pads.PadsPeripheral? PadsBank0;
+
+    /// <summary>Pins whose level is imposed by something outside SIO: the PIO, or a wired signal.</summary>
+    private uint _gpioDriven;
+
     /// <summary>Optionally feed current GPIO input state from IO_BANK0.</summary>
     public uint GpioIn
     {
-        get => _gpioIn;
+        get => EffectiveGpioIn;
         set => _gpioIn = value;
+    }
+
+    /// <summary>
+    /// GPIO_IN as the pads present it (§2.19.2: it reflects the pad, not the source). A SIO output
+    /// reads back the level it is driving — <c>Pin.value()</c> on an output pin is exactly this read,
+    /// and it used to come back 0 no matter what the pin was doing. Pads held by the PIO or by a wired
+    /// signal keep that level, and anything nothing holds floats to its pull-up.
+    /// </summary>
+    private uint EffectiveGpioIn
+    {
+        get
+        {
+            var sioDriven = _gpioOe;
+            var floating  = ~(sioDriven | _gpioDriven);
+            var pullUp    = PadsBank0?.PullUpMask ?? 0;
+            return (_gpioIn & ~(sioDriven | floating))   // levels imposed from outside (PIO, wiring)
+                 | (_gpioOut & sioDriven)                // an output reads back what it drives
+                 | (pullUp & floating);                  // the rest settle on their pull-up
+        }
+    }
+
+    /// <summary>
+    /// Drive input levels from something that actually holds the pin (the PIO, or a wired-up probe),
+    /// so those pins are no longer treated as floating.
+    /// </summary>
+    /// <summary>Announce a pad change, but only when something changed and someone is listening.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void NotifyGpio(uint changed)
+    {
+        if (changed != 0) OnGpioChanged?.Invoke(changed);
+    }
+
+    public void DriveGpioIn(uint value, uint mask)
+    {
+        _gpioIn = (_gpioIn & ~mask) | (value & mask);
+        _gpioDriven |= mask;
     }
 
     public uint GpioOe  => _gpioOe;
@@ -158,8 +212,10 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
     public void SetGpioExternalIn(int pin, bool high)
     {
-        if (high) _gpioIn |=  (1u << pin);
-        else      _gpioIn &= ~(1u << pin);
+        var mask = 1u << pin;
+        if (high) _gpioIn |=  mask;
+        else      _gpioIn &= ~mask;
+        _gpioDriven |= mask;   // a wired signal wins over the pad's pull
     }
 
     public bool GetGpioOutputEnable(int pin) => (_gpioOe  & (1u << pin)) != 0;
@@ -192,7 +248,7 @@ public sealed class SioPeripheral : IMemoryMappedDevice
         return address switch
         {
             CPUID        => (uint)(GetActiveCoreId?.Invoke() ?? 0),
-            GPIO_IN      => _gpioIn,
+            GPIO_IN      => EffectiveGpioIn,
             // GPIO_HI_IN: QSPI GPIO inputs. Bit 1 = QSPI_SS_N (active-low flash select / BOOTSEL).
             // It must read HIGH (1) so the bootrom BOOTSEL check sees "button not pressed" and
             // proceeds to flash boot instead of USB BOOTSEL mode.
@@ -202,10 +258,10 @@ public sealed class SioPeripheral : IMemoryMappedDevice
             GPIO_HI_OUT  => _gpioHiOut,
             GPIO_OE      => _gpioOe,
             GPIO_HI_OE   => _gpioHiOe,
-            DIV_UDIVIDEND => _divUdividend,
-            DIV_UDIVISOR  => _divUdivisor,
-            DIV_SDIVIDEND => (uint)_divSdividend,
-            DIV_SDIVISOR  => (uint)_divSdivisor,
+            DIV_UDIVIDEND => _divDividend,
+            DIV_UDIVISOR  => _divDivisor,
+            DIV_SDIVIDEND => _divDividend,
+            DIV_SDIVISOR  => _divDivisor,
             DIV_QUOTIENT  => _divQuotient,
             DIV_REMAINDER => _divRemainder,
             DIV_CSR       => _divCsr,
@@ -249,14 +305,16 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
         switch (address)
         {
-            case GPIO_OUT:         _gpioOut  =  value; OnGpioChanged?.Invoke(); break;
-            case GPIO_OUT_SET:     _gpioOut |=  value; OnGpioChanged?.Invoke(); break;
-            case GPIO_OUT_CLR:     _gpioOut &= ~value; OnGpioChanged?.Invoke(); break;
-            case GPIO_OUT_XOR:     _gpioOut ^=  value; OnGpioChanged?.Invoke(); break;
-            case GPIO_OE:          _gpioOe  =  value; OnGpioChanged?.Invoke(); break;
-            case GPIO_OE_SET:      _gpioOe |=  value; OnGpioChanged?.Invoke(); break;
-            case GPIO_OE_CLR:      _gpioOe &= ~value; OnGpioChanged?.Invoke(); break;
-            case GPIO_OE_XOR:      _gpioOe ^=  value; OnGpioChanged?.Invoke(); break;
+            // Apply first, then announce: the listener re-reads the pad through GetPadOutputLevel,
+            // so notifying before the store shows it the old level and the change is lost.
+            case GPIO_OUT:     { var d = _gpioOut ^ value;  _gpioOut  =  value; NotifyGpio(d);     break; }
+            case GPIO_OUT_SET: { var d = value & ~_gpioOut; _gpioOut |=  value; NotifyGpio(d);     break; }
+            case GPIO_OUT_CLR: { var d = value &  _gpioOut; _gpioOut &= ~value; NotifyGpio(d);     break; }
+            case GPIO_OUT_XOR: {                            _gpioOut ^=  value; NotifyGpio(value); break; }
+            case GPIO_OE:      { var d = _gpioOe ^ value;   _gpioOe   =  value; NotifyGpio(d);     break; }
+            case GPIO_OE_SET:  { var d = value & ~_gpioOe;  _gpioOe  |=  value; NotifyGpio(d);     break; }
+            case GPIO_OE_CLR:  { var d = value &  _gpioOe;  _gpioOe  &= ~value; NotifyGpio(d);     break; }
+            case GPIO_OE_XOR:  {                            _gpioOe  ^=  value; NotifyGpio(value); break; }
             case GPIO_HI_OUT:      _gpioHiOut  =  value; break;
             case GPIO_HI_OUT_SET:  _gpioHiOut |=  value; break;
             case GPIO_HI_OUT_CLR:  _gpioHiOut &= ~value; break;
@@ -321,20 +379,30 @@ public sealed class SioPeripheral : IMemoryMappedDevice
                 break;
             }
 
+            // §2.3.1.5: "The calculation is started by a write to either the DIVIDEND or the DIVISOR
+            // register" — not the divisor alone. pico-sdk's 64-bit divide (divmod_u64u64_unsafe,
+            // reached by any `uint64_t / uint64_t` in firmware) writes DIVISOR first and DIVIDEND
+            // second, so a divisor-only trigger handed it the PREVIOUS division's quotient. That is
+            // what made MicroPython compute a nonsense PIO clock divider and reject freq=8_000_000
+            // in the ws2812 / neopixel examples with "freq out of range".
             case DIV_UDIVIDEND:
-                _divUdividend = value;
-                break;
-            case DIV_UDIVISOR:
-                _divUdivisor = value;
+                _divDividend = value;
                 _divSigned   = false;
                 PerformDivide();
                 break;
+            case DIV_UDIVISOR:
+                _divDivisor = value;
+                _divSigned  = false;
+                PerformDivide();
+                break;
             case DIV_SDIVIDEND:
-                _divSdividend = (int)value;
+                _divDividend = value;
+                _divSigned   = true;
+                PerformDivide();
                 break;
             case DIV_SDIVISOR:
-                _divSdivisor = (int)value;
-                _divSigned   = true;
+                _divDivisor = value;
+                _divSigned  = true;
                 PerformDivide();
                 break;
             case DIV_QUOTIENT:
@@ -533,32 +601,40 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
         if (_divSigned)
         {
-            if (_divSdivisor == 0)
+            var dividend = (int)_divDividend;
+            var divisor  = (int)_divDivisor;
+            if (divisor == 0)
             {
                 // RP2040 TRM §2.3.1.6: for signed div-by-zero:
                 //   quotient = +1 when dividend >= 0  (0x00000001)
                 //   quotient = -1 when dividend <  0  (0xFFFFFFFF)
                 // remainder = dividend in both cases.
-                _divQuotient  = _divSdividend >= 0 ? 1u : 0xFFFFFFFF;
-                _divRemainder = (uint)_divSdividend;
+                _divQuotient  = dividend >= 0 ? 1u : 0xFFFFFFFF;
+                _divRemainder = _divDividend;
+            }
+            else if (dividend == int.MinValue && divisor == -1)
+            {
+                // The one case C# throws on: the true quotient is not representable. Silicon wraps.
+                _divQuotient  = 0x80000000;
+                _divRemainder = 0;
             }
             else
             {
-                _divQuotient  = (uint)(_divSdividend / _divSdivisor);
-                _divRemainder = (uint)(_divSdividend % _divSdivisor);
+                _divQuotient  = (uint)(dividend / divisor);
+                _divRemainder = (uint)(dividend % divisor);
             }
         }
         else
         {
-            if (_divUdivisor == 0)
+            if (_divDivisor == 0)
             {
                 _divQuotient  = 0xFFFFFFFF;
-                _divRemainder = _divUdividend;
+                _divRemainder = _divDividend;
             }
             else
             {
-                _divQuotient  = _divUdividend / _divUdivisor;
-                _divRemainder = _divUdividend % _divUdivisor;
+                _divQuotient  = _divDividend / _divDivisor;
+                _divRemainder = _divDividend % _divDivisor;
             }
         }
     }

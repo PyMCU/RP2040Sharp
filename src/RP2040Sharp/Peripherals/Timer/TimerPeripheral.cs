@@ -40,6 +40,12 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
 
     private readonly uint[] _alarm = new uint[4];
     private uint _armed;   // bit N = 1 means alarm N is enabled
+
+    // ── Read-only inspection surface (playground/tests) ──────────────────────
+    /// <summary>Live 64-bit microsecond counter (TIMERAWH:TIMERAWL).</summary>
+    public ulong GetCounter() => _timeMicros;
+    public uint GetAlarm(int i) => (uint)i < 4 ? _alarm[i] : 0;
+    public bool IsArmed(int i)  => (uint)i < 4 && (_armed & (1u << i)) != 0;
     private uint _intr;    // raw interrupt status (written 1 to clear)
     private uint _inte;    // interrupt enable
     private uint _intf;    // forced interrupt

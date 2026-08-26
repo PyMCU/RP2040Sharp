@@ -93,7 +93,7 @@ public sealed class MicroPythonBitstreamTests
         var level = sio.GetGpioOut(DataPin);
         long? roseAt = null;
 
-        sio.OnGpioChanged = () =>
+        sio.OnGpioChanged = _ =>
         {
             var now = sio.GetGpioOut(DataPin);
             if (now == level) return;

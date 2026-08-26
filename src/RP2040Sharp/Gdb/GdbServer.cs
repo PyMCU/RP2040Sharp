@@ -2,6 +2,7 @@
 // Copyright (c) 2024-2026 Iván Montiel Cardona
 // Portions derived from rp2040js — Copyright (c) 2021 Uri Shaked (MIT).
 // See NOTICE.txt.
+using System.Globalization;
 using RP2040.Core.Cpu;
 using static RP2040.Gdb.GdbUtils;
 
@@ -83,6 +84,21 @@ public class GdbServer
 
     public readonly IGdbTarget Target;
     private readonly HashSet<GdbConnection> _connections = [];
+    private readonly HashSet<uint> _breakpoints = [];
+
+    /// <summary>
+    /// Addresses armed by GDB through <c>Z0</c>/<c>Z1</c> packets.
+    ///
+    /// Both software and hardware breakpoint types map to the same set: on an emulator there
+    /// is no reason to patch a <c>BKPT</c> into memory, and not patching means breakpoints
+    /// work in XIP flash and cost nothing to remove. The execution loop is what enforces
+    /// them — it must compare PC against this set <b>before</b> each instruction and call
+    /// <see cref="ReportBreakpointHit"/> on a match, which is what gives a breakpoint its
+    /// defining semantics: stop before the instruction executes, not after.
+    ///
+    /// Empty in the common case, so a loop can check <c>Count == 0</c> and stay on its fast path.
+    /// </summary>
+    public IReadOnlySet<uint> Breakpoints => _breakpoints;
 
     public GdbServer(IGdbTarget target) => Target = target;
 
@@ -148,10 +164,34 @@ public class GdbServer
                 return GdbMessage("OK");
 
             case 'D':
-                // Detach: the debugger is leaving, so resume free execution and acknowledge.
+                // Detach: the debugger is leaving, so drop its breakpoints and resume freely.
+                _breakpoints.Clear();
                 if (!Target.Executing)
                     Target.Execute();
                 return GdbMessage("OK");
+
+            case 'Z':
+            case 'z':
+            {
+                // Z/z <type>,<addr>,<kind> — type 0 = software bp, 1 = hardware bp,
+                // 2/3/4 = write/read/access watchpoints. Watchpoints would need a hook on
+                // every bus access, so they stay unimplemented; the empty reply is the
+                // protocol's "unsupported", which makes GDB fall back on its own scheme
+                // rather than believe a lie.
+                var fields = cmd[1..].Split(',');
+                if (fields.Length < 2)
+                    return GdbMessage("E22");
+                if (fields[0] is not ("0" or "1"))
+                    return GdbMessage("");
+                if (!uint.TryParse(fields[1], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var bpAddress))
+                    return GdbMessage("E22");
+
+                if (cmd[0] == 'Z')
+                    _breakpoints.Add(bpAddress);
+                else
+                    _breakpoints.Remove(bpAddress);
+                return GdbMessage("OK");
+            }
 
             case 'g':
             {
@@ -250,6 +290,19 @@ public class GdbServer
     }
 
     public void RemoveConnection(GdbConnection connection) => _connections.Remove(connection);
+
+    /// <summary>
+    /// Reports that execution reached an address in <see cref="Breakpoints"/>. Call this from
+    /// the execution loop with PC still sitting on the breakpoint address — unlike the
+    /// <c>BKPT</c> path in <see cref="AddConnection"/>, nothing has executed yet, so PC needs
+    /// no rewinding.
+    /// </summary>
+    public void ReportBreakpointHit()
+    {
+        Target.Stop();
+        foreach (var c in _connections)
+            c.OnBreakpoint();
+    }
 
     // ── Special registers (ARMv6-M MRS/MSR semantics) ────────────────────────────
 

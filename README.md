@@ -207,6 +207,8 @@ RP2040Sharp is licensed under the **Business Source License 1.1** — the whole 
 
 Use for personal, hobby, educational, academic-research, evaluation or open-source purposes is free of charge. Commercial Use — as defined in [LICENSE-BUSL.txt](LICENSE-BUSL.txt) — requires a separate commercial license.
 
+**In one line:** free to write, run, debug and profile with — on any machine, at any company — and free in the CI of public repositories. Shipping it inside a product you sell needs a commercial licence. Running it in a private CI needs an entitlement, which is a service governed by its own terms, not by this licence.
+
 Based on the original work from [rp2040js](https://github.com/wokwi/rp2040js) © 2021 Uri Shaked, used under the MIT License; that notice is retained as attribution in [LICENSE](LICENSE) and [NOTICE.txt](NOTICE.txt). C# port © 2024-2026 Iván Montiel Cardona.
 
 The emulator embeds the RP2040 bootrom (© Raspberry Pi Trading Ltd, 3-clause BSD), with its floating point library removed and reimplemented natively — see [NOTICE.txt](NOTICE.txt) for the full third-party attribution.

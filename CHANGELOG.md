@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Renamed: the TestKits are now `SiliconTwin.*`
+
+| Old | New |
+|---|---|
+| `RP2040Sharp.TestKit` | `SiliconTwin.RP2040` |
+| `RP2040Sharp.NanoFramework.TestKit` | `SiliconTwin.RP2040.NanoFramework` |
+
+The old ids are unlisted. Update the `PackageReference`, or take the `SiliconTwin`
+metapackage for the whole portfolio in one dependency.
+
+`RP2040Sharp` and `RP2040Sharp.Wireless` — the emulator core — keep their names. They are
+what embedders integrate, and they carry no entitlement check.
+
+### Breaking: the TestKit checks entitlement in CI
+
+Building a simulation now calls `SiliconTwin.Licensing.Entitlement.Require("rp2040")`.
+BUSL-1.1 has said this since the relicensing; it is now enforced rather than only written
+down.
+
+- **Local development** — free, always. An expired or missing licence never stops anyone
+  debugging on their own machine.
+- **Public repositories** — free, verified against the `repository_visibility` claim of a
+  GitHub-signed OIDC token.
+- **Private CI** — needs a licence in the `SILICONTWIN_LICENSE` secret, or at
+  `~/.silicontwin/license.key` on a self-hosted runner. See <https://silicontwin.co/licensing>.
+
+Verification is local: an RSA signature check plus GitHub's public keys. Firmware, test
+data and results never leave the runner, and air-gapped runners work. On GitHub Actions the
+job needs `permissions: { contents: read, id-token: write }`, since a licence bound to no
+organisation would work in any of them.
+
 ## [1.0.1-beta.6] - 2026-06-26
 
 ### Changed

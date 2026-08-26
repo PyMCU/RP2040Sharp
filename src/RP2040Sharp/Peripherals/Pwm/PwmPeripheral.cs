@@ -266,4 +266,30 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
 
     /// <summary>True if slice counter is currently counting up (phase-correct mode).</summary>
     public bool IsCountingUp(int slice) => _phaseDir[slice];
+
+    /// <summary>True if the slice is enabled (CSR_EN).</summary>
+    public bool IsSliceEnabled(int slice) => (uint)slice < SLICE_COUNT && (_csr[slice] & CSR_EN) != 0;
+
+    /// <summary>Live digital output level of a channel (compare vs counter, honoring inversion).</summary>
+    public bool GetChannelOutput(int slice, bool channelB)
+    {
+        if ((uint)slice >= SLICE_COUNT) return false;
+        var level = channelB ? (_cc[slice] >> 16) & 0xFFFF : _cc[slice] & 0xFFFF;
+        var high = _ctr[slice] < level;
+        var inv = (_csr[slice] & (channelB ? CSR_B_INV : CSR_A_INV)) != 0;
+        return inv ? !high : high;
+    }
+
+    /// <summary>Read-only snapshot of a slice for external inspection (playground/tests).</summary>
+    public readonly record struct PwmSliceSnapshot(
+        bool Enabled, uint Counter, uint Top, ushort DutyA, ushort DutyB, uint Div,
+        bool CountingUp, bool OutputA, bool OutputB);
+    public int SliceCount => SLICE_COUNT;
+    public PwmSliceSnapshot GetSlice(int slice)
+    {
+        if ((uint)slice >= SLICE_COUNT) return default;
+        return new PwmSliceSnapshot(IsSliceEnabled(slice), _ctr[slice], _top[slice],
+            GetDutyA(slice), GetDutyB(slice), _div[slice], IsCountingUp(slice),
+            GetChannelOutput(slice, false), GetChannelOutput(slice, true));
+    }
 }

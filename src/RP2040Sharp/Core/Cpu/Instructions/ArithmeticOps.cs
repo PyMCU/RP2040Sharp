@@ -90,6 +90,7 @@ public static class ArithmeticOps
         var result = (valPcSource + valRm) & 0xFFFFFFFE;
 
         pc = result;
+        // rp2040js ADD (register) with Rdn == PC: base 1 (loop) + 1.
         cpu.Cycles++;
     }
 

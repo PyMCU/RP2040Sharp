@@ -18,6 +18,11 @@ internal sealed class PioStateMachine
     public uint OsrCount;    // How many bits remain in OSR (32 when full)
 
     public uint ClkDiv;      // CLKDIV register (8.8 integer+frac)
+
+    /// <summary>Divider edges this SM has already consumed, measured against the block-global clock
+    /// phase. Keeping the count against a shared phase (rather than a per-SM remainder started at
+    /// enable time) is what keeps two SMs on the same CLKDIV stepping on the same edges.</summary>
+    public long DivEdgesSeen;
     public uint ExecCtrl;    // EXECCTRL
     public uint ShiftCtrl;   // SHIFTCTRL
     public uint PinCtrl;     // PINCTRL
@@ -29,6 +34,14 @@ internal sealed class PioStateMachine
     // ── Execution state ──────────────────────────────────────────────
     public bool Enabled;
     public bool Stalled;         // waiting for FIFO or condition
+
+    // Stall fingerprint: what the SM could observe the last time it failed to make progress. While
+    // neither the pins it reads nor anything another SM did has changed, re-running the same blocked
+    // instruction can only block again — so the remaining cycles of the tick are skipped.
+    public uint StallInputWord;
+    public uint StallIrq;
+    public long StallMutation = -1;
+    public bool StallValid;
     /// <summary>
     /// An IN already shifted its data into the ISR and reached the autopush threshold, but the
     /// RX FIFO was full so the push could not complete. The SM stalls without re-shifting; the
@@ -63,10 +76,10 @@ internal sealed class PioStateMachine
     public int AutopullThreshold => (int)((ShiftCtrl >> 25) & 0x1F) is 0 ? 32 : (int)((ShiftCtrl >> 25) & 0x1F);
     public bool AutopushEnabled => (ShiftCtrl & (1u << 16)) != 0;
     public bool AutopullEnabled => (ShiftCtrl & (1u << 17)) != 0;
-    /// <summary>FJOIN_TX (bit 31): double TX FIFO to 8 entries (RX disabled).</summary>
-    public bool FifoJoinTx => (ShiftCtrl & (1u << 31)) != 0;
-    /// <summary>FJOIN_RX (bit 30): double RX FIFO to 8 entries (TX disabled).</summary>
-    public bool FifoJoinRx => (ShiftCtrl & (1u << 30)) != 0;
+    /// <summary>FJOIN_TX (bit 30): double TX FIFO to 8 entries (RX disabled).</summary>
+    public bool FifoJoinTx => (ShiftCtrl & (1u << 30)) != 0;
+    /// <summary>FJOIN_RX (bit 31): double RX FIFO to 8 entries (TX disabled).</summary>
+    public bool FifoJoinRx => (ShiftCtrl & (1u << 31)) != 0;
     /// <summary>Effective TX FIFO depth: 8 when FJOIN_TX, 0 when FJOIN_RX, else 4.</summary>
     public int TxDepth => FifoJoinTx ? 8 : FifoJoinRx ? 0 : 4;
     /// <summary>Effective RX FIFO depth: 0 when FJOIN_TX, 8 when FJOIN_RX, else 4.</summary>

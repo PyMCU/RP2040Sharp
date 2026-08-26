@@ -27,7 +27,7 @@ public class Cyw43HttpRxTests(ITestOutputHelper output)
         using var sim = RP2040TestSimulation.Create().WithBinary(Uf2Reader.ToFlashImage(File.ReadAllBytes(PicoW!)));
         sim.Rp2040.Pio0.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
         sim.Rp2040.Pio1.ReadGpioIn = () => sim.Rp2040.IoBank0.GetInputWord();
-        sim.Rp2040.Sio.OnGpioChanged += () => sim.Rp2040.IoBank0.NotifyPads(0xFFFFFFFFu);
+        sim.Rp2040.Sio.OnGpioChanged += mask => sim.Rp2040.IoBank0.NotifyPads(mask);
 
         var dev = new Cyw43439Device(sim.Rp2040.IoBank0);
         dev.Sdpcm.VisibleAps.Add(new Sdpcm.VirtualAp("RP2040Sharp-AP", [0x02, 0, 0x5E, 0, 4, 1], 6, -50, false));

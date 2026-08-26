@@ -13,6 +13,10 @@ public sealed unsafe class InstructionDecoder : IDisposable
 
     private readonly InstructionHandler* _fastTablePtr;
 
+    /// <summary>Raw native <c>delegate*</c> table, keyed by 16-bit opcode. Consumed by
+    /// <see cref="Decoders.NativeLutDecoder"/> so the monomorphized run loop can index it directly.</summary>
+    public InstructionHandler* Table => _fastTablePtr;
+
     bool _disposed;
 
     private readonly struct OpcodeRule(ushort mask, ushort pattern, InstructionHandler handler)

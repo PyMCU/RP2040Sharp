@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <PackageId>RP2040Sharp.GdbHost</PackageId>
+    <Description>Standalone GDB server and inspection CLI for the RP2040Sharp emulator. Loads a UF2/BIN firmware image, exposes Core 0 over the GDB Remote Serial Protocol, and dumps CPU and PIO state interactively.</Description>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RP2040Sharp.GdbHost</RootNamespace>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>rp2040-gdb</ToolCommandName>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSE-BUSL.txt" Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RP2040Sharp\RP2040Sharp.csproj" />
+  </ItemGroup>
+</Project>

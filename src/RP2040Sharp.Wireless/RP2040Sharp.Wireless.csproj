@@ -31,6 +31,7 @@
   <ItemGroup>
     <!-- BUSL extension depends only on the MIT core; the core never depends back. -->
     <ProjectReference Include="..\RP2040Sharp\RP2040Sharp.csproj" />
+    <ProjectReference Include="..\RP2040.TestKit\RP2040.TestKit.csproj" />
   </ItemGroup>
 
   <ItemGroup>

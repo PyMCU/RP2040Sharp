@@ -103,7 +103,7 @@ public abstract class MemoryOpsTests
                 Cpu.Step();
 
                 // Assert
-                Cpu.Cycles.Should().Be(3, "Peripheral access should add wait states");
+                Cpu.Cycles.Should().Be(4, "APB read = base 1 + 3 wait states (rp2040js cyclesIO)");
             }
         }
 
@@ -407,9 +407,10 @@ public abstract class MemoryOpsTests
             Cpu.Step();
 
             // Assert
+            // PUSH {R0,R1,R2,LR}: base 1 + 3 low registers. The LR store adds no cycle in rp2040js.
             (Cpu.Cycles - initialCycles)
                 .Should()
-                .Be(5);
+                .Be(4);
         }
     }
 }

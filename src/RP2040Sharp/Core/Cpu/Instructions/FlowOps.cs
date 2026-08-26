@@ -30,7 +30,8 @@ public static class FlowOps
         cpu.Registers.LR = nextPc | 1;
         pc = (uint)(nextPc + offset);
 
-        cpu.Cycles += 2; // Takes total 3 cycles
+        // rp2040js BL: base 1 (loop) + 2 (total 3 cycles).
+        cpu.Cycles += 2;
         // BLTaken Action is Missing
     }
 
@@ -45,6 +46,7 @@ public static class FlowOps
         var targetAddress = cpu.Registers[rm];
         pc = targetAddress & 0xFFFFFFFE;
 
+        // rp2040js BLX: base 1 (loop) + 1.
         cpu.Cycles++;
         // BLTaken Action is Missing
     }
@@ -58,6 +60,7 @@ public static class FlowOps
 
         pc += (uint)(offset + 2);
 
+        // rp2040js B (unconditional): base 1 (loop) + 1.
         cpu.Cycles++;
     }
 
@@ -164,13 +167,15 @@ public static class FlowOps
     {
         var rm = (opcode >> 3) & 0xf;
         var target = cpu.Registers[rm];
+        // rp2040js BX: base 1 (loop) + 1, charged whether the target is a normal address or an
+        // EXC_RETURN (BXWritePC → exceptionReturn adds 0 under the accurate model).
+        cpu.Cycles++;
         if (target >= 0xFFFFFFF0)
         {
             cpu.ExceptionReturn(target);
             return;
         }
         cpu.Registers.PC = target & 0xFFFFFFFE;
-        cpu.Cycles++;
     }
 
     // ================================================================
@@ -204,6 +209,8 @@ public static class FlowOps
         var imm32 = (uint)((((opcode >> 3) & 0x1F) | ((opcode >> 5) & 0x20)) << 1);
         // PC was already advanced by 2 (speculative fetch); add imm32 + 2 more
         cpu.Registers.PC += imm32 + 2;
+        // Taken branch: base 1 (loop) + 1 (rp2040js has no CBZ/CBNZ on ARMv6-M, but a taken branch
+        // costs the same +1 there).
         cpu.Cycles++;
     }
 
@@ -215,6 +222,7 @@ public static class FlowOps
         ref var pc = ref cpu.Registers.PC;
         pc += (uint)(offset + 2);
 
+        // rp2040js B<cond> taken: base 1 (loop) + 1 (added only when the branch is taken).
         cpu.Cycles++;
     }
 }

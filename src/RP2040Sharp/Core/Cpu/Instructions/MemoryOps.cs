@@ -77,7 +77,8 @@ public static unsafe class MemoryOps
         }
 
         cpu.Registers.SP = finalSp;
-        cpu.Cycles += 1 + regCount;
+        // rp2040js POP: base 1 (loop) + 1 per loaded register.
+        cpu.Cycles += regCount;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -120,12 +121,15 @@ public static unsafe class MemoryOps
         // EXC_RETURN word itself (corrupting R0..xPSR).
         cpu.Registers.SP = finalSp;
 
+        // rp2040js POP with PC: base 1 (loop) + 1 per loaded register + 2 for the PC write.
+        // Charged before the branch so an EXC_RETURN unstack (which adds 0 under the accurate
+        // model) counts the same as a plain PC load.
+        cpu.Cycles += 2 + regCount;
+
         if (newPc >= 0xFFFFFFF0)
             cpu.ExceptionReturn(newPc);
         else
             cpu.Registers.PC = newPc & 0xFFFFFFFE;
-
-        cpu.Cycles += 4 + regCount;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -167,6 +171,7 @@ public static unsafe class MemoryOps
         }
 
         cpu.Registers.SP = newSp;
+        // rp2040js PUSH: base 1 (loop) + 1 per stored register.
         cpu.Cycles += regCount;
     }
 
@@ -207,7 +212,9 @@ public static unsafe class MemoryOps
         }
 
         cpu.Registers.SP = newSp;
-        cpu.Cycles += regCount + 1;
+        // rp2040js PUSH {..., lr}: base 1 (loop) + 1 per low register only — the LR store adds no
+        // cycle (see cortex-m0-core.ts: the bit-8 writeUint32 is outside the deltaCycles++ loop).
+        cpu.Cycles += regCount;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -249,7 +256,8 @@ public static unsafe class MemoryOps
         }
 
         cpu.Registers[rn] += writeBackOffset;
-        cpu.Cycles += (int)regCount;
+        // rp2040js LDMIA: base 1 (loop) + 1 per loaded register.
+        cpu.Cycles += regCount;
     }
 
     // ================================================================
@@ -440,95 +448,55 @@ public static unsafe class MemoryOps
 
         // STMIA always writes back (unlike LDMIA which skips if Rn is in list)
         cpu.Registers[rn] = baseAddr + (regCount * 4);
-        cpu.Cycles += (int)regCount;
+        // rp2040js STMIA: base 1 (loop) + 1 per stored register.
+        cpu.Cycles += regCount;
     }
 
     // ================================================================
     // Private helpers
     // ================================================================
 
+    // Single-register load/store wait-states: the address-dependent penalty of rp2040js cyclesIO()
+    // is added on top of the loop's base cycle, straight-line where the address is already known.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint ReadWordWithCycles(CortexM0Plus cpu, uint address)
     {
-        var region = address >> 28;
-
-        switch (region)
-        {
-            case <= BusInterconnect.REGION_SRAM:
-                cpu.Cycles += 1;
-                break;
-            case 0x4: // APB/AHB
-            case 0x5:
-                cpu.Cycles += 2;
-                break;
-            // SIO (Single-cycle IO)
-            case 0xD:
-                break;
-            default:
-                cpu.Cycles += 1; // Fallback
-                break;
-        }
-
+        cpu.Cycles += CortexM0Plus.CyclesIO(address, false);
         return cpu.Bus.ReadWord(address);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint ReadByteWithCycles(CortexM0Plus cpu, uint address)
     {
-        var region = address >> 28;
-        switch (region)
-        {
-            case <= BusInterconnect.REGION_SRAM: cpu.Cycles += 1; break;
-            case 0x4: case 0x5: cpu.Cycles += 2; break;
-        }
+        cpu.Cycles += CortexM0Plus.CyclesIO(address, false);
         return cpu.Bus.ReadByte(address);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint ReadHalfWordWithCycles(CortexM0Plus cpu, uint address)
     {
-        var region = address >> 28;
-        switch (region)
-        {
-            case <= BusInterconnect.REGION_SRAM: cpu.Cycles += 1; break;
-            case 0x4: case 0x5: cpu.Cycles += 2; break;
-        }
+        cpu.Cycles += CortexM0Plus.CyclesIO(address, false);
         return cpu.Bus.ReadHalfWord(address);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteWordWithCycles(CortexM0Plus cpu, uint address, uint value)
     {
-        var region = address >> 28;
-        switch (region)
-        {
-            case <= BusInterconnect.REGION_SRAM: cpu.Cycles += 1; break;
-            case 0x4: case 0x5: cpu.Cycles += 2; break;
-        }
+        cpu.Cycles += CortexM0Plus.CyclesIO(address, true);
         cpu.Bus.WriteWord(address, value);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteByteWithCycles(CortexM0Plus cpu, uint address, byte value)
     {
-        var region = address >> 28;
-        switch (region)
-        {
-            case <= BusInterconnect.REGION_SRAM: cpu.Cycles += 1; break;
-            case 0x4: case 0x5: cpu.Cycles += 2; break;
-        }
+        cpu.Cycles += CortexM0Plus.CyclesIO(address, true);
         cpu.Bus.WriteByte(address, value);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteHalfWordWithCycles(CortexM0Plus cpu, uint address, ushort value)
     {
-        var region = address >> 28;
-        switch (region)
-        {
-            case <= BusInterconnect.REGION_SRAM: cpu.Cycles += 1; break;
-            case 0x4: case 0x5: cpu.Cycles += 2; break;
-        }
+        cpu.Cycles += CortexM0Plus.CyclesIO(address, true);
         cpu.Bus.WriteHalfWord(address, value);
     }
 }
