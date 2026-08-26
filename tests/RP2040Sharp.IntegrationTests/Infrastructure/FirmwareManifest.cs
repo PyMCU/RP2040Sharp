@@ -24,6 +24,7 @@ public static class FirmwareManifest
         ["micropython-v1.21.0"] = new("a1166281fd87886e5d755e577e8eaf207881e20dac1d76f82161f37133547be3", 636928),
         // MicroPython, RPI_PICO_W board (bundles the CYW43 WLAN/BT firmware).
         ["micropython-picow-v1.21.0"] = new("1c7deb8409da29974e8cfb06d3798fd137ea682ca0785e5aec84bdbf0c017c96", 1604608),
+        ["micropython-picow-v1.28.0"] = new("a0210c9c8a085391cb66f530c298a5a4fb804a9d072289254c24df5fdf210f7a", 1749504),
         // CircuitPython, raspberry_pi_pico board — https://circuitpython.org/board/raspberry_pi_pico/
         ["circuitpython-9.2.1"] = new("b23e50784711101d6fd9958778f5541ea0781e9eb317dfe1d775959e80512bd6", 1769472),
     };
@@ -32,6 +33,7 @@ public static class FirmwareManifest
     private static readonly Dictionary<string, string> PicoWUrls = new()
     {
         ["v1.21.0"] = "https://micropython.org/resources/firmware/RPI_PICO_W-20231005-v1.21.0.uf2",
+        ["v1.28.0"] = "https://micropython.org/resources/firmware/RPI_PICO_W-20260406-v1.28.0.uf2",
     };
 
     /// <summary>The pin for a cache-file stem, or null if that image is not pinned (downloads unverified).</summary>

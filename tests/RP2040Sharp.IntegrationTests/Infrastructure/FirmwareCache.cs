@@ -81,51 +81,6 @@ public static class FirmwareCache
         return ms.ToArray();
     }
 
-    /// <summary>
-    /// The Pico W MicroPython build (bundles the CYW43439 WLAN/BT firmware the emulated radio needs).
-    /// Pinned by SHA-256 so the CYW43 tests always boot the exact image they were written against —
-    /// they used to point at a local <c>build-RPI_PICO_W/firmware.uf2</c> that no clean checkout has,
-    /// so on every other machine the whole WiFi/BLE suite skipped silently.
-    /// Returns null when the image cannot be fetched (offline), so callers skip cleanly.
-    /// </summary>
-    public static async Task<string?> GetMicroPythonPicoWAsync(string version = "v1.28.0")
-    {
-        const string Sha256 = "a0210c9c8a085391cb66f530c298a5a4fb804a9d072289254c24df5fdf210f7a";
-        const string Url = "https://micropython.org/resources/firmware/RPI_PICO_W-20260406-v1.28.0.uf2";
-
-        Directory.CreateDirectory(CacheDir);
-        var path = Path.Combine(CacheDir, $"micropython-picow-{version}.uf2");
-
-        if (!File.Exists(path) || new FileInfo(path).Length == 0)
-        {
-            try
-            {
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("RP2040Sharp-IntegrationTests/1.0");
-                await File.WriteAllBytesAsync(path, await http.GetByteArrayAsync(Url));
-            }
-            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-            {
-                if (File.Exists(path)) File.Delete(path);
-                return null;   // offline — caller skips
-            }
-        }
-
-        // A wrong hash means the bytes are not the build these tests were tuned against: fail loudly
-        // rather than skip, so a reissued upstream build is a visible signal to re-pin.
-        using var stream = File.OpenRead(path);
-        var actual = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(stream));
-        if (!actual.Equals(Sha256, StringComparison.OrdinalIgnoreCase))
-        {
-            stream.Dispose();
-            File.Delete(path);
-            throw new InvalidOperationException(
-                $"Pico W firmware changed upstream: expected SHA-256 {Sha256} but got {actual} from {Url}. " +
-                "Review the new build and re-pin the hash in FirmwareCache.");
-        }
-        return path;
-    }
-
     private static async Task<string?> ResolveMicroPythonUrlAsync(HttpClient http, string version)
     {
         // Firmware listed at https://micropython.org/download/RPI_PICO/
@@ -221,7 +176,7 @@ public static class FirmwareCache
     /// <see cref="FirmwareManifest.PicoWUrl"/> if not cached. Returns <c>null</c> when the version has no
     /// known URL or the download fails (offline). Throws on a SHA-256 mismatch.
     /// </summary>
-    public static async Task<string?> GetMicroPythonPicoWAsync(string version)
+    public static async Task<string?> GetMicroPythonPicoWAsync(string version = "v1.28.0")
     {
         Directory.CreateDirectory(CacheDir);
 
