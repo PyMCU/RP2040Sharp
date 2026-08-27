@@ -35,6 +35,11 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
     private long   _cycleAccum;
     private ulong  _timeMicros;
 
+    // Cycle count at the last Tick, so a read landing mid-block can fold in what the core has run
+    // since. See LiveMicros.
+    private long   _cyclesAtLastTick;
+    private ulong  _lastReported;
+
     // Latched high word when timelr is read (for consistent 64-bit reads)
     private uint _latchedHigh;
 
@@ -43,7 +48,7 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
 
     // ── Read-only inspection surface (playground/tests) ──────────────────────
     /// <summary>Live 64-bit microsecond counter (TIMERAWH:TIMERAWL).</summary>
-    public ulong GetCounter() => _timeMicros;
+    public ulong GetCounter() => LiveMicros();
     public uint GetAlarm(int i) => (uint)i < 4 ? _alarm[i] : 0;
     public bool IsArmed(int i)  => (uint)i < 4 && (_armed & (1u << i)) != 0;
     private uint _intr;    // raw interrupt status (written 1 to clear)
@@ -62,6 +67,7 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
 
     public void Tick(long deltaCycles)
     {
+        _cyclesAtLastTick = _cpu.Cycles;
         _cycleAccum += deltaCycles;
 
         // Convert accumulated cycles to microseconds
@@ -89,10 +95,42 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
         }
     }
 
+    /// <summary>
+    /// The microsecond counter as it stands <em>right now</em>, rather than as of the last
+    /// <see cref="Tick"/>.
+    ///
+    /// <para>A host drives the machine in blocks — <c>Run(n)</c> executes n instructions and only
+    /// then ticks the peripherals — so between those boundaries the counter used to stand still. Any
+    /// firmware that waits by watching this register (<c>busy_wait_us</c>, and through it every
+    /// bit-banged bus, plus the polling loops inside the I2C and SPI drivers) therefore could not
+    /// leave its loop until the block ended, whatever delay it had asked for. A 5 µs wait cost
+    /// whatever remained of the block: with 125 000-cycle blocks, milliseconds. Bit-banged buses ran
+    /// three orders of magnitude below their nominal rate as a result.
+    ///
+    /// <para>Resolving the counter from the core's own cycle count at the moment of the read fixes
+    /// that exactly and for free: no sub-blocking, no extra bookkeeping on the hot path, and the
+    /// value is the same one the silicon would report. Alarms stay on <see cref="Tick"/> — they are
+    /// interrupt sources, and firing them mid-block would re-enter the CPU from inside its own run
+    /// loop.</para>
+    /// </summary>
+    private ulong LiveMicros()
+    {
+        var pending = _cpu.Cycles - _cyclesAtLastTick;
+        var micros  = pending > 0
+            ? _timeMicros + (ulong)((_cycleAccum + pending) * 1_000_000 / _clkHz)
+            : _timeMicros;
+        // Two cores share this counter and Tick charges it the longer of the two, so a read taken
+        // from the core that is behind could otherwise step backwards. Time never does that.
+        if (micros < _lastReported) micros = _lastReported;
+        _lastReported = micros;
+        return micros;
+    }
+
     // ── IMemoryMappedDevice ──────────────────────────────────────────
 
     public uint ReadWord(uint address)
     {
+        var now = LiveMicros();
         return address switch
         {
             TIMEHW   => 0,
@@ -100,10 +138,10 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
             TIMEHR   => _latchedHigh,   // returns value latched when TIMELR was read
             TIMELR   =>
                 // Reading TIMELR latches TIMEHR for a coherent 64-bit read
-                (_ = (_latchedHigh = (uint)(_timeMicros >> 32)),
-                 (uint)_timeMicros).Item2,
-            TIMERAWH => (uint)(_timeMicros >> 32),
-            TIMERAWL => (uint)_timeMicros,
+                (_ = (_latchedHigh = (uint)(now >> 32)),
+                 (uint)now).Item2,
+            TIMERAWH => (uint)(now >> 32),
+            TIMERAWL => (uint)now,
             ALARM0   => _alarm[0],
             ALARM1   => _alarm[1],
             ALARM2   => _alarm[2],
@@ -133,6 +171,13 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
             case TIMELW:
                 // Setting timer (e.g. during boot); snap to a specific time
                 _timeMicros = ((ulong)_latchedHigh << 32) | value;
+                // Firmware is allowed to wind this counter BACKWARDS, so the write has to clear the
+                // monotonic floor that LiveMicros keeps and re-base the mid-block cycle origin.
+                // Otherwise the floor silently swallows the write and the counter keeps reporting the
+                // old, larger value.
+                _lastReported     = _timeMicros;
+                _cyclesAtLastTick = _cpu.Cycles;
+                _cycleAccum       = 0;
                 break;
             case ALARM0: WriteAlarm(0, value); break;
             case ALARM1: WriteAlarm(1, value); break;
