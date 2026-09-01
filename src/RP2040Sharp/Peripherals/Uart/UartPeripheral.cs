@@ -152,17 +152,23 @@ public sealed class UartPeripheral : IMemoryMappedDevice
         }
     }
 
+    /// <remarks>A sub-word write to UARTDR goes straight out. The generic read-modify-write path
+    /// below must never touch it: reading UARTDR pops the RX FIFO, so an 8-bit DMA beat (the
+    /// standard <c>DMA_SIZE_8</c> UART TX idiom) would swallow a received byte.</remarks>
     public void WriteHalfWord(uint address, ushort value)
     {
         var aligned = address & ~3u;
+        if (aligned == UARTDR) { WriteWord(UARTDR, value); return; }
         var shift = (int)((address & 2) << 3);
         var current = ReadWord(aligned);
         WriteWord(aligned, (current & ~(0xFFFFu << shift)) | ((uint)value << shift));
     }
 
+    /// <inheritdoc cref="WriteHalfWord"/>
     public void WriteByte(uint address, byte value)
     {
         var aligned = address & ~3u;
+        if (aligned == UARTDR) { WriteWord(UARTDR, value); return; }
         var shift = (int)((address & 3) << 3);
         var current = ReadWord(aligned);
         WriteWord(aligned, (current & ~(0xFFu << shift)) | ((uint)value << shift));

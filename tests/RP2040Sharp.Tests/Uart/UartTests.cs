@@ -230,4 +230,24 @@ public abstract class UartTests
             uart.ReadWord(UARTDMACR).Should().Be(0x3u);
         }
     }
+
+    /// <summary>
+    /// Regression for the sub-word write path: UARTDR is a FIFO whose read pops the RX side, so a
+    /// read-modify-write would swallow a received byte on every 8-bit DMA beat.
+    /// </summary>
+    public class SubWordDataRegisterWrites
+    {
+        [Fact]
+        public void Byte_write_to_the_data_register_does_not_consume_a_received_byte()
+        {
+            byte sent = 0;
+            var uart = new UartPeripheral { OnByteTransmit = b => sent = b };
+            uart.InjectByte(0xA5);
+
+            uart.WriteByte(UARTDR, 0x11);   // the DMA_SIZE_8 beat a UART TX channel issues
+
+            sent.Should().Be((byte)0x11, "the byte still goes out");
+            uart.ReadWord(UARTDR).Should().Be(0xA5, "the received byte survives the sub-word write");
+        }
+    }
 }

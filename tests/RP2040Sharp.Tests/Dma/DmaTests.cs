@@ -320,5 +320,59 @@ public abstract class DmaTests
             }
         }
     }
-}
 
+    /// <summary>
+    /// Regression for the SPI + DMA hang: MicroPython's <c>spi.write()</c> switches to DMA at 32 bytes
+    /// (<c>dma_min_size_threshold</c>), claiming one 8-bit channel that feeds SSPDR paced by SPIx_TX and
+    /// one that drains SSPDR paced by SPIx_RX, then blocking on the RX channel. Three defects left that
+    /// channel BUSY forever: SSPDR sub-word writes went through a read-modify-write whose read popped the
+    /// RX FIFO, the SPI TX DREQ was hardwired always-ready so a channel drained its whole buffer at
+    /// trigger time, and nothing re-armed a channel stalled on a SPI DREQ.
+    /// </summary>
+    public class SpiDmaPacing
+    {
+        private const uint SPI0_SSPDR = 0x4003C008u;   // SPI0 data register, as seen on the bus
+        private const uint SSPCR1     = 0x004;
+        private const uint CR1_SSE    = 1u << 1;       // SSP enable
+        private const int  DREQ_SPI0_TX = 16, DREQ_SPI0_RX = 17;
+        private const uint SRC = 0x20002000u, DST = 0x20003000u;
+
+        [Theory]
+        [InlineData(32u)]      // the smallest transfer MicroPython routes through DMA
+        [InlineData(1024u)]    // well past both FIFO depths, so it only completes if pacing round-trips
+        public void Spi_duplex_8bit_dma_pair_completes_both_channels(uint total)
+        {
+            using var m = new RP2040Machine();
+            m.Spi0.OnTransfer = tx => (ushort)(tx ^ 0xFF);   // stand-in device: echoes the complement
+            m.Spi0.WriteWord(SSPCR1, CR1_SSE);
+
+            for (var i = 0u; i < total; i++)
+                m.Bus.WriteByte(SRC + i, (byte)i);
+
+            // ch0 — TX: SRAM → SSPDR, 8-bit beats, paced by SPI0_TX.
+            m.Dma.WriteWord(READ_ADDR(0),   SRC);
+            m.Dma.WriteWord(WRITE_ADDR(0),  SPI0_SSPDR);
+            m.Dma.WriteWord(TRANS_COUNT(0), total);
+            m.Dma.WriteWord(CTRL_TRIG(0), CTRL_EN | CTRL_INCR_READ | ((uint)DREQ_SPI0_TX << 15));
+
+            // ch1 — RX: SSPDR → SRAM, 8-bit beats, paced by SPI0_RX.
+            m.Dma.WriteWord(READ_ADDR(1),   SPI0_SSPDR);
+            m.Dma.WriteWord(WRITE_ADDR(1),  DST);
+            m.Dma.WriteWord(TRANS_COUNT(1), total);
+            m.Dma.WriteWord(CTRL_TRIG(1), CTRL_EN | CTRL_INCR_WRITE | ((uint)DREQ_SPI0_RX << 15));
+
+            // Stand in for dma_channel_wait_for_finish_blocking: tick the SPI while the RX channel runs.
+            var guard = 0;
+            while (m.Dma.GetChannelTransCount(1) > 0)
+            {
+                m.Spi0.Tick(1);
+                (++guard).Should().BeLessThan((int)total + 100, "each tick must let the paced pair make forward progress");
+            }
+
+            m.Dma.GetChannelTransCount(0).Should().Be(0, "the TX channel places every byte in the TX FIFO");
+            m.Dma.IsChannelBusy(1).Should().BeFalse("the RX channel completes instead of stalling BUSY forever");
+            for (var i = 0u; i < total; i++)
+                m.Bus.ReadByte(DST + i).Should().Be((byte)((byte)i ^ 0xFF), $"beat {i} must round-trip without the FIFO dropping it");
+        }
+    }
+}
