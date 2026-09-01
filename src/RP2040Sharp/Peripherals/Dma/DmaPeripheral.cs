@@ -103,7 +103,19 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
         _dreqSources[dreqIndex] = ready;
     }
 
-    private bool _inResume;
+    // Guarded per DREQ line, not globally: a duplex transfer needs nested resumes from two
+    // different lines (a tick frees TX FIFO space -> ResumeDreq(SPIx_TX) -> the channel writes the
+    // data register -> the peripheral captures an RX word -> ResumeDreq(SPIx_RX)). A single flag
+    // swallowed the inner one, so the RX channel only ever drained the first burst and the
+    // peripheral silently dropped the rest. Self-reentry is still blocked by _executing[ch].
+    private readonly bool[] _inResume = new bool[64];
+
+    // True while a channel is inside its beat loop. Writing a FIFO during that loop can synchronously
+    // wake a stalled peripheral, which fires ResumeDreq → ExecuteChannel for the SAME channel again,
+    // mid-run, seeing a stale TRANS_COUNT — a spurious restart that double-counts beats. The guard
+    // refuses that restart; the in-flight run owns the transfer. (Chain / TRIGGER_SELF re-trigger AFTER
+    // the loop, when this is already clear, so they are unaffected.)
+    private readonly bool[] _executing = new bool[CHANNEL_COUNT];
 
     /// <summary>
     /// Re-arm any channel that stalled waiting on the given DREQ line, now that the source peripheral
@@ -111,12 +123,14 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
     /// stalled channel keeps BUSY set with beats still pending; re-running it moves as many beats as the
     /// DREQ now allows, then re-stalls if the source drains again. This is what makes a DMA↔FIFO transfer
     /// self-paced instead of draining an empty FIFO greedily at trigger time, and without it a DREQ-paced
-    /// transfer (e.g. a CYW43 firmware download over the PIO gSPI) stalls forever. Reentrancy-guarded.
+    /// transfer (e.g. a CYW43 firmware download over the PIO gSPI) stalls forever. Reentrancy-guarded
+    /// per DREQ line so a chained transfer can't recurse on itself, while a resume for a different
+    /// line still gets through.
     /// </summary>
     public void ResumeDreq(int dreqIndex)
     {
-        if (_inResume) return;
-        _inResume = true;
+        if (_inResume[dreqIndex]) return;
+        _inResume[dreqIndex] = true;
         try
         {
             for (var ch = 0; ch < CHANNEL_COUNT; ch++)
@@ -127,7 +141,7 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
                     ExecuteChannel(ch);
             }
         }
-        finally { _inResume = false; }
+        finally { _inResume[dreqIndex] = false; }
     }
 
     public DmaPeripheral(BusInterconnect bus, CortexM0Plus cpu)
@@ -324,6 +338,10 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
 
     private void ExecuteChannel(int ch)
     {
+        // A FIFO write inside the beat loop can re-enter ExecuteChannel for this channel (via a woken
+        // SM → ResumeDreq) with a stale count; refuse the mid-run restart so the beat count stays honest.
+        if (_executing[ch]) return;
+
         _ctrl[ch] |= CTRL_BUSY;
 
         var dataSize  = (int)((_ctrl[ch] & CTRL_DATA_SIZE) >> 2);  // 0=byte, 1=half, 2=word
@@ -345,6 +363,9 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
         var ringMask = ringSize > 0 ? (1u << ringSize) - 1 : 0u;
 
         var beatsExecuted = 0u;
+        _executing[ch] = true;
+        try
+        {
         for (var i = 0u; i < count; i++)
         {
             // Check DREQ: if source is registered and says not ready, stop
@@ -390,6 +411,8 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
             }
             beatsExecuted++;
         }
+        }
+        finally { _executing[ch] = false; }   // cleared before completion so chain/self-trigger still fire
 
         _readAddr[ch]   = rAddr;
         _writeAddr[ch]  = wAddr;

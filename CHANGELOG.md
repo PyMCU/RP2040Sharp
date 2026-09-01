@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: `spi.write()` of 32 bytes or more never returned
+
+MicroPython switches `spi.write()` to DMA at 32 bytes (`dma_min_size_threshold`), claiming one 8-bit
+channel that feeds SSPDR paced by `SPIx_TX` and one that drains SSPDR into a sink paced by `SPIx_RX`,
+then blocking on the RX channel. That channel stalled BUSY forever with all but one beat pending, so
+any SPI device moving real blocks — a display, an SD card, an external flash — hung the guest.
+
+Four defects combined:
+
+- `WriteByte`/`WriteHalfWord` implemented a sub-word write to SSPDR as a read-modify-write, and
+  reading SSPDR pops the RX FIFO — so every 8-bit DMA beat ate the word received by the previous one.
+  Sub-word writes to a FIFO register now go straight to the data path. The same read-modify-write was
+  eating received bytes on UARTDR and IC_DATA_CMD, and is fixed there too.
+- The SPI TX DREQ lines were hardwired always-ready, so a paced channel drained its whole source
+  buffer at trigger time instead of following the shift register. The SPI peripheral now models TX
+  FIFO occupancy (drained on `Tick`) and drives `SPIx_TX` from it, as the RP2350 already did.
+- Nothing re-armed a channel stalled on a SPI or ADC DREQ, which is what turned any shortfall into a
+  permanent hang rather than a slow transfer. `RP2040Machine` now wires the resume hooks.
+- `ResumeDreq` was reentrancy-guarded by one global flag, but a duplex transfer needs nested resumes
+  from two different DREQ lines, and the inner one was swallowed. The guard is now per DREQ line.
+
+The per-channel `_executing` guard that stops a channel restarting inside its own beat loop — added to
+the RP2350 for the equivalent PIO case — is ported here as well, since it is what keeps the relaxed
+resume guard safe.
+
 ### Renamed: the TestKits are now `SiliconTwin.*`
 
 | Old | New |

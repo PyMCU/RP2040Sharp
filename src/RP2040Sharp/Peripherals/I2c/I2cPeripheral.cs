@@ -236,16 +236,23 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
         }
     }
 
+    /// <remarks>A sub-word write to IC_DATA_CMD goes straight through. The generic
+    /// read-modify-write path below must never touch it: reading IC_DATA_CMD pops the RX FIFO, so a
+    /// 16-bit DMA beat (the width the CMD/RESTART/STOP bits force) would swallow a received
+    /// byte.</remarks>
     public void WriteHalfWord(uint address, ushort value)
     {
         var aligned = address & ~3u;
+        if (aligned == IC_DATA_CMD) { WriteWord(IC_DATA_CMD, value); return; }
         var shift = (int)((address & 2) << 3);
         WriteWord(aligned, (ReadWord(aligned) & ~(0xFFFFu << shift)) | ((uint)value << shift));
     }
 
+    /// <inheritdoc cref="WriteHalfWord"/>
     public void WriteByte(uint address, byte value)
     {
         var aligned = address & ~3u;
+        if (aligned == IC_DATA_CMD) { WriteWord(IC_DATA_CMD, value); return; }
         var shift = (int)((address & 3) << 3);
         WriteWord(aligned, (ReadWord(aligned) & ~(0xFFu << shift)) | ((uint)value << shift));
     }

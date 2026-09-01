@@ -6,9 +6,12 @@ namespace RP2040.Peripherals.Spi;
 /// <summary>
 /// RP2040 SPI peripheral (PL022).
 /// SPI0 base: 0x4003C000, SPI1 base: 0x40040000.
-/// TX/RX FIFOs have capacity 8 each. Transfer simulation via injectable callback.
+/// TX/RX FIFOs have capacity 8 each. Transfer simulation via injectable callback. The transfer
+/// runs the instant SSPDR is written (RX word captured immediately), while an 8-deep TX FIFO fill
+/// level tracks backpressure and drains on <see cref="Tick"/>, so a DMA channel paced by SPI*_TX
+/// stalls when the FIFO fills instead of draining its whole buffer at trigger time.
 /// </summary>
-public sealed class SpiPeripheral : IMemoryMappedDevice
+public sealed class SpiPeripheral : IMemoryMappedDevice, ITickable
 {
     private const uint SSPCR0  = 0x000;  // Control 0: SCR, SPH, SPO, FRF, DSS
     private const uint SSPCR1  = 0x004;  // Control 1: SOD, MS, SSE, LBM
@@ -54,7 +57,7 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
     private uint _ris;
     private uint _dmacr;
 
-    private readonly Queue<ushort> _txFifo = new(FIFO_DEPTH);
+    private int _txLevel;   // TX FIFO fill level (drained on Tick)
     private readonly Queue<ushort> _rxFifo = new(FIFO_DEPTH);
 
     /// <summary>
@@ -65,6 +68,15 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
 
     /// <summary>DREQ source for DMA RX: true when RX FIFO has data to read.</summary>
     public bool RxDataAvailable => _rxFifo.Count > 0;
+
+    /// <summary>DREQ source for DMA TX: true while the TX FIFO has room for another beat.</summary>
+    public bool TxFifoNotFull => _txLevel < FIFO_DEPTH;
+
+    /// <summary>Fired when a word lands in the RX FIFO — re-arms a DMA channel paced by this SPI's RX DREQ.</summary>
+    public Action? OnRxAvailable;
+
+    /// <summary>Fired when the TX FIFO drains on a tick — re-arms a DMA channel paced by this SPI's TX DREQ.</summary>
+    public Action? OnTxSpace;
 
     /// <summary>Read-only snapshot of the SPI (PL022) configuration for external inspection.</summary>
     public readonly record struct SpiConfigSnapshot(
@@ -78,6 +90,19 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
         (_cr0 & (1u << 6)) != 0,          // SPO / CPOL
         (_cr0 & (1u << 7)) != 0,          // SPH / CPHA
         (_cr1 & CR1_LBM) != 0);
+
+    // ── ITickable ─────────────────────────────────────────────────────
+
+    public void Tick(long deltaCycles)
+    {
+        // The transfer already ran at write time; draining the fill level just frees the FIFO
+        // space that paced a DMA burst and re-arms the channel.
+        if (_txLevel > 0)
+        {
+            _txLevel = 0;
+            OnTxSpace?.Invoke();
+        }
+    }
 
     public uint Size => 0x1000;
 
@@ -147,16 +172,23 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
         }
     }
 
+    /// <remarks>A sub-word write to SSPDR goes straight into the TX FIFO. The generic
+    /// read-modify-write path below must never touch it: reading SSPDR pops the RX FIFO, so an
+    /// 8/16-bit DMA beat (the standard <c>DMA_SIZE_8</c> SPI idiom) would eat the word received by
+    /// the previous beat and stall a paced RX channel forever.</remarks>
     public void WriteHalfWord(uint address, ushort value)
     {
         var aligned = address & ~3u;
+        if (aligned == SSPDR) { WriteData(value); return; }
         var shift = (int)((address & 2) << 3);
         WriteWord(aligned, (ReadWord(aligned) & ~(0xFFFFu << shift)) | ((uint)value << shift));
     }
 
+    /// <inheritdoc cref="WriteHalfWord"/>
     public void WriteByte(uint address, byte value)
     {
         var aligned = address & ~3u;
+        if (aligned == SSPDR) { WriteData(value); return; }
         var shift = (int)((address & 3) << 3);
         WriteWord(aligned, (ReadWord(aligned) & ~(0xFFu << shift)) | ((uint)value << shift));
     }
@@ -168,7 +200,7 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
 
     private void WriteData(ushort txData)
     {
-        if (!IsEnabled || _txFifo.Count >= FIFO_DEPTH)
+        if (!IsEnabled || _txLevel >= FIFO_DEPTH)
             return;
 
         ushort rxData;
@@ -185,9 +217,13 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
         if (_rxFifo.Count < FIFO_DEPTH)
             _rxFifo.Enqueue(rxData);
 
+        // Track TX FIFO occupancy for DREQ backpressure; the word itself already went out.
+        if (_txLevel < FIFO_DEPTH) _txLevel++;
+
         _ris |= 0x4;  // RXRIS — RX not empty
         _ris |= 0x8;  // TXRIS — TX FIFO ≤ half full (always true after immediate transfer)
         CheckInterrupts();
+        OnRxAvailable?.Invoke();
     }
 
     private uint ReadData()
@@ -206,8 +242,10 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
 
     private uint BuildStatus()
     {
-        uint sr = SR_TFE;  // TX FIFO always appears empty in simulation (immediate transfer)
-        if (_txFifo.Count < FIFO_DEPTH) sr |= SR_TNF;
+        uint sr = 0;
+        if (_txLevel == 0)             sr |= SR_TFE;
+        if (_txLevel < FIFO_DEPTH)     sr |= SR_TNF;
+        if (_txLevel > 0)              sr |= SR_BSY;   // still shifting out queued words
         if (_rxFifo.Count > 0)         sr |= SR_RNE;
         if (_rxFifo.Count >= FIFO_DEPTH) sr |= SR_RFF;
         return sr;
@@ -223,6 +261,9 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
     public void InjectByte(byte value)
     {
         if (_rxFifo.Count < FIFO_DEPTH)
+        {
             _rxFifo.Enqueue(value);
+            OnRxAvailable?.Invoke();
+        }
     }
 }

@@ -58,6 +58,9 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
     /// <summary>DREQ source for DMA: true when the ADC FIFO has data to read.</summary>
     public bool HasFifoData => _adcFifo.Count > 0;
 
+    /// <summary>Fired when a conversion lands in the FIFO — re-arms a DMA channel paced by the ADC DREQ.</summary>
+    public Action? OnFifoData;
+
     public uint Size => 0x100;
 
     // ── ITickable (START_MANY free-running mode) ──────────────────────────
@@ -196,6 +199,7 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
                 var sample = (ushort)(_result & 0xFFF);
                 if ((_fcs & (1u << 1)) != 0) sample >>= 4;  // SHIFT
                 _adcFifo.Enqueue(sample);
+                OnFifoData?.Invoke();   // re-arm a DMA channel paced by the ADC DREQ
             }
 
             // Fire ADC_IRQ_FIFO (IRQ 22) when FIFO level meets threshold
