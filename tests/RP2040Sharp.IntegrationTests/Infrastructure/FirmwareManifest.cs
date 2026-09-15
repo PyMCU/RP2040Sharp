@@ -27,6 +27,7 @@ public static class FirmwareManifest
         ["micropython-picow-v1.28.0"] = new("a0210c9c8a085391cb66f530c298a5a4fb804a9d072289254c24df5fdf210f7a", 1749504),
         // CircuitPython, raspberry_pi_pico board — https://circuitpython.org/board/raspberry_pi_pico/
         ["circuitpython-9.2.1"] = new("b23e50784711101d6fd9958778f5541ea0781e9eb317dfe1d775959e80512bd6", 1769472),
+        ["circuitpython-10.3.1"] = new("1e3134de1f2ea2bd1d46019e90781fa5bd95ea518b6665717cb256a9327a563a", 1959424),
     };
 
     // Official RPI_PICO_W MicroPython UF2 (per version) for the CYW43 tests, which need the wireless build.

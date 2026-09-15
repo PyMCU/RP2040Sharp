@@ -37,6 +37,11 @@
     <EmbeddedResource Include="Firmware\**\*.uf2" />
   </ItemGroup>
 
+  <!-- Embed native .mpy modules (natmods) baked onto the CIRCUITPY filesystem by tests -->
+  <ItemGroup>
+    <EmbeddedResource Include="Firmware\**\*.mpy" />
+  </ItemGroup>
+
   <ItemGroup>
     <Using Include="Xunit" />
     <Using Include="FluentAssertions" />
