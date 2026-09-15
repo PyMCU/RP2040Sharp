@@ -421,6 +421,17 @@ data and results never leave the runner, and air-gapped runners work. On GitHub 
 job needs `permissions: { contents: read, id-token: write }`, since a licence bound to no
 organisation would work in any of them.
 
+### Fixed
+
+- **`ADD <Rdn>, <Rm>` read R15 two bytes low.** The Thumb T2 encoding of ADD (register) took
+  the PC straight from the register file, where it has already been advanced by 2, instead of
+  the instruction address plus 4 the architecture specifies (ARMv6-M §A6.7.4). Position
+  independent code locates its own GOT with `add rN, pc`, so every natmod, every `-fpie`
+  payload and every hand-rolled PIC stub read its global table from two bytes below where it
+  sits. A CircuitPython native `.mpy` module therefore imported without raising and bound
+  nothing: the failure looked like success (#68). `ADD SP, <Rm>` had the same omission and is
+  fixed with it.
+
 ## [1.0.1-beta.6] - 2026-06-26
 
 ### Changed
