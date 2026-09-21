@@ -287,6 +287,22 @@ public abstract class BitOpsTests
         }
 
         [Fact]
+        public void Should_ReadProgramCounter_WithPipelineOffset_AtHalfwordAlignedAddress()
+        {
+            // Arrange
+            var opcode = InstructionEmiter.Mov(R3, PC);
+            Bus.WriteHalfWord(0x20000002, opcode);
+
+            Cpu.Registers.PC = 0x20000002;
+
+            // Act
+            Cpu.Step();
+
+            // Assert
+            Cpu.Registers[R3].Should().Be(0x20000006);
+        }
+
+        [Fact]
         public void Should_MoveRegisterToStackPointer_Without_ForcedAlignment()
         {
             // Arrange
