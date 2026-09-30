@@ -212,6 +212,23 @@ public abstract class ArithmeticOpsTests
             }
 
             [Fact]
+            public void Should_ReadProgramCounterAsInstructionAddressPlusFour_When_RmIsPc()
+            {
+                // Arrange: `add r0, pc` — the base of rustc/LLVM's halfword jump tables
+                // (`lsls r0, #1; add r0, pc; ldrh r0, [r0, #4]; lsls r0, #1; add pc, r0`).
+                var opcode = InstructionEmiter.AddHighRegisters(R0, PC);
+                Bus.WriteHalfWord(0x20000000, opcode);
+
+                Cpu.Registers[R0] = 0x10;
+
+                // Act
+                Cpu.Step();
+
+                // Assert
+                Cpu.Registers[R0].Should().Be(0x20000014);
+            }
+
+            [Fact]
             public void Should_PreserveFlags_When_UsingEncodingT2_WithLowRegisters()
             {
                 // Arrange
