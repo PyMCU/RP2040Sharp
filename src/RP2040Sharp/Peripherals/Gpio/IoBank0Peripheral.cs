@@ -110,7 +110,8 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
     public void NotifyPads(uint mask)
     {
         _inputWordValid = false;
-        if (PadChanged is null) return;
+        if (PadChanged is null && PadsChanged is null) return;
+        uint changed = 0;
         while (mask != 0)
         {
             var pin = System.Numerics.BitOperations.TrailingZeroCount(mask);
@@ -121,8 +122,55 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
             if (lvl == _lastPadLevel[pin] && oe == _lastPadOe[pin]) continue;
             _lastPadLevel[pin] = lvl;
             _lastPadOe[pin]    = oe;
-            PadChanged(pin);
+            changed |= 1u << pin;
+            PadChanged?.Invoke(pin);
         }
+        if (changed != 0) PadsChanged?.Invoke(changed);
+    }
+
+    /// <summary>Raised once per <see cref="NotifyPads"/> sweep with the mask of every pad whose effective
+    /// output (level or output-enable) changed in it, after <see cref="PadChanged"/> has fired for each.
+    /// Lets a host see a multi-pin write (a SIO set, a PIO <c>out pins</c>) as one batch.</summary>
+    public event Action<uint>? PadsChanged;
+
+    /// <summary>Re-reads the effective pad outputs as the baseline <see cref="NotifyPads"/> compares
+    /// against. The baseline only advances while someone listens, so a listener that attaches mid-run
+    /// calls this first to avoid being told about changes that happened before it was there.</summary>
+    internal void SyncPadBaseline()
+    {
+        for (var pin = 0; pin < GPIO_COUNT; pin++)
+        {
+            _lastPadLevel[pin] = GetPadOutputLevel(pin);
+            _lastPadOe[pin]    = GetPadOutputEnable(pin);
+        }
+    }
+
+    /// <summary>
+    /// The effective pad outputs of GPIO 0-29 as whole-word masks: which pads the chip drives and the
+    /// level on each driven one, through the function mux (SIO, PIO0/1, PWM). Same answer as walking
+    /// <see cref="GetPadOutputEnable"/> and <see cref="GetPadOutputLevel"/> pin by pin, without the walk.
+    /// <paramref name="levels"/> is only meaningful where <paramref name="outputEnable"/> is set.
+    /// </summary>
+    public void GetPadOutputState(out uint outputEnable, out uint levels)
+    {
+        var sioDriven  = _sio.GpioOe & _sioPins;
+        var pio0Driven = _pioOe[0]   & _pio0Pins;
+        var pio1Driven = _pioOe[1]   & _pio1Pins;
+        var w = (_sio.GpioOut & sioDriven) | (_pioOut[0] & pio0Driven) | (_pioOut[1] & pio1Driven);
+        var driven = sioDriven | pio0Driven | pio1Driven;
+
+        var rest = _pwmMuxedPins;
+        while (rest != 0)
+        {
+            var pin = System.Numerics.BitOperations.TrailingZeroCount(rest);
+            rest &= rest - 1;
+            if (!GetPadOutputEnable(pin)) continue;
+            driven |= 1u << pin;
+            if (GetPadOutputLevel(pin)) w |= 1u << pin;
+        }
+
+        outputEnable = driven & GpioMask;
+        levels       = w & GpioMask;
     }
 
     /// <summary>The 32-bit word of effective pad input levels (GPIO 0-31): an output-enabled pad reads
@@ -193,7 +241,42 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
 
     /// <summary>Drive a pad's input from an off-chip device (the pad's external connection). Identical to
     /// <see cref="UpdatePinInput"/> but named for the external-device direction.</summary>
-    public void SetExternalInput(int pin, bool level) => UpdatePinInput(pin, level);
+    public void SetExternalInput(int pin, bool level)
+    {
+        UpdatePinInput(pin, level);
+        if ((uint)pin < GPIO_COUNT) _externalHeld |= 1u << pin;
+    }
+
+    /// <summary>Pads an off-chip device currently drives through <see cref="SetExternalInput"/>.</summary>
+    private uint _externalHeld;
+
+    /// <summary>
+    /// Stops driving the pads in <paramref name="mask"/> from outside, as <see cref="SetExternalInput"/>
+    /// started: the pad goes back to being undriven, so its pull resistor (or nothing) sets the level it
+    /// reads, and the change is latched as an edge like any other input transition. Pads that were not
+    /// held externally are left alone, and so are pads muxed to a PIO, which owns their level.
+    /// </summary>
+    public void ReleaseExternalInput(uint mask)
+    {
+        mask &= _externalHeld & GpioMask;
+        _externalHeld &= ~mask;
+        while (mask != 0)
+        {
+            var pin = System.Numerics.BitOperations.TrailingZeroCount(mask);
+            mask &= mask - 1;
+            var fn = _ctrl[pin] & FUNCSEL_MASK;
+            if (fn == FUNCSEL_PIO0 || fn == FUNCSEL_PIO1) continue;
+            var bit = 1u << pin;
+            _externalInput &= ~bit;
+            _sio.ReleaseGpioExternal(bit);
+            InvalidateInputWord();
+
+            var value = (_sio.GpioIn & bit) != 0;
+            var old = _gpioInput[pin];
+            _gpioInput[pin] = value;
+            if (old != value) LatchInputEdge(pin, value);
+        }
+    }
 
     /// <summary>
     /// Returns the FUNCSEL value [4:0] for <paramref name="pin"/>.
@@ -273,6 +356,13 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         _sio.SetGpioExternalIn(pin, value);
 
         if (old == value) return;  // no edge → no IRQ to (re-)evaluate
+        LatchInputEdge(pin, value);
+    }
+
+    /// <summary>Latches the edge of a pad input that just changed to <paramref name="value"/> and
+    /// evaluates the pin's interrupts.</summary>
+    private void LatchInputEdge(int pin, bool value)
+    {
         if (value) _intrEdge[pin] |= IRQ_EDGE_HIGH;
         else       _intrEdge[pin] |= IRQ_EDGE_LOW;
 

@@ -207,6 +207,14 @@ public sealed class SioPeripheral : IMemoryMappedDevice
         _gpioDriven |= mask;
     }
 
+    /// <summary>Hands the pads in <paramref name="mask"/> back to float: forgets the level a wired signal
+    /// imposed on them (see <see cref="SetGpioExternalIn"/>) so they settle on their pull again.</summary>
+    public void ReleaseGpioExternal(uint mask)
+    {
+        _gpioDriven &= ~mask;
+        _gpioIn     &= ~mask;
+    }
+
     public uint GpioOe  => _gpioOe;
     public uint GpioOut => _gpioOut;
 

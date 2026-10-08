@@ -943,6 +943,72 @@ public sealed class RP2040Machine : IDisposable
             t.Tick(delta);
     }
 
+    /// <summary>Running estimate of cycles per instruction, used by <see cref="RunCycles"/> to size slices.</summary>
+    private double _cyclesPerInstruction = 2.0;
+
+    /// <summary>
+    /// Run until at least <paramref name="cycleBudget"/> wall-clock cycles have elapsed, ticking the
+    /// time-aware peripherals after every slice. <see cref="Run"/> counts instructions and an
+    /// instruction costs one to a dozen cycles, so each slice is sized from the cycles still owed and
+    /// the cycles per instruction seen so far, aiming a little short of the budget. The tail narrows to
+    /// single instructions, which keeps the overshoot to about one instruction.
+    /// </summary>
+    /// <param name="cycleBudget">Cycles to run. Zero or less does nothing.</param>
+    /// <param name="maxSliceInstructions">Upper bound on one slice. It sets how often peripherals are
+    /// ticked (a PIO program or a PWM counter only advances at slice boundaries), so lower it to
+    /// interleave a circuit more finely and raise it for throughput.</param>
+    /// <returns>The cycles that elapsed (also left in <see cref="LastElapsedCycles"/>). With Core 1
+    /// launched, each slice counts as the longer of the two cores, as in <see cref="Run"/>.</returns>
+    public long RunCycles(long cycleBudget, int maxSliceInstructions = 16_384)
+    {
+        if (cycleBudget <= 0)
+        {
+            LastElapsedCycles = 0;
+            return 0;
+        }
+
+        var cap = Math.Max(1, maxSliceInstructions);
+        long elapsed = 0;
+        while (elapsed < cycleBudget)
+        {
+            var remaining = cycleBudget - elapsed;
+            var slice = (int)Math.Clamp((long)(remaining / (_cyclesPerInstruction * 1.15)), 1, cap);
+            Run(slice);
+            var spent = LastElapsedCycles;
+            if (spent <= 0)
+            {
+                // Both cores are stopped (locked up): time still passes, so burn the rest of the budget
+                // instead of spinning on a clock that never moves.
+                Cpu.Cycles += remaining;
+                foreach (var t in _tickables)
+                    t.Tick(remaining);
+                spent = remaining;
+            }
+            else
+            {
+                _cyclesPerInstruction = Math.Clamp(0.5 * _cyclesPerInstruction + 0.5 * spent / slice, 1.0, 16.0);
+            }
+            elapsed += spent;
+        }
+
+        LastElapsedCycles = elapsed;
+        return elapsed;
+    }
+
+    /// <summary>
+    /// Reset both cores like <see cref="Reset"/>, then start Core 0 where <see cref="LoadFlash"/> does:
+    /// at the start of flash, with SP taken from the firmware's vector table, bypassing the BootROM
+    /// reset handler. For a host that loaded an image and wants to run it again from the top.
+    /// </summary>
+    /// <param name="imageLength">Length of the image in flash, to bound the vector table search.</param>
+    internal unsafe void ResetToFlash(int imageLength)
+    {
+        Reset();
+        if (TryFindVectorTable(Bus.PtrFlash, imageLength, out var sp, out _, out _))
+            Cpu.Registers.SP = sp;
+        Cpu.Registers.PC = BusInterconnect.FLASH_START_ADDRESS;
+    }
+
     /// <summary>Diagnostic sibling of <see cref="Run"/> that drives core 0 through the per-instruction
     /// profiling path (<see cref="CortexM0Plus.RunProfiled"/>), then ticks peripherals. Core 1, if
     /// launched, runs unobserved. For boot/fault tracing only — not throughput-sensitive.</summary>
