@@ -322,7 +322,7 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
         }
     }
 
-    private void ExecuteChannel(int ch)
+    private void ExecuteChannel(int ch, int chainDepth = 0)
     {
         _ctrl[ch] |= CTRL_BUSY;
 
@@ -411,9 +411,14 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
                 _cpu.SetInterrupt(12, true);
 
             // Chain to another channel if configured
+            // CHAIN_TO is 4 bits wide but only 12 channels exist: 12-15 chain to nothing (indexing the
+            // arrays with them threw out of Run). Transfers are synchronous, so a ring of enabled channels
+            // (A -> B -> A, each completing with nothing to move) would recurse until the host stack
+            // overflowed; no legitimate chain is longer than the channel count, so stop there.
             var chainTo = (int)((_ctrl[ch] & CTRL_CHAIN_TO) >> 11);
-            if (chainTo != ch && (_ctrl[chainTo] & CTRL_EN) != 0)
-                ExecuteChannel(chainTo);
+            if (chainTo != ch && chainTo < CHANNEL_COUNT && chainDepth < CHANNEL_COUNT
+                && (_ctrl[chainTo] & CTRL_EN) != 0)
+                ExecuteChannel(chainTo, chainDepth + 1);
         }
     }
 }

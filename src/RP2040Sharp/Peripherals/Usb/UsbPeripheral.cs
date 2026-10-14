@@ -516,8 +516,11 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
             // IN: data flows device → host. Capture buffer, clear FULL, indicate ready.
             value &= ~USB_BUF_CTRL_FULL;
             WriteDpramWord(offset, value);
+            // BUFFER_ADDRESS is firmware-written (up to 0xFFC0) and LENGTH up to 1023, but DPRAM is 4 KB:
+            // copy only what lies inside it (the rest of the packet reads as zero).
             var buffer = new byte[bufLen];
-            _dpram.AsSpan((int)bufferOffset, bufLen).CopyTo(buffer);
+            var inside = (int)Math.Min((uint)bufLen, DPRAM_SIZE - Math.Min(bufferOffset, DPRAM_SIZE));
+            _dpram.AsSpan((int)Math.Min(bufferOffset, DPRAM_SIZE), inside).CopyTo(buffer);
             // Store pending write to be delivered by Tick() after WRITE_DELAY_CYCLES.
             // This ensures the firmware ISR returns before the host responds with next SETUP.
             var buffBit = endpoint * 2; // IN = even bit
@@ -656,9 +659,11 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
                 var bufCtrlReg = EP0_OUT_BUFFER_CONTROL + (uint)ep * 8;
                 var bufCtrl = ReadDpramWord(bufCtrlReg);
                 var requestedLen = (int)(bufCtrl & USB_BUF_CTRL_LEN_MASK);
-                var newLen = Math.Min(buf.Length, requestedLen);
                 var bufferOffset = GetEndpointBufferOffset(ep, out_: true);
-                buf.AsSpan(0, newLen).CopyTo(_dpram.AsSpan((int)bufferOffset, newLen));
+                // The firmware-written BUFFER_ADDRESS may leave less than the requested length inside the 4 KB DPRAM.
+                var newLen = (int)Math.Min((uint)Math.Min(buf.Length, requestedLen),
+                                           DPRAM_SIZE - Math.Min(bufferOffset, DPRAM_SIZE));
+                buf.AsSpan(0, newLen).CopyTo(_dpram.AsSpan((int)Math.Min(bufferOffset, DPRAM_SIZE), newLen));
                 bufCtrl |= USB_BUF_CTRL_FULL;
                 bufCtrl = (bufCtrl & ~USB_BUF_CTRL_LEN_MASK) | ((uint)newLen & USB_BUF_CTRL_LEN_MASK);
                 WriteDpramWord(bufCtrlReg, bufCtrl);

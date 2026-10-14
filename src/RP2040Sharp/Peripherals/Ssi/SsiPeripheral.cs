@@ -384,6 +384,9 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     {
         // Align the start address down to the erase-unit boundary (size must be a power of 2)
         var start = addr & ~(size - 1);
+        // The 24-bit address can lie beyond a smaller flash: nothing to erase, and (end - start) would
+        // wrap to ~4 GB for InitBlock (host heap write).
+        if (start >= _flashSize) return;
         var end   = start + size;
         if (end > _flashSize) end = _flashSize;
         Unsafe.InitBlock(_flashPtr + start, 0xFF, end - start);

@@ -6,6 +6,15 @@ namespace RP2040.Core.Cpu.Instructions;
 
 public static unsafe class MemoryOps
 {
+    /// <summary>True when a <paramref name="bytes"/>-long burst starting at SRAM address <paramref name="addr"/>
+    /// stays inside the 512 KB backing buffer. The multi-register fast paths mask only the START address
+    /// and then advance a raw pointer, so a hostile SP/base near the top of the window would run off the
+    /// native buffer (host heap overflow). When it does not fit they take the per-word path, which re-masks
+    /// (wraps) each access exactly like the scalar loads and stores.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool SramBurstFits(uint addr, uint bytes)
+        => (addr & BusInterconnect.MASK_SRAM) + bytes <= BusInterconnect.MASK_SRAM + 1;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void LdrImmediate(ushort opcode, CortexM0Plus cpu)
     {
@@ -52,7 +61,8 @@ public static unsafe class MemoryOps
         var sp = cpu.Registers.SP;
         var finalSp = sp + (regCount * 4);
 
-        if ((sp >> 28) == BusInterconnect.REGION_SRAM)
+        if ((sp >> 28) == BusInterconnect.REGION_SRAM
+            && SramBurstFits(sp, regCount * 4))
         {
             var rawPtr = cpu.Bus.PtrSram + (sp & BusInterconnect.MASK_SRAM);
 
@@ -91,7 +101,8 @@ public static unsafe class MemoryOps
         var finalSp = sp + ((regCount + 1) * 4);
 
         uint newPc;
-        if ((sp >> 28) == BusInterconnect.REGION_SRAM)
+        if ((sp >> 28) == BusInterconnect.REGION_SRAM
+            && SramBurstFits(sp, (regCount + 1) * 4))
         {
             var rawPtr = cpu.Bus.PtrSram + (sp & BusInterconnect.MASK_SRAM);
 
@@ -142,7 +153,8 @@ public static unsafe class MemoryOps
         var oldSp = cpu.Registers.SP;
         var newSp = oldSp - totalBytes;
 
-        if ((newSp >> 28) == BusInterconnect.REGION_SRAM)
+        if ((newSp >> 28) == BusInterconnect.REGION_SRAM
+            && SramBurstFits(newSp, totalBytes))
         {
             var rawPtr = cpu.Bus.PtrSram + (newSp & BusInterconnect.MASK_SRAM);
 
@@ -185,7 +197,8 @@ public static unsafe class MemoryOps
         var oldSp = cpu.Registers.SP;
         var newSp = oldSp - totalBytes;
 
-        if ((newSp >> 28) == BusInterconnect.REGION_SRAM)
+        if ((newSp >> 28) == BusInterconnect.REGION_SRAM
+            && SramBurstFits(newSp, totalBytes))
         {
             var rawPtr = cpu.Bus.PtrSram + (newSp & BusInterconnect.MASK_SRAM);
 
@@ -229,7 +242,8 @@ public static unsafe class MemoryOps
         var isRnInList = (mask >> rn) & 1;
         var writeBackOffset = (regCount * 4) * (isRnInList ^ 1);
 
-        if ((baseAddr >> 28) == BusInterconnect.REGION_SRAM)
+        if ((baseAddr >> 28) == BusInterconnect.REGION_SRAM
+            && SramBurstFits(baseAddr, regCount * 4))
         {
             var ptr = cpu.Bus.PtrSram + (baseAddr & BusInterconnect.MASK_SRAM);
 
@@ -420,7 +434,8 @@ public static unsafe class MemoryOps
         var regCount = (uint)BitOperations.PopCount(mask);
         var baseAddr = cpu.Registers[rn];
 
-        if ((baseAddr >> 28) == BusInterconnect.REGION_SRAM)
+        if ((baseAddr >> 28) == BusInterconnect.REGION_SRAM
+            && SramBurstFits(baseAddr, regCount * 4))
         {
             var ptr = cpu.Bus.PtrSram + (baseAddr & BusInterconnect.MASK_SRAM);
 
