@@ -175,7 +175,7 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
                 break;
 
             case NVIC_ISPR:
-                SetPendingBits(value & 0x3FFFFFF);
+                SetPendingBits(value);
                 break;
 
             case NVIC_ICPR:
@@ -251,7 +251,7 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
         while (mask != 0)
         {
             var irq = BitOperations.TrailingZeroCount(mask);
-            _cpu.SetInterrupt(irq, true);
+            _cpu.PendInterruptLocal(irq);   // ISPR is per-core: must not pend the other core's NVIC too
             mask &= mask - 1;   // clear lowest set bit
         }
     }
@@ -263,7 +263,7 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
         for (var b = 0; b < 4; b++)
         {
             var irq = iprIdx * 4 + b;
-            if (irq > 25) break;
+            if (irq > 31) break;
             var level = (int)((iprValue >> (b * 8 + 6)) & 3);
             var bit = 1u << irq;
 

@@ -58,6 +58,9 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
     /// <summary>DREQ source for DMA: true when the ADC FIFO has data to read.</summary>
     public bool HasFifoData => _adcFifo.Count > 0;
 
+    /// <summary>Raised when a sample lands in the FIFO, so a DMA channel stalled on DREQ_ADC can re-arm.</summary>
+    public Action? OnFifoData;
+
     public uint Size => 0x100;
 
     // ── ITickable (START_MANY free-running mode) ──────────────────────────
@@ -70,13 +73,14 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
         // ADC_DIV: INT[27:8] + FRAC[7:0] (integer and fractional divisor of ADC clock).
         var divInt  = (long)((_div >> 8) & 0xFFFFF);
         var divFrac = (long)(_div & 0xFF);
-        if (divInt == 0) divInt = 1;
 
-        // cycles_per_conversion = (divInt + divFrac/256) * 96 * (CPU_HZ / ADC_HZ)
-        //   = (divInt*256 + divFrac) * 96 * 125 / (256 * 48)
-        const long num = 96L * 125;
-        const long den = 256L * 48;
-        var cyclesPerConv = (divInt * 256 + divFrac) * num / den;
+        // ADC_DIV (datasheet §4.9.3): the sample period is (1 + DIV) ADC clocks on average, where DIV = INT + FRAC/256;
+        // a conversion itself takes 96 ADC clocks, so any shorter period is clamped to 96. (The conversion time is NOT a
+        // multiplier of DIV: an 8 kHz capture, DIV = 5999, is one sample per 6000 ADC clocks, not per 6000 x 96.)
+        var periodClocks256 = divInt * 256 + divFrac + 256;                 // (1 + DIV) x 256 ADC clocks
+        if (periodClocks256 < 96 * 256) periodClocks256 = 96 * 256;
+        // ADC clock = 48 MHz; CPU clock = 125 MHz.
+        var cyclesPerConv = periodClocks256 * 125 / (256 * 48);
         if (cyclesPerConv < 1) cyclesPerConv = 1;
 
         _tickAccum += deltaCycles;
@@ -196,6 +200,7 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
                 var sample = (ushort)(_result & 0xFFF);
                 if ((_fcs & (1u << 1)) != 0) sample >>= 4;  // SHIFT
                 _adcFifo.Enqueue(sample);
+                OnFifoData?.Invoke();
             }
 
             // Fire ADC_IRQ_FIFO (IRQ 22) when FIFO level meets threshold

@@ -98,10 +98,13 @@ public sealed class SioPeripheral : IMemoryMappedDevice
     // Divider state. UDIVIDEND and SDIVIDEND are two views of ONE physical register (same for the
     // two divisors, §2.3.1.5): the alias only selects how the operands are interpreted. Keeping
     // them apart made a signed write invisible to a later unsigned one, and vice versa.
-    private uint _divDividend, _divDivisor;
-    private uint _divQuotient, _divRemainder;
-    private uint _divCsr;
-    private bool _divSigned;
+    // The divider and both interpolators are PER-CORE on silicon (§2.3.1.3, §2.3.1.5): each core sees its own
+    // instance at the same SIO addresses. Sharing one made two cores' divisions clobber each other whenever their
+    // run slices interleaved between the operand writes and the result read (every `/` and `%` on RP2040 goes
+    // through the divider), handing one core the other's quotient.
+    private struct DivState { public uint Dividend, Divisor, Quotient, Remainder, Csr; public bool Signed; }
+    private readonly DivState[] _div = new DivState[2];
+    private int CoreIdx => (GetActiveCoreId?.Invoke() ?? 0) & 1;
 
     // Spinlocks
     private uint _spinLocks;
@@ -148,8 +151,8 @@ public sealed class SioPeripheral : IMemoryMappedDevice
     public Action<uint>? OnGpioChanged { get; set; }
 
     // Interpolators
-    private InterpState _interp0;
-    private InterpState _interp1;
+    private readonly InterpState[] _interp0 = new InterpState[2];
+    private readonly InterpState[] _interp1 = new InterpState[2];
 
     public uint Size => 0x10000;  // wide enough to cover spinlocks at 0x100–0x17C
 
@@ -239,11 +242,11 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
         // Interpolator 0
         if (address >= INTERP0_BASE && address < INTERP0_BASE + 0x40)
-            return ReadInterp(ref _interp0, address - INTERP0_BASE);
+            return ReadInterp(ref _interp0[CoreIdx], address - INTERP0_BASE);
 
         // Interpolator 1
         if (address >= INTERP1_BASE && address < INTERP1_BASE + 0x40)
-            return ReadInterp(ref _interp1, address - INTERP1_BASE);
+            return ReadInterp(ref _interp1[CoreIdx], address - INTERP1_BASE);
 
         return address switch
         {
@@ -258,13 +261,13 @@ public sealed class SioPeripheral : IMemoryMappedDevice
             GPIO_HI_OUT  => _gpioHiOut,
             GPIO_OE      => _gpioOe,
             GPIO_HI_OE   => _gpioHiOe,
-            DIV_UDIVIDEND => _divDividend,
-            DIV_UDIVISOR  => _divDivisor,
-            DIV_SDIVIDEND => _divDividend,
-            DIV_SDIVISOR  => _divDivisor,
-            DIV_QUOTIENT  => _divQuotient,
-            DIV_REMAINDER => _divRemainder,
-            DIV_CSR       => _divCsr,
+            DIV_UDIVIDEND => _div[CoreIdx].Dividend,
+            DIV_UDIVISOR  => _div[CoreIdx].Divisor,
+            DIV_SDIVIDEND => _div[CoreIdx].Dividend,
+            DIV_SDIVISOR  => _div[CoreIdx].Divisor,
+            DIV_QUOTIENT  => _div[CoreIdx].Quotient,
+            DIV_REMAINDER => _div[CoreIdx].Remainder,
+            DIV_CSR       => _div[CoreIdx].Csr,
             FIFO_ST  => BuildFifoStatus(GetActiveCoreId?.Invoke() ?? 0),
             FIFO_RD  => ReadFifoForCore(GetActiveCoreId?.Invoke() ?? 0),
             SPINLOCK_ST   => _spinLocks,
@@ -292,14 +295,14 @@ public sealed class SioPeripheral : IMemoryMappedDevice
         // Interpolator 0
         if (address >= INTERP0_BASE && address < INTERP0_BASE + 0x40)
         {
-            WriteInterp(ref _interp0, address - INTERP0_BASE, value);
+            WriteInterp(ref _interp0[CoreIdx], address - INTERP0_BASE, value);
             return;
         }
 
         // Interpolator 1
         if (address >= INTERP1_BASE && address < INTERP1_BASE + 0x40)
         {
-            WriteInterp(ref _interp1, address - INTERP1_BASE, value);
+            WriteInterp(ref _interp1[CoreIdx], address - INTERP1_BASE, value);
             return;
         }
 
@@ -386,32 +389,32 @@ public sealed class SioPeripheral : IMemoryMappedDevice
             // what made MicroPython compute a nonsense PIO clock divider and reject freq=8_000_000
             // in the ws2812 / neopixel examples with "freq out of range".
             case DIV_UDIVIDEND:
-                _divDividend = value;
-                _divSigned   = false;
-                PerformDivide();
+                _div[CoreIdx].Dividend = value;
+                _div[CoreIdx].Signed   = false;
+                PerformDivide(CoreIdx);
                 break;
             case DIV_UDIVISOR:
-                _divDivisor = value;
-                _divSigned  = false;
-                PerformDivide();
+                _div[CoreIdx].Divisor = value;
+                _div[CoreIdx].Signed  = false;
+                PerformDivide(CoreIdx);
                 break;
             case DIV_SDIVIDEND:
-                _divDividend = value;
-                _divSigned   = true;
-                PerformDivide();
+                _div[CoreIdx].Dividend = value;
+                _div[CoreIdx].Signed   = true;
+                PerformDivide(CoreIdx);
                 break;
             case DIV_SDIVISOR:
-                _divDivisor = value;
-                _divSigned  = true;
-                PerformDivide();
+                _div[CoreIdx].Divisor = value;
+                _div[CoreIdx].Signed  = true;
+                PerformDivide(CoreIdx);
                 break;
             case DIV_QUOTIENT:
-                _divQuotient = value;
-                _divCsr |= 1;
+                _div[CoreIdx].Quotient = value;
+                _div[CoreIdx].Csr |= 1;
                 break;
             case DIV_REMAINDER:
-                _divRemainder = value;
-                _divCsr |= 1;
+                _div[CoreIdx].Remainder = value;
+                _div[CoreIdx].Csr |= 1;
                 break;
         }
     }
@@ -594,47 +597,48 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
     // ── Divider ──────────────────────────────────────────────────────
 
-    private void PerformDivide()
+    private void PerformDivide(int core)
     {
-        _cpu.Cycles += 8;
-        _divCsr = 0x2;  // READY, not DIRTY
+        ref var d = ref _div[core];
+        (core == 1 && _cpu1 is not null ? _cpu1 : _cpu).Cycles += 8;   // the issuing core waits out the 8-cycle divide
+        d.Csr = 0x2;  // READY, not DIRTY
 
-        if (_divSigned)
+        if (d.Signed)
         {
-            var dividend = (int)_divDividend;
-            var divisor  = (int)_divDivisor;
+            var dividend = (int)d.Dividend;
+            var divisor  = (int)d.Divisor;
             if (divisor == 0)
             {
                 // RP2040 TRM §2.3.1.6: for signed div-by-zero:
                 //   quotient = +1 when dividend >= 0  (0x00000001)
                 //   quotient = -1 when dividend <  0  (0xFFFFFFFF)
                 // remainder = dividend in both cases.
-                _divQuotient  = dividend >= 0 ? 1u : 0xFFFFFFFF;
-                _divRemainder = _divDividend;
+                d.Quotient  = dividend >= 0 ? 1u : 0xFFFFFFFF;
+                d.Remainder = d.Dividend;
             }
             else if (dividend == int.MinValue && divisor == -1)
             {
                 // The one case C# throws on: the true quotient is not representable. Silicon wraps.
-                _divQuotient  = 0x80000000;
-                _divRemainder = 0;
+                d.Quotient  = 0x80000000;
+                d.Remainder = 0;
             }
             else
             {
-                _divQuotient  = (uint)(dividend / divisor);
-                _divRemainder = (uint)(dividend % divisor);
+                d.Quotient  = (uint)(dividend / divisor);
+                d.Remainder = (uint)(dividend % divisor);
             }
         }
         else
         {
-            if (_divDivisor == 0)
+            if (d.Divisor == 0)
             {
-                _divQuotient  = 0xFFFFFFFF;
-                _divRemainder = _divDividend;
+                d.Quotient  = 0xFFFFFFFF;
+                d.Remainder = d.Dividend;
             }
             else
             {
-                _divQuotient  = _divDividend / _divDivisor;
-                _divRemainder = _divDividend % _divDivisor;
+                d.Quotient  = d.Dividend / d.Divisor;
+                d.Remainder = d.Dividend % d.Divisor;
             }
         }
     }

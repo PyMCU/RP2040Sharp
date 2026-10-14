@@ -166,7 +166,7 @@ public sealed unsafe class CortexM0Plus
 
         // All IRQs reset to priority level 0 (each InterruptPrioritiesN is the bitmask of
         // IRQs currently at that level; NVIC IPR writes move bits between buckets).
-        Registers.InterruptPriorities0 = 0x03FFFFFF;
+        Registers.InterruptPriorities0 = 0xFFFFFFFF;   // all 32 NVIC lines (26-31 are the unassigned lines the SDK hands out as user IRQs)
         Registers.InterruptPriorities1 = 0;
         Registers.InterruptPriorities2 = 0;
         Registers.InterruptPriorities3 = 0;
@@ -575,10 +575,17 @@ public sealed unsafe class CortexM0Plus
 
     public void SetInterrupt(int irq, bool pending)
     {
-        if (irq is < 0 or > 25) return;
+        if (irq is < 0 or > 31) return;
         if (irq is not (IRQ_SIO_PROC0 or IRQ_SIO_PROC1))
             SiblingCore?.SetInterruptLine(irq, pending);
         SetInterruptLine(irq, pending);
+    }
+
+    /// <summary>Software-pends a line in THIS core's NVIC only (NVIC_ISPR is per core; <c>irq_set_pending()</c>).</summary>
+    public void PendInterruptLocal(int irq)
+    {
+        if (irq is < 0 or > 31) return;
+        SetInterruptLine(irq, true);
     }
 
     /// <summary>Drives this core's NVIC line only — never crosses to the sibling.</summary>

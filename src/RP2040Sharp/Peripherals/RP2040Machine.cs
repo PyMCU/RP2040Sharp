@@ -319,7 +319,8 @@ public sealed class RP2040Machine : IDisposable
         // ── Tickable list ─────────────────────────────────────────────────
         // ppbRouter.Tick() internally ticks both Ppb (Core0) and Ppb1 (Core1),
         // so Ppb1 does not need a separate entry here.
-        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Usb, Dma];
+        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Adc, Usb, Dma];
+        Watchdog.OnReset = SystemReset;
 
         // ── DMA DREQ sources ──────────────────────────────────────────────
         // PIO0 TX/RX SM0-3: DREQ 0-3 (TX), 4-7 (RX)
@@ -351,8 +352,22 @@ public sealed class RP2040Machine : IDisposable
         Dma.RegisterDreq(21, () => Uart0.RxDataAvailable);
         Dma.RegisterDreq(22, () => true);              // UART1 TX always ready
         Dma.RegisterDreq(23, () => Uart1.RxDataAvailable);
+        // I2C0 TX(32), RX(33), I2C1 TX(34), RX(35)
+        Dma.RegisterDreq(32, () => true);
+        Dma.RegisterDreq(33, () => I2c0.RxDataAvailable);
+        Dma.RegisterDreq(34, () => true);
+        Dma.RegisterDreq(35, () => I2c1.RxDataAvailable);
         // ADC DREQ 36: RX FIFO has data
         Dma.RegisterDreq(36, () => Adc.HasFifoData);
+        // A channel that stalled on an empty RX FIFO must re-arm when the peripheral produces data (the
+        // PIO already does this via OnRxPush); otherwise it stays BUSY forever.
+        Spi0.OnRxAvailable  += () => Dma.ResumeDreq(17);
+        Spi1.OnRxAvailable  += () => Dma.ResumeDreq(19);
+        Uart0.OnRxAvailable += () => Dma.ResumeDreq(21);
+        Uart1.OnRxAvailable += () => Dma.ResumeDreq(23);
+        I2c0.OnRxAvailable  += () => Dma.ResumeDreq(33);
+        I2c1.OnRxAvailable  += () => Dma.ResumeDreq(35);
+        Adc.OnFifoData      += () => Dma.ResumeDreq(36);
 
         // ── PIO GPIO integration ───────────────────────────────────────────
         // Shared helpers: read physical GPIO levels; update SIO output and notify IoBank0
@@ -965,6 +980,24 @@ public sealed class RP2040Machine : IDisposable
         LastElapsedCycles = delta;
         foreach (var t in _tickables)
             t.Tick(delta);
+    }
+
+    /// <summary>Number of system resets (watchdog reboots) performed.</summary>
+    public int ResetCount { get; private set; }
+
+    /// <summary>
+    /// Full system reset as raised by the watchdog (timer expiry, <c>CTRL.TRIGGER</c>, <c>watchdog_reboot()</c>,
+    /// <c>rp2040.reboot()</c>): both cores restart from the BootROM vector with clean core state; flash, SRAM and
+    /// the watchdog SCRATCH/REASON registers are preserved (firmware reads them to learn why it rebooted).
+    /// Invoked from the watchdog Tick, i.e. between core <see cref="Run"/> batches, so touching CPU state is safe.
+    /// </summary>
+    public void SystemReset()
+    {
+        ResetCount++;
+        Cpu.Registers = default;
+        Cpu1.Registers = default;
+        Reset();
+        Usb.Reset();
     }
 
     /// <summary>Reset Core 0. Core 1 is also reset and its launched state is cleared.</summary>

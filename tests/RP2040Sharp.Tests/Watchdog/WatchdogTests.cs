@@ -131,8 +131,9 @@ public class WatchdogTests
         var resetCount = 0;
         wdg.OnReset = () => resetCount++;
 
-        // Set LOAD = 10 (units: µs per RP2040 TRM CTRL[23:0])
-        wdg.WriteWord(LOAD, 10u);
+        // LOAD counts watchdog ticks, which run at 2 per microsecond (RP2040-E1; pico-sdk loads delay_ms * 2000):
+        // LOAD = 20 is 10 µs.
+        wdg.WriteWord(LOAD, 20u);
         // Enable with CTRL_ENABLE — this also reloads countdown from LOAD
         wdg.WriteWord(CTRL, CTRL_ENABLE);
 
@@ -180,14 +181,14 @@ public class WatchdogTests
         var resetCount = 0;
         wdg.OnReset = () => resetCount++;
 
-        // Enable with LOAD=5, tick 4 µs
-        wdg.WriteWord(LOAD, 5u);
+        // Enable with LOAD=10 (5 µs at 2 ticks/µs), tick 4 µs
+        wdg.WriteWord(LOAD, 10u);
         wdg.WriteWord(CTRL, CTRL_ENABLE);
         wdg.Tick(CYCLES_PER_US * 4);
         resetCount.Should().Be(0);
 
-        // Reload with LOAD=10 — countdown restarts from 10
-        wdg.WriteWord(LOAD, 10u);
+        // Reload with LOAD=20 — countdown restarts from 20 (10 µs)
+        wdg.WriteWord(LOAD, 20u);
         wdg.Tick(CYCLES_PER_US * 9); // 9 µs from reload — not yet
         resetCount.Should().Be(0, "not yet — countdown was reset to 10");
 

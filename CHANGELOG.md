@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: bugs found by running arduino-pico 6.3.0 firmware (examples, API sketches and ~3,400 randomised runs)
+
+Each fix has a regression test under `tests/RP2040Sharp.Tests/Regression/` that fails without it (R08 is covered by the
+watchdog sketch only).
+
+- **NVIC lines 26-31 (R01).** The SDK's user IRQs never fired; arduino-pico runs its USB task on one, so the tail of USB
+  output stalled.
+- **SIO divider and interpolators are per core (R10)**, as on silicon: two cores dividing at once got each other's results.
+- **DMA.** A write into a PIO TX FIFO no longer re-enters the same channel mid-transfer (R02: duplicated words, lost first RX
+  word); DMA paced by UART, SPI, I2C or ADC DREQs resumes when the FIFO refills, and the I2C DREQs 32-35 are registered (R03).
+- **ADC (R04).** The ADC is ticked, so `adc_run`, the FIFO and DMA produce data, and the sample period is `1 + DIV` ADC clocks
+  instead of 96x that.
+- **Watchdog.** A watchdog reset or `watchdog_reboot` now resets the chip (R07) and the USB CDC host re-enumerates after it
+  (R08); the counter runs at the rate the SDK expects for erratum RP2040-E1 (R09: timeouts took twice as long).
+- **PIO.** Changing FJOIN_TX/FJOIN_RX flushes both FIFOs (R05); side-set applies on the instruction's first cycle even when it
+  stalls (R06: the `uart_tx` idle line was low); `SM_RESTART` clears the delay counter (R11).
+
+
 ### Fixed: high-register `ADD` read PC as the instruction address + 2 instead of + 4
 
 ARMv6-M §A6.7.3 defines the value read from R15 by a high-register data-processing instruction as

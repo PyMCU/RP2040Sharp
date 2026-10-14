@@ -552,6 +552,9 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 _sm[i].OSR = 0; _sm[i].OsrCount = 0;
                 _sm[i].Stalled = false;
                 _sm[i].AutopushPending = false;
+                // CTRL.SM_RESTART also clears the delay counter (datasheet §3.7): a leftover `[31]` delay must not
+                // swallow the first cycles of the program that is started next.
+                _sm[i].DelayCounter = 0;
                 // Clear EXEC_STALLED status in EXECCTRL (bit 31)
                 _sm[i].ExecCtrl &= 0x7FFFFFFFu;
             }
@@ -663,7 +666,16 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             // EXECCTRL bit 31 (EXEC_STALLED) is read-only hardware status;
             // writes must preserve it (rp2040js: execCtrl = (value & 0x7FFFFFFF) | (execCtrl & 0x80000000)).
             case SM_OFF_EXECCTRL:  sm.ExecCtrl  = (value & 0x7FFFFFFFu) | (sm.ExecCtrl & 0x80000000u); break;
-            case SM_OFF_SHIFTCTRL: sm.ShiftCtrl = value; break;
+            case SM_OFF_SHIFTCTRL:
+                // FJOIN_TX / FJOIN_RX (bits 30/31) repartition the FIFO storage; the datasheet says both FIFOs
+                // are flushed whenever either bit changes. The SDK's pio_sm_clear_fifos() (and so pio_sm_init)
+                // relies on exactly this: it toggles FJOIN_RX twice to empty the FIFOs.
+                if (((sm.ShiftCtrl ^ value) & 0xC0000000u) != 0)
+                {
+                    sm.TxFifo.Clear(); sm.RxFifo.Clear();
+                    Mutated();
+                }
+                sm.ShiftCtrl = value; break;
             case SM_OFF_ADDR:      break; // read-only
             case SM_OFF_INSTR:
                 // SM_INSTR must execute the instruction immediately (rp2040js: executeInstruction(value)),
@@ -771,11 +783,13 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
                 _fdebug |= 1u << smIdx;          // RXSTALL bits [3:0]
         }
 
-        // Sideset, delay, and PC advance only on completing cycle (not on stall)
+        // Side-set takes effect on the first cycle an instruction executes, even if that instruction then
+        // stalls (datasheet §3.4.5; it is how `pull side 1` holds a UART TX line high while idling on an empty
+        // FIFO). It is applied after the instruction's own pin writes so it still wins a conflict with OUT/SET.
+        // Delay cycles and the PC advance, by contrast, only happen once the instruction completes.
+        ApplySideset(sm, instr);
         if (!sm.Stalled)
         {
-            // Apply sideset AFTER instruction completes (hardware fires sideset on completion)
-            ApplySideset(sm, instr);
             // PINCTRL.SIDESET_COUNT includes enable bit when SIDE_EN is set → no +1 needed
             var sidesetCount = (int)sm.SidesetCount;
             var delayBits = 5 - sidesetCount;
