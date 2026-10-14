@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: high-register `ADD` read PC as the instruction address + 2 instead of + 4
+
+ARMv6-M §A6.7.3 defines the value read from R15 by a high-register data-processing instruction as
+the instruction address plus 4 (no alignment — that is the ADR form). The `ADD` high-register forms
+(`ADD Rdn, PC`, `ADD SP, PC`, `ADD PC, PC`) read `Registers[15]` raw, which during dispatch holds
+`insn + 2`, so every GCC/binutils PIC idiom (`ldr rN, [pc, #off]` + `add rN, pc`) and rustc/LLVM's
+halfword jump tables landed 2 bytes short — e.g. MicroPython native modules computed a wrong GOT base
+and branched wild. `MOV`/`CMP` high-register forms already compensated; `ADD` now matches them, and
+tests pin the PC read of all three (including an instruction at a halfword-aligned address).
+
 ### Fixed: garbage firmware could crash or corrupt the embedding host instead of faulting the emulated CPU
 
 The core is embedded in third-party apps (iCircuit), so a corrupt, truncated, random or merely buggy
