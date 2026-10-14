@@ -196,7 +196,13 @@ public sealed unsafe class CortexM0Plus
                 _fetchMask = BusInterconnect.MASK_BOOTROM & ~1u;
                 break;
             default:
+                // No direct fetch window. Poison the cached region id with a value no `pc >> 28` can
+                // equal, so the loop's region-change test fires again on the next fetch and re-raises
+                // the HardFault. Without this, a fault handler (or any PC change that reuses the same
+                // unfetchable region, or a Reset() vector pointing at one) matched the cached id and
+                // read through the null pointer.
                 _fetchPtr = null;
+                _currentRegionId = uint.MaxValue;
                 break;
         }
     }

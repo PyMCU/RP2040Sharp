@@ -319,7 +319,7 @@ public sealed class RP2040Machine : IDisposable
         // ── Tickable list ─────────────────────────────────────────────────
         // ppbRouter.Tick() internally ticks both Ppb (Core0) and Ppb1 (Core1),
         // so Ppb1 does not need a separate entry here.
-        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Usb];
+        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Usb, Dma];
 
         // ── DMA DREQ sources ──────────────────────────────────────────────
         // PIO0 TX/RX SM0-3: DREQ 0-3 (TX), 4-7 (RX)
@@ -629,11 +629,12 @@ public sealed class RP2040Machine : IDisposable
     /// </summary>
     private unsafe void FlashEraseHook(Core.Cpu.CortexM0Plus cpu)
     {
-        var offset = (int)(cpu.Registers.R0 & (Bus.FlashSize - 1));
-        var count  = (int)cpu.Registers.R1;
-        if (count < 0 || offset + count > (int)Bus.FlashSize) count = (int)Bus.FlashSize - offset;
+        var offset = (long)(cpu.Registers.R0 & (Bus.FlashSize - 1));
+        // long: guest-controlled offset + count must not wrap past the bounds check (host heap write).
+        var count  = (long)(int)cpu.Registers.R1;
+        if (count < 0 || offset + count > Bus.FlashSize) count = Bus.FlashSize - offset;
         if (count > 0)
-            new Span<byte>(Bus.PtrFlash + offset, count).Fill(0xFF);
+            new Span<byte>(Bus.PtrFlash + offset, (int)count).Fill(0xFF);
     }
 
     /// <summary>
@@ -643,12 +644,13 @@ public sealed class RP2040Machine : IDisposable
     /// </summary>
     private unsafe void FlashProgramHook(Core.Cpu.CortexM0Plus cpu)
     {
-        var flashOffset = (int)(cpu.Registers.R0 & (Bus.FlashSize - 1));
+        var flashOffset = (long)(cpu.Registers.R0 & (Bus.FlashSize - 1));
         var srcAddr     = cpu.Registers.R1;
-        var count       = (int)cpu.Registers.R2;
-        if (count < 0 || flashOffset + count > (int)Bus.FlashSize)
-            count = (int)Bus.FlashSize - flashOffset;
-        for (var i = 0; i < count; i++)
+        // long: guest-controlled offset + count must not wrap past the bounds check (host heap write).
+        var count       = (long)(int)cpu.Registers.R2;
+        if (count < 0 || flashOffset + count > Bus.FlashSize)
+            count = Bus.FlashSize - flashOffset;
+        for (var i = 0L; i < count; i++)
             Bus.PtrFlash[flashOffset + i] = Bus.ReadByte(srcAddr + (uint)i);
     }
 

@@ -75,6 +75,7 @@ public sealed class GSpiSlave
         }
     }
 
+    private const int MaxHostBytes = 1 << 16;
     private readonly List<byte> _host = new(72);
     private int _hostBits;
     private byte _hostByte;
@@ -185,7 +186,12 @@ public sealed class GSpiSlave
         }
         if (!HostDrivesData()) return;
         _hostByte = (byte)((_hostByte << 1) | (_io.GetPadOutputLevel(PinData) ? 1 : 0));
-        if (++_hostBits == 8) { _host.Add(_hostByte); _hostBits = 0; _hostByte = 0; }
+        if (++_hostBits == 8)
+        {
+            // A transaction is a command plus a few KB at most; a guest that never raises CS grew this for ever.
+            if (_host.Count < MaxHostBytes) _host.Add(_hostByte);
+            _hostBits = 0; _hostByte = 0;
+        }
     }
 
     private void OnFalling()

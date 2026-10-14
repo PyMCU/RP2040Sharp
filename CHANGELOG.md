@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: garbage firmware could crash or corrupt the embedding host instead of faulting the emulated CPU
+
+The core is embedded in third-party apps (iCircuit), so a corrupt, truncated, random or merely buggy
+image must end in a HardFault or a lockup of the *emulated* core — never an exception out of `Run`, and
+never a read or write outside the emulator's native buffers. Fuzzing random images with hostile
+PC/SP/VTOR/registers, plus register pokes at every peripheral window, found these ways to break that:
+
+- **Null fetch pointer.** The fetch loop re-validates its cached window only when the PC's region
+  *changes*. A fetch from a region with no backing store (APB/AHB, SIO, PPB, unmapped) correctly raised
+  HardFault, but left the cache on that same region with a null pointer, so a HardFault handler — or a
+  reset vector — in that region matched the cache and read through null (`NullReferenceException` /
+  `AccessViolationException`). An unfetchable region now poisons the cached region id, so every fetch
+  there faults again and a handler that cannot be fetched ends in lockup. The hot path is unchanged.
+- **Tail spill.** The bus masks an address into a buffer and then reads or writes a whole
+  halfword/word, so an unaligned access at the last 1-3 bytes of SRAM, flash or boot ROM touched bytes
+  past the allocation. Every backing store now carries a 16-byte tail pad (`RandomAccessMemory.TailPad`).
+- **Burst overrun.** The Thumb `PUSH`/`POP`/`STMIA`/`LDMIA` SRAM fast paths masked only the start
+  address and advanced a raw pointer, so SP or a base near the top of SRAM overran the buffer by up to
+  36 bytes (a host heap *write*). A burst that does not fit takes the existing per-word path, which wraps
+  each access like the scalar loads and stores.
+- **Bootrom flash hooks.** `flash_range_erase` / `flash_range_program` checked `offset + count` in
+  `int`, so a count near 2^31 wrapped past the bounds check and filled or copied up to 2 GB from inside
+  the flash buffer. The check is now done in `long`.
+- **SSI erase.** A sector/block erase whose 24-bit address lay beyond the end of the flash made
+  `end - start` wrap to ~4 GB for `InitBlock`. An erase starting past the flash is now ignored.
+- **DMA `CHAIN_TO`.** The field is 4 bits wide but there are 12 channels, so `CHAIN_TO` 12-15 threw
+  `IndexOutOfRangeException` when the transfer completed. Transfers also chain recursively, so two
+  enabled channels chaining to each other overflowed the host stack (uncatchable). Chaining to a
+  nonexistent channel is ignored, and a chain is cut after one lap of the channels.
+- **USB DPRAM.** An endpoint's `BUFFER_ADDRESS` (up to 0xFFC0) plus `LENGTH` (up to 1023) can lie
+  outside the 4 KB DPRAM; the copy threw `ArgumentOutOfRangeException`. It is now clamped to the DPRAM.
+
+A second, line-by-line pass over every peripheral and the CYW43439 model (PIO, DMA, SSI, USB, SIO,
+interpolators, timer/alarms, RTC, watchdog, ADC, PWM, UART/SPI/I2C, clocks, bridges, gSPI/SDPCM/HCI/virtual
+network) found more:
+
+- **PIO `OUT EXEC` / `MOV EXEC` recursion.** The word they execute is data, and that word can itself be a
+  `MOV EXEC` (`X` holding the encoding of `mov exec, x`): the instruction re-ran itself from inside itself
+  until the host stack overflowed (uncatchable). EXEC now nests at most 8 deep; deeper is a no-op.
+- **PIO `WAIT` cleared IRQ flags.** A 1.1.0 edit dropped the braces around `if (WAIT IRQ, polarity 1) {
+  Mutated(); _irq &= ~flag; }`, so *every* `WAIT` (GPIO, PIN, a stalled one, polarity 0) cleared IRQ flag
+  `index & 7`. Only a successful `WAIT 1 IRQ` clears the flag it waited on again.
+- **DMA re-entrancy.** A channel whose `WRITE_ADDR` is its own trigger register (or `MULTI_CHAN_TRIGGER`)
+  re-entered `ExecuteChannel` on every beat and overflowed the host stack. The chain limit is now a single
+  nesting limit (one level per channel) covering chains and beats that trigger channels.
+- **DMA huge transfers.** A transfer runs inside the write that triggers it, and `TRANS_COUNT` is 32 bits:
+  `0xFFFFFFFF` beats was minutes inside one bus access. One call now moves at most 2^20 beats (more than
+  the SRAM holds); the rest stays `BUSY` and the next `Tick` moves the next slice, so the host keeps
+  getting control back and real transfers (never that large) are not split.
+- **Unbounded guest-driven buffers (host memory).** SSI TX/RX buffers and RX frame (a loop writing `DR0`
+  forever), USB IN completions queued between ticks, the CYW43439 chip-to-host packet queue, backplane
+  storage (sparse writes), the gSPI host-byte buffer (CS held, CLK toggling), and the virtual network's
+  MAC / connection / lease tables and per-connection buffers all grew with guest traffic. Each now has a
+  ceiling far above any legitimate use (e.g. 1024 queued packets, 1M backplane bytes, 1024 learned MACs).
+- **Virtual network parsing.** A DHCP option 53 in the last two bytes of a frame, and a TCP segment whose
+  IP total-length field exceeded the frame, indexed past the frame (`IndexOutOfRangeException` out of the
+  guest's own bus write). Lengths are now clamped to the bytes actually received.
+
+Adds `GarbageFirmwareTests`: a reproducer per bug, and deterministic fuzz (200 seeds on a bare core, on
+the full two-core machine, and as raw MMIO pokes; every 16-bit opcode against hostile registers) that
+runs in well under a second. `PioGarbageTests` (random programs, state-machine configuration and FIFO
+traffic) and `WirelessGarbageTests` (SDPCM / Ethernet / DHCP / DNS / TCP / gSPI / HCI noise) do the same
+for the PIO and the radio. `GARBAGE_FUZZ_SEEDS` / `GARBAGE_FUZZ_SCALE`, `PIO_FUZZ_SEEDS` and
+`WIRELESS_FUZZ_SEEDS` widen any of them for a one-off hunt. The raw-MMIO fuzz still leaves the DMA window
+out: a random 32-bit `TRANS_COUNT` is now a slice per `Run`, but each slice is still tens of milliseconds.
+
 ### Renamed: the TestKits are now `SiliconTwin.*`
 
 | Old | New |

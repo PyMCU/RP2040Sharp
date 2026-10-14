@@ -99,12 +99,21 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     private readonly List<byte>  _txBuf   = new(260);   // CS-delimited; drives write/erase (ProcessTransaction)
     private readonly Queue<byte> _rxQueue = new(260);
 
+    // Guest-driven buffers need a ceiling: a loop writing DR0 forever (never reading, never toggling CS)
+    // grew them until the host ran out of memory. A page program is 4 + 256 bytes and the silicon RX FIFO
+    // 16 deep, so these are far above anything real firmware can use.
+    private const int MaxTxBuf   = 4 + 4096;
+    private const int MaxRxQueue = 4096;
+
     // RX framing, independent of the CS model: every byte the firmware clocks out while the SSI is
     // enabled produces an RX byte. A frame (for choosing the RX value) begins after a CS-deassert or
     // when a write follows a read (the command/response boundary of bootrom-style auto-CS flash access),
     // so the command byte that selects the RX response is tracked even when it is clocked before the
     // IO_QSPI/SER chip-select edge that RP2040Sharp observes.
-    private readonly List<byte> _rxFrame = new(260);
+    // Only the command byte and the 24-bit address (indices 0-3) are ever inspected; the rest of the frame
+    // is counted, not stored.
+    private readonly List<byte> _rxFrame = new(8);
+    private int _rxFrameLen;
     private bool _lastOpWasRead;
 
     // 64-bit flash unique id served for the 0x4B (Read Unique ID) command — what machine.unique_id() reads.
@@ -148,6 +157,7 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
         // (bytes clocked earlier with CS deasserted, e.g. flash_exit_xip dummies, must not shift the frame).
         _rxQueue.Clear();
         _rxFrame.Clear();
+        _rxFrameLen = 0;
         _lastOpWasRead = false;
     }
 
@@ -165,6 +175,7 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
         // drained/reset at CS deassert; leaving stale bytes desynchronises the next read).
         _rxQueue.Clear();
         _rxFrame.Clear();
+        _rxFrameLen = 0;
         _lastOpWasRead = false;
     }
 
@@ -240,13 +251,16 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
                     if (_lastOpWasRead && !_csAsserted)
                     {
                         _rxFrame.Clear();
+                        _rxFrameLen = 0;
                         _lastOpWasRead = false;
                     }
-                    _rxFrame.Add((byte)value);
-                    _rxQueue.Enqueue(ComputeRxByte());
+                    if (_rxFrameLen < 8) _rxFrame.Add((byte)value);
+                    if (_rxFrameLen < int.MaxValue) _rxFrameLen++;
+                    var rx = ComputeRxByte();
+                    if (_rxQueue.Count < MaxRxQueue) _rxQueue.Enqueue(rx);
 
                     // Write/erase application still uses the CS-delimited buffer (unchanged path).
-                    if (_csAsserted)
+                    if (_csAsserted && _txBuf.Count < MaxTxBuf)
                     {
                         _txBuf.Add((byte)value);
                     }
@@ -279,9 +293,9 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private byte ComputeRxByte()
     {
-        if (_rxFrame.Count == 0) return 0;
+        if (_rxFrameLen == 0) return 0;
 
-        var pos = _rxFrame.Count - 1;   // 0-based index of the byte just clocked
+        var pos = _rxFrameLen - 1;   // 0-based index of the byte just clocked
         var cmd = _rxFrame[0];
 
         switch (cmd)
@@ -384,6 +398,9 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     {
         // Align the start address down to the erase-unit boundary (size must be a power of 2)
         var start = addr & ~(size - 1);
+        // The 24-bit address can lie beyond a smaller flash: nothing to erase, and (end - start) would
+        // wrap to ~4 GB for InitBlock (host heap write).
+        if (start >= _flashSize) return;
         var end   = start + size;
         if (end > _flashSize) end = _flashSize;
         Unsafe.InitBlock(_flashPtr + start, 0xFF, end - start);

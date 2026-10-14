@@ -72,6 +72,14 @@ public sealed class VirtualNet
     private readonly Dictionary<string, Sdpcm> _macToDevice = new(); // learned MAC → owning station
     private int _nextLease = 2;
 
+    // Per-guest-chosen state needs a ceiling: the source MAC, the TCP four-tuple and the DHCP chaddr all come
+    // from the frame, so a loop varying them grew these tables (and every connection's buffer) without bound.
+    // The limits are far above any real LAN segment / test fleet.
+    private const int MaxStations = 1024, MaxInboundConns = 256, MaxLeases = 253, MaxRxBytes = 1 << 20;
+
+    /// <summary>Number of guest MACs the gateway has learned (L2 switch table size).</summary>
+    public int LearnedStations => _macToDevice.Count;
+
     public VirtualNet(Sdpcm sdpcm, byte[]? gatewayIp = null, byte[]? clientIp = null, byte[]? gatewayMac = null)
         : this(gatewayIp, clientIp, gatewayMac) => AddDevice(sdpcm);
 
@@ -99,7 +107,9 @@ public sealed class VirtualNet
     private void HandleGuestFrame(Sdpcm from, int itf, byte[] frame)
     {
         if (frame.Length < 14) return;
-        _macToDevice[MacKey(frame, 6)] = from;   // learn source MAC → station
+        var srcKey = MacKey(frame, 6);
+        if (_macToDevice.Count < MaxStations || _macToDevice.ContainsKey(srcKey))
+            _macToDevice[srcKey] = from;         // learn source MAC → station
         _serverMac ??= frame[6..12];             // first learned MAC = single-device TCP client target
         var ethertype = Be16(frame, 12);
         OnGuestFrame?.Invoke(itf, ethertype, frame.Length);
@@ -275,7 +285,7 @@ public sealed class VirtualNet
         {
             if (f[o] == 0) { o++; continue; }      // pad
             var len = f[o + 1];
-            if (f[o] == 53 && len >= 1) msgType = f[o + 2];
+            if (f[o] == 53 && len >= 1 && o + 2 < f.Length) msgType = f[o + 2];
             o += 2 + len;
         }
         // DISCOVER(1) → OFFER(2); REQUEST(3) → ACK(5)
@@ -301,6 +311,7 @@ public sealed class VirtualNet
     {
         var key = MacKey(mac, 0);
         if (_leases.TryGetValue(key, out var ip)) return ip;
+        if (_leases.Count >= MaxLeases) return ClientIp;   // pool exhausted: stop remembering new chaddrs
         byte[] lease = _leases.Count == 0
             ? ClientIp
             : [GatewayIp[0], GatewayIp[1], GatewayIp[2], (byte)_nextLease++];
@@ -419,13 +430,15 @@ public sealed class VirtualNet
         var flags = f[tcpOff + 13];
         var dataOff    = (f[tcpOff + 12] >> 4) * 4;
         var payloadOff = tcpOff + dataOff;
-        var payloadLen = ipOff + Be16(f, ipOff + 2) - payloadOff;
+        // The IP total-length field is the sender's claim; never trust it past the bytes actually received.
+        var payloadLen = Math.Min(ipOff + Be16(f, ipOff + 2), f.Length) - payloadOff;
         var key = ConnKey(clientIp, srcPort, dstPort);
 
         if ((flags & TCP_RST) != 0) { _inbound.Remove(key); return true; }
 
         if ((flags & TCP_SYN) != 0 && (flags & TCP_ACK) == 0)
         {
+            if (_inbound.Count >= MaxInboundConns && !_inbound.ContainsKey(key)) return true;   // table full: drop the SYN
             // Passive open. Our ISN is arbitrary; the SYN we send occupies it, so data starts at ISN+1.
             var fresh = new InboundConn
             {
@@ -468,7 +481,7 @@ public sealed class VirtualNet
         {
             if (seq == conn.Ack)
             {
-                for (var i = 0; i < payloadLen; i++) conn.Rx.Add(f[payloadOff + i]);
+                for (var i = 0; i < payloadLen && conn.Rx.Count < MaxRxBytes; i++) conn.Rx.Add(f[payloadOff + i]);
                 conn.Ack = seq + (uint)payloadLen;
             }
             SendTcpTo(conn, TCP_ACK, []);
@@ -550,7 +563,7 @@ public sealed class VirtualNet
         var dataOff = (f[tcpOff + 12] >> 4) * 4;
         var ipTotal = Be16(f, ipOff + 2);
         var payloadOff = tcpOff + dataOff;
-        var payloadLen = ipOff + ipTotal - payloadOff;
+        var payloadLen = Math.Min(ipOff + ipTotal, f.Length) - payloadOff;
         OnTcpSegment?.Invoke(flags, seq, ackNo, payloadLen);
 
         // A RST before the connection is established just means the server isn't listening yet (we
@@ -580,7 +593,7 @@ public sealed class VirtualNet
             // In-order data: buffer it and acknowledge.
             if (seq == _tcpAck)
             {
-                for (var i = 0; i < payloadLen; i++) _tcpRx.Add(f[payloadOff + i]);
+                for (var i = 0; i < payloadLen && _tcpRx.Count < MaxRxBytes; i++) _tcpRx.Add(f[payloadOff + i]);
                 _tcpAck = seq + (uint)payloadLen;
             }
             SendTcp(TCP_ACK, []);

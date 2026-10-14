@@ -862,6 +862,20 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         }
     }
 
+    /// <summary>EXEC nesting: OUT EXEC / MOV EXEC run a data word as the next instruction, and that word
+    /// can itself be a MOV EXEC (X = the encoding of `mov exec, x`) — recursion without bound, i.e. a
+    /// host stack overflow. Silicon replays one forced instruction per cycle; nothing legitimate nests.</summary>
+    private int _execDepth;
+    private const int MaxExecDepth = 8;
+
+    private void ExecuteForced(PioStateMachine sm, ushort instr)
+    {
+        if (_execDepth >= MaxExecDepth) { sm.Stalled = false; return; }
+        _execDepth++;
+        try { ExecuteInstr(sm, instr, (instr >> 13) & 7); }
+        finally { _execDepth--; }
+    }
+
     // JMP: bits [7:5]=condition, [4:0]=target
     private void ExecJmp(PioStateMachine sm, ushort instr)
     {
@@ -914,7 +928,10 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
 
         sm.Stalled = !condition;
         if (condition && source == 2 && polarity == 1)
-            Mutated(); _irq &= ~(1u << irqFlagIdx);  // clear IRQ on successful WAIT IRQ
+        {
+            Mutated();
+            _irq &= ~(1u << irqFlagIdx);  // clear IRQ on successful WAIT IRQ
+        }
     }
 
     // IN: bits [7:5]=source, [4:0]=bit count (0=32)
@@ -1028,7 +1045,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             }
             case 5: sm.PC = data & 0x1F; sm.PcJumped = true; sm.Stalled = false; return;  // PC
             case 6: sm.ISR = data; sm.IsrCount = (uint)bitCount; break;
-            case 7: ExecuteInstr(sm, (ushort)data, (int)((data >> 13) & 7)); return;  // EXEC
+            case 7: ExecuteForced(sm, (ushort)data); return;  // EXEC
         }
 
         // Autopull is checked at the START of the next OUT (above), so no post-OUT pull
@@ -1136,7 +1153,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             }
             case 1: sm.X = data; break;
             case 2: sm.Y = data; break;
-            case 4: ExecuteInstr(sm, (ushort)data, (int)((data >> 13) & 7)); return;  // EXEC
+            case 4: ExecuteForced(sm, (ushort)data); return;  // EXEC
             case 5: sm.PC = data & 0x1F; sm.PcJumped = true; sm.Stalled = false; return;  // PC
             case 6:
                 // MOV ISR: rp2040js §setMovDestination / TRM §3.4.3 —
