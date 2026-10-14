@@ -327,6 +327,14 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, ITickable
     // its own trigger re-enters on every beat — host stack overflow — so cap it at one level per channel.
     private int _execDepth;
 
+    // True while a channel is inside its beat loop. Writing a PIO FIFO during that loop can synchronously
+    // wake a stalled state machine, which fires ResumeDreq -> ExecuteChannel for the SAME channel again,
+    // mid-run, while TRANS_COUNT / READ_ADDR / WRITE_ADDR still hold their pre-beat values: the nested run
+    // repeats the beat (duplicate words), and the outer run then overwrites the nested run's progress with
+    // its stale locals. The in-flight run owns the transfer and re-evaluates DREQ on every beat, so the
+    // restart is simply refused. (Chain triggers happen after the loop, when this is already clear.)
+    private readonly bool[] _executing = new bool[CHANNEL_COUNT];
+
     // A transfer runs synchronously inside the write that triggers it, and TRANS_COUNT is 32 bits wide: a
     // garbage count (0xFFFFFFFF) was minutes of host time inside one bus write. One call moves at most
     // this many beats (more than SRAM holds, so no real transfer is split); the rest stays BUSY and is
@@ -347,6 +355,7 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, ITickable
     private void ExecuteChannel(int ch)
     {
         if (_execDepth >= CHANNEL_COUNT) return;
+        if (_executing[ch]) return;
         _execDepth++;
         try { RunChannel(ch); }
         finally { _execDepth--; }
@@ -376,6 +385,8 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, ITickable
         var ringMask = ringSize > 0 ? (1u << ringSize) - 1 : 0u;
 
         var beatsExecuted = 0u;
+        _executing[ch] = true;
+        try {
         for (var i = 0u; i < count; i++)
         {
             // Check DREQ: if source is registered and says not ready, stop
@@ -422,6 +433,7 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, ITickable
             }
             beatsExecuted++;
         }
+        } finally { _executing[ch] = false; }
 
         _readAddr[ch]   = rAddr;
         _writeAddr[ch]  = wAddr;
