@@ -39,10 +39,39 @@ PC/SP/VTOR/registers, plus register pokes at every peripheral window, found thes
 - **USB DPRAM.** An endpoint's `BUFFER_ADDRESS` (up to 0xFFC0) plus `LENGTH` (up to 1023) can lie
   outside the 4 KB DPRAM; the copy threw `ArgumentOutOfRangeException`. It is now clamped to the DPRAM.
 
+A second, line-by-line pass over every peripheral and the CYW43439 model (PIO, DMA, SSI, USB, SIO,
+interpolators, timer/alarms, RTC, watchdog, ADC, PWM, UART/SPI/I2C, clocks, bridges, gSPI/SDPCM/HCI/virtual
+network) found more:
+
+- **PIO `OUT EXEC` / `MOV EXEC` recursion.** The word they execute is data, and that word can itself be a
+  `MOV EXEC` (`X` holding the encoding of `mov exec, x`): the instruction re-ran itself from inside itself
+  until the host stack overflowed (uncatchable). EXEC now nests at most 8 deep; deeper is a no-op.
+- **PIO `WAIT` cleared IRQ flags.** A 1.1.0 edit dropped the braces around `if (WAIT IRQ, polarity 1) {
+  Mutated(); _irq &= ~flag; }`, so *every* `WAIT` (GPIO, PIN, a stalled one, polarity 0) cleared IRQ flag
+  `index & 7`. Only a successful `WAIT 1 IRQ` clears the flag it waited on again.
+- **DMA re-entrancy.** A channel whose `WRITE_ADDR` is its own trigger register (or `MULTI_CHAN_TRIGGER`)
+  re-entered `ExecuteChannel` on every beat and overflowed the host stack. The chain limit is now a single
+  nesting limit (one level per channel) covering chains and beats that trigger channels.
+- **DMA huge transfers.** A transfer runs inside the write that triggers it, and `TRANS_COUNT` is 32 bits:
+  `0xFFFFFFFF` beats was minutes inside one bus access. One call now moves at most 2^20 beats (more than
+  the SRAM holds); the rest stays `BUSY` and the next `Tick` moves the next slice, so the host keeps
+  getting control back and real transfers (never that large) are not split.
+- **Unbounded guest-driven buffers (host memory).** SSI TX/RX buffers and RX frame (a loop writing `DR0`
+  forever), USB IN completions queued between ticks, the CYW43439 chip-to-host packet queue, backplane
+  storage (sparse writes), the gSPI host-byte buffer (CS held, CLK toggling), and the virtual network's
+  MAC / connection / lease tables and per-connection buffers all grew with guest traffic. Each now has a
+  ceiling far above any legitimate use (e.g. 1024 queued packets, 1M backplane bytes, 1024 learned MACs).
+- **Virtual network parsing.** A DHCP option 53 in the last two bytes of a frame, and a TCP segment whose
+  IP total-length field exceeded the frame, indexed past the frame (`IndexOutOfRangeException` out of the
+  guest's own bus write). Lengths are now clamped to the bytes actually received.
+
 Adds `GarbageFirmwareTests`: a reproducer per bug, and deterministic fuzz (200 seeds on a bare core, on
 the full two-core machine, and as raw MMIO pokes; every 16-bit opcode against hostile registers) that
-runs in well under a second. Not changed: a DMA transfer still runs synchronously to completion, so a
-channel started with a huge `TRANS_COUNT` stalls the calling thread for as long as the transfer takes.
+runs in well under a second. `PioGarbageTests` (random programs, state-machine configuration and FIFO
+traffic) and `WirelessGarbageTests` (SDPCM / Ethernet / DHCP / DNS / TCP / gSPI / HCI noise) do the same
+for the PIO and the radio. `GARBAGE_FUZZ_SEEDS` / `GARBAGE_FUZZ_SCALE`, `PIO_FUZZ_SEEDS` and
+`WIRELESS_FUZZ_SEEDS` widen any of them for a one-off hunt. The raw-MMIO fuzz still leaves the DMA window
+out: a random 32-bit `TRANS_COUNT` is now a slice per `Run`, but each slice is still tens of milliseconds.
 
 ### Renamed: the TestKits are now `SiliconTwin.*`
 

@@ -319,7 +319,7 @@ public sealed class RP2040Machine : IDisposable
         // ── Tickable list ─────────────────────────────────────────────────
         // ppbRouter.Tick() internally ticks both Ppb (Core0) and Ppb1 (Core1),
         // so Ppb1 does not need a separate entry here.
-        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Usb];
+        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Usb, Dma];
 
         // ── DMA DREQ sources ──────────────────────────────────────────────
         // PIO0 TX/RX SM0-3: DREQ 0-3 (TX), 4-7 (RX)

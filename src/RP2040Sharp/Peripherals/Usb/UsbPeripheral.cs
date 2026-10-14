@@ -479,6 +479,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     // 75-byte descriptor). We defer OnEndpointWrite until Tick() delivers after a short delay,
     // mimicking rp2040js's writeDelayMicroseconds alarm mechanism.
     private readonly Dictionary<int, Queue<(int endpoint, byte[] buffer, long deliverAt)>> _pendingWrites = new();
+    private const int MaxPendingPerEndpoint = 1024;
     private const long WRITE_DELAY_CYCLES = 625L;  // ~5 µs at 125 MHz, matching rp2040js default
 
     // Pending OUT-transfer completions: deferred to Tick() so IndicateBufferReady fires after
@@ -526,7 +527,11 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
             var buffBit = endpoint * 2; // IN = even bit
             if (!_pendingWrites.TryGetValue(buffBit, out var q))
                 _pendingWrites[buffBit] = q = new Queue<(int, byte[], long)>();
-            q.Enqueue((endpoint, buffer, _totalCycles + WRITE_DELAY_CYCLES));
+            // Each arm allocates up to 1 KB and is only delivered at the next Tick: a firmware loop re-arming
+            // the buffer between ticks would queue them without limit. A bulk stream re-arms once per 64-byte packet,
+            // so the limit sits well above a full 4 KB transfer.
+            if (q.Count < MaxPendingPerEndpoint)
+                q.Enqueue((endpoint, buffer, _totalCycles + WRITE_DELAY_CYCLES));
             IndicateBufferReady(endpoint, isOut: false);
         }
     }

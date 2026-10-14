@@ -288,6 +288,19 @@ public unsafe class GarbageFirmwareTests
             (*(machine.Bus.PtrFlash + machine.Bus.FlashSize + i)).Should().Be(0, $"byte {i} past the flash buffer");
     }
 
+    [Fact]
+    public void Ssi_buffers_stop_growing_when_firmware_clocks_bytes_forever()
+    {
+        // DR0 writes queue an RX byte each and, with CS held, a TX byte: a loop that never reads or
+        // toggles CS grew both without bound (host memory).
+        using var machine = new RP2040Machine();
+        var ssi = machine.Ssi;
+        ssi.WriteWord(0x008, 1);                                 // SSIENR
+        ssi.WriteWord(0x010, 1);                                 // SER: CS held
+        for (var i = 0; i < 20_000; i++) ssi.WriteWord(0x060, 0x5A);
+        ssi.ReadWord(0x024).Should().BeLessThanOrEqualTo(4096u); // RXFLR
+    }
+
     // ── DMA: guest-controlled CHAIN_TO ──────────────────────────────────────────────────────────────
 
     private const uint DmaBase = 0x50000000;
@@ -329,6 +342,45 @@ public unsafe class GarbageFirmwareTests
         machine.Bus.ReadWord(0x20000100).Should().Be(0xCAFEF00Du, "the first transfer still ran");
     }
 
+    [Theory]
+    [InlineData(0x1Cu)]    // its own TRANS_COUNT (trigger alias)
+    [InlineData(0x430u)]   // MULTI_CHAN_TRIGGER, bit 0 = itself
+    public void Dma_channel_writing_its_own_trigger_terminates_instead_of_overflowing_the_host_stack(uint target)
+    {
+        // Each beat re-triggers the channel that is executing it: ExecuteChannel re-entered per beat.
+        using var machine = new RP2040Machine();
+        machine.Bus.WriteWord(0x20000000, 1);                    // the value every beat writes
+        machine.Bus.WriteWord(DmaBase + 0x00, 0x20000000);
+        machine.Bus.WriteWord(DmaBase + 0x04, DmaBase + target);
+        machine.Bus.WriteWord(DmaBase + 0x08, 1);
+        machine.Bus.WriteWord(DmaBase + 0x10, DmaEn | DmaWord | DmaPermanent);   // no increments, chain to self
+        var act = () => machine.Bus.WriteWord(DmaBase + 0x1C, 1);
+        act.Should().NotThrow();
+    }
+
+    [Fact]
+    public void Dma_transfer_is_sliced_so_a_huge_count_does_not_stall_the_caller()
+    {
+        // TRANS_COUNT is 32 bits and a transfer ran to completion inside the triggering write:
+        // 0xFFFFFFFF beats was minutes inside one bus access. One slice is 2^20 beats; the rest finishes on
+        // the following ticks.
+        using var machine = new RP2040Machine();
+        const uint count = 2_500_000, slice = 1u << 20;
+        machine.Bus.WriteWord(0x20000000, 0xCAFEF00D);
+        machine.Bus.WriteWord(DmaBase + 0x00, 0x20000000);
+        machine.Bus.WriteWord(DmaBase + 0x04, 0x20000100);
+        machine.Bus.WriteWord(DmaBase + 0x10, DmaEn | DmaWord | DmaPermanent);   // no increments
+        machine.Bus.WriteWord(DmaBase + 0x1C, count);
+        machine.Dma.IsChannelBusy(0).Should().BeTrue("only the first slice ran");
+        machine.Dma.GetChannelTransCount(0).Should().Be(count - slice);
+        machine.Bus.ReadWord(0x20000100).Should().Be(0xCAFEF00Du);
+        machine.Run(1);
+        machine.Dma.GetChannelTransCount(0).Should().Be(count - 2 * slice);
+        machine.Run(1);
+        machine.Dma.IsChannelBusy(0).Should().BeFalse();
+        machine.Dma.GetChannelTransCount(0).Should().Be(0u);
+    }
+
     // ── USB DPRAM: firmware-written BUFFER_ADDRESS / LENGTH ─────────────────────────────────────────
 
     [Fact]
@@ -349,7 +401,29 @@ public unsafe class GarbageFirmwareTests
         act.Should().NotThrow();
     }
 
+    [Fact]
+    public void Usb_in_buffer_rearmed_without_end_is_bounded_between_ticks()
+    {
+        // Each AVAILABLE write queues a copy of the buffer (up to 1 KB) for delivery at the next tick; a
+        // firmware loop re-arming it forever queued them without limit.
+        using var machine = new RP2040Machine();
+        const uint dpram = 0x50100000;
+        var delivered = 0;
+        machine.Usb.OnEndpointWrite = (_, _) => delivered++;
+        for (var i = 0; i < 5000; i++)
+            machine.Bus.WriteWord(dpram + 0x88, (1u << 10) | 64);
+        machine.Run(2000);
+        delivered.Should().BeLessThanOrEqualTo(1024);
+    }
+
     // ── Deterministic fuzz ──────────────────────────────────────────────────────────────────────────
+
+    // GARBAGE_FUZZ_SEEDS / GARBAGE_FUZZ_SCALE widen the run for a one-off hunt (more seeds, scale x longer
+    // instruction counts); the defaults keep the suite fast.
+    private static int Seeds(int fallback) =>
+        int.TryParse(Environment.GetEnvironmentVariable("GARBAGE_FUZZ_SEEDS"), out var n) ? n : fallback;
+    private static int Scale =>
+        int.TryParse(Environment.GetEnvironmentVariable("GARBAGE_FUZZ_SCALE"), out var n) ? n : 1;
 
     private static uint Pick(Random rng) => InterestingPcs[rng.Next(InterestingPcs.Length)];
 
@@ -385,7 +459,7 @@ public unsafe class GarbageFirmwareTests
     {
         QuietStderr(() =>
         {
-            for (var seed = 1; seed <= 200; seed++)
+            for (var seed = 1; seed <= Seeds(200); seed++)
             {
                 var rng = new Random(seed);
                 using var bus = new BusInterconnect();
@@ -395,7 +469,7 @@ public unsafe class GarbageFirmwareTests
                 Fill(rng, bus.PtrSram + 0x7E000, 8192);               // tail of the 512 KB SRAM
                 Fill(rng, bus.PtrFlash + bus.FlashSize - 8192, 8192); // tail of flash
                 Hostile(rng, cpu);
-                Run(cpu, 2000, $"bare seed {seed}");
+                Run(cpu, 2000 * Scale, $"bare seed {seed}");
             }
             return 0;
         });
@@ -407,7 +481,7 @@ public unsafe class GarbageFirmwareTests
     {
         QuietStderr(() =>
         {
-            for (var seed = 1; seed <= 200; seed++)
+            for (var seed = 1; seed <= Seeds(200); seed++)
             {
                 var rng = new Random(seed);
                 using var machine = new RP2040Machine();
@@ -420,9 +494,9 @@ public unsafe class GarbageFirmwareTests
                 Hostile(rng, machine.Cpu1);
                 var act = () =>
                 {
-                    machine.Run(1000);
-                    machine.Cpu1.Run(1000);
-                    machine.Run(1000);
+                    machine.Run(1000 * Scale);
+                    machine.Cpu1.Run(1000 * Scale);
+                    machine.Run(1000 * Scale);
                 };
                 act.Should().NotThrow($"machine seed {seed}");
             }
@@ -439,7 +513,7 @@ public unsafe class GarbageFirmwareTests
         // random 32-bit TRANS_COUNT is a multi-minute stall (known limitation), not a crash.
         QuietStderr(() =>
         {
-            for (var seed = 1; seed <= 200; seed++)
+            for (var seed = 1; seed <= Seeds(200); seed++)
             {
                 var rng = new Random(seed);
                 using var machine = new RP2040Machine();
@@ -447,7 +521,7 @@ public unsafe class GarbageFirmwareTests
                 var bus = machine.Bus;
                 var act = () =>
                 {
-                    for (var op = 0; op < 3000; op++)
+                    for (var op = 0; op < 3000 * Scale; op++)
                     {
                         uint addr = rng.Next(6) switch
                         {

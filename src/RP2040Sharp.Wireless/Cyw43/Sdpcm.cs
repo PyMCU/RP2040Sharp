@@ -524,8 +524,13 @@ public sealed class Sdpcm
         Enqueue(buf);
     }
 
+    // A guest that only writes (never reads) would queue a response per ioctl for ever; the real chip has a
+    // finite buffer pool. Far more than any bring-up or scan leaves unread.
+    private const int MaxQueuedPackets = 1024;
+
     private void Enqueue(byte[] pkt)
     {
+        if (_txq.Count >= MaxQueuedPackets) return;
         _txq.Enqueue(pkt);
         OnPacketReadyChanged?.Invoke(true, NextPacketLen);
     }
