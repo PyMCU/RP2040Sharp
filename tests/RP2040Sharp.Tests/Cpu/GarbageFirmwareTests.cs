@@ -27,7 +27,8 @@ public unsafe class GarbageFirmwareTests
         0xE0080000, 0xEFFFFFFE, 0xF0000000, 0xFE000000, 0xFEFFFFFE, 0xFFFFFFF0, 0xFFFFFFFC, 0xFFFFFFFE,
     ];
 
-    private const uint SramTop = 0x20080000;                 // first address past the 512 KB SRAM window
+    private const uint SramTop = 0x20080000;                 // first address past the 512 KB backing buffer
+    private const uint SramEnd = 0x20042000;                 // first address past the 264 KiB the chip has
 
     private static void Run(CortexM0Plus cpu, int instructions, string what)
     {
@@ -143,13 +144,16 @@ public unsafe class GarbageFirmwareTests
     public void Unaligned_access_at_the_last_bytes_of_every_store_stays_inside_the_allocation()
     {
         using var bus = new BusInterconnect();
-        // The spill of a word at the last byte lands in the tail padding, not in whatever the host
-        // allocator placed next to the buffer.
+        // Datasheet 2.2: past the 264 KiB of SRAM nothing is mapped. The lenient accessors read 0 and drop the
+        // write (no wrap into the buffer behind it); the Try forms the CPU uses report the bus error.
         bus.WriteWord(0x2007FFFF, 0xAABBCCDD);
-        bus.PtrSram[0x80000].Should().Be(0xCC, "the three bytes past the end are absorbed by the padding");
-        bus.ReadWord(0x2007FFFF).Should().Be(0xAABBCCDD);
-        bus.WriteHalfWord(0x2007FFFF, 0x1234);
-        bus.PtrSram[0x80000].Should().Be(0x12);
+        bus.PtrSram[0x7FFFF].Should().Be(0, "an unmapped write lands nowhere");
+        bus.ReadWord(0x2007FFFF).Should().Be(0u);
+        bus.TryWriteWord(SramEnd, 1).Should().BeFalse();
+        bus.TryReadWord(SramEnd, out _).Should().BeFalse();
+        // A word at the very last byte of SRAM spills into the allocation behind it, never past it
+        bus.WriteWord(SramEnd - 1, 0xAABBCCDD);
+        bus.ReadWord(SramEnd - 1).Should().Be(0xAABBCCDD);
         bus.WriteWord(0x00003FFF, 0x11223344);                   // boot ROM is writable only via the pointer
         bus.ReadWord(0x00003FFF).Should().Be(0u, "region 0 is read-only to the guest");
         bus.PtrFlash[0x1FFFFF] = 0xFF;
@@ -157,55 +161,74 @@ public unsafe class GarbageFirmwareTests
         RandomAccessMemory.TailPad.Should().BeGreaterThanOrEqualTo(8);
     }
 
+    // A burst that starts inside SRAM and runs off its end faults at the first word the chip has no memory
+    // for, instead of wrapping to the start of SRAM (the old 512 KB mirror). These keep the host-heap property
+    // the wrap tests pinned: the burst must never touch memory outside the buffers.
+
     [Theory]
     [InlineData(0xB4FFu, "PUSH {r0-r7}")]
     [InlineData(0xB5FFu, "PUSH {r0-r7,lr}")]
-    public void Push_burst_starting_near_the_top_of_sram_wraps_instead_of_overflowing(uint opcode, string what)
+    public void Push_burst_running_off_the_end_of_sram_faults_instead_of_wrapping(uint opcode, string what)
     {
-        using var bus = new BusInterconnect();
-        var cpu = new CortexM0Plus(bus);
-        bus.WriteHalfWord(0x20000100, (ushort)opcode);
-        for (var r = 0; r < 8; r++) cpu.Registers[r] = 0xA0 + (uint)r;
-        cpu.Registers.LR = 0xEE;
-        var count = (opcode & 0x100) != 0 ? 9u : 8u;
-        cpu.Registers.SP = SramTop - 16 + count * 4;            // new SP = top - 16: burst crosses the end
-        cpu.Registers.PC = 0x20000100;
-        cpu.Run(1);
-        AssertPadUntouched(bus, what);
-        bus.ReadWord(0x20000000).Should().Be(0xA4, $"{what}: r4 wrapped to the start of SRAM");
+        QuietStderr(() =>
+        {
+            using var bus = new BusInterconnect();
+            var cpu = new CortexM0Plus(bus);
+            bus.WriteHalfWord(0x20000100, (ushort)opcode);
+            for (var r = 0; r < 8; r++) cpu.Registers[r] = 0xA0 + (uint)r;
+            cpu.Registers.LR = 0xEE;
+            var count = (opcode & 0x100) != 0 ? 9u : 8u;
+            cpu.Registers.SP = SramEnd - 16 + count * 4;        // new SP = end - 16: the burst crosses the end
+            cpu.Registers.PC = 0x20000100;
+            cpu.Run(1);
+            AssertPadUntouched(bus, what);
+            cpu.Registers.IPSR.Should().Be(3u, $"{what}: the word past SRAM has no memory behind it");
+            bus.ReadWord(0x20000000).Should().Be(0u, $"{what}: nothing wraps to the start of SRAM");
+            return 0;
+        });
     }
 
     [Fact]
-    public void Stmia_burst_near_the_top_of_sram_does_not_overflow()
+    public void Stmia_burst_running_off_the_end_of_sram_faults_without_writing_back()
     {
-        using var bus = new BusInterconnect();
-        var cpu = new CortexM0Plus(bus);
-        bus.WriteHalfWord(0x20000100, 0xC0FF);                   // STMIA r0!, {r0-r7}
-        for (var r = 1; r < 8; r++) cpu.Registers[r] = 0xA0 + (uint)r;
-        cpu.Registers[0] = SramTop - 16;
-        cpu.Registers.PC = 0x20000100;
-        cpu.Run(1);
-        AssertPadUntouched(bus, "STMIA");
-        bus.ReadWord(0x20000000).Should().Be(0xA4, "r4 wrapped to the start of SRAM");
+        QuietStderr(() =>
+        {
+            using var bus = new BusInterconnect();
+            var cpu = new CortexM0Plus(bus);
+            bus.WriteHalfWord(0x20000100, 0xC0FF);                   // STMIA r0!, {r0-r7}
+            for (var r = 1; r < 8; r++) cpu.Registers[r] = 0xA0 + (uint)r;
+            cpu.Registers[0] = SramEnd - 16;
+            cpu.Registers.PC = 0x20000100;
+            cpu.Run(1);
+            AssertPadUntouched(bus, "STMIA");
+            cpu.Registers.IPSR.Should().Be(3u);
+            cpu.Registers[0].Should().Be(SramEnd - 16, "the base is not written back by a faulting STMIA");
+            bus.ReadWord(0x20000000).Should().Be(0u, "r4 does not wrap to the start of SRAM");
+            return 0;
+        });
     }
 
     [Theory]
     [InlineData(0xC8FFu, "LDMIA r0!, {r0-r7}")]
     [InlineData(0xBCFFu, "POP {r0-r7}")]
     [InlineData(0xBDFFu, "POP {r0-r7,pc}")]
-    public void Load_burst_near_the_top_of_sram_reads_wrapped_words(uint opcode, string what)
+    public void Load_burst_running_off_the_end_of_sram_faults_instead_of_reading_wrapped_words(uint opcode, string what)
     {
-        using var bus = new BusInterconnect();
-        var cpu = new CortexM0Plus(bus);
-        bus.WriteHalfWord(0x20000100, (ushort)opcode);
-        bus.WriteWord(0x20000000, 0x12345678);                   // word 4 of the burst wraps to here
-        bus.WriteWord(0x2000000C, 0x20000201);
-        var pop = (opcode & 0xF000) == 0xB000;
-        if (pop) cpu.Registers.SP = SramTop - 16; else cpu.Registers[0] = SramTop - 16;
-        cpu.Registers.PC = 0x20000100;
-        cpu.Run(1);
-        AssertPadUntouched(bus, what);
-        cpu.Registers[4].Should().Be(0x12345678, $"{what}: 5th word read from the wrapped start of SRAM");
+        QuietStderr(() =>
+        {
+            using var bus = new BusInterconnect();
+            var cpu = new CortexM0Plus(bus);
+            bus.WriteHalfWord(0x20000100, (ushort)opcode);
+            bus.WriteWord(0x20000000, 0x12345678);                   // where the old mirror wrapped the 5th word
+            var pop = (opcode & 0xF000) == 0xB000;
+            if (pop) cpu.Registers.SP = SramEnd - 16; else cpu.Registers[0] = SramEnd - 16;
+            cpu.Registers.PC = 0x20000100;
+            cpu.Run(1);
+            AssertPadUntouched(bus, what);
+            cpu.Registers.IPSR.Should().Be(3u, $"{what}: the 5th word is past SRAM");
+            cpu.Registers[4].Should().NotBe(0x12345678, $"{what}: the 5th word is not read from the wrapped start of SRAM");
+            return 0;
+        });
     }
 
     [Fact]

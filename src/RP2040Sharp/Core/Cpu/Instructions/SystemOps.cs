@@ -7,6 +7,14 @@ public static class SystemOps
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Barrier(ushort opcodeH1, CortexM0Plus cpu)
     {
+        // A5.3.1 Table A5-11: DSB (8F4x), DMB (8F5x), ISB (8F6x); any other second halfword (e.g. CLREX,
+        // 8F2F, which ARMv6-M does not have) is UNDEFINED.
+        var opcodeH2 = cpu.Bus.ReadHalfWord(cpu.Registers.PC);
+        if ((opcodeH2 & 0xFF00) != 0x8F00 || ((opcodeH2 >> 4) & 0xF) is < 4 or > 6)
+        {
+            cpu.TriggerHardFaultAt(cpu.Registers.PC - 2);
+            return;
+        }
         cpu.Registers.PC += 2;
         // rp2040js DMB/DSB/ISB: base 1 (loop) + 2 (32-bit instruction).
         cpu.Cycles += 2;
@@ -228,8 +236,8 @@ public static class SystemOps
         }
         else
         {
-            // No debugger attached — escalate to HardFault per ARMv6-M §C1.7.2.
-            cpu.TriggerHardFault();
+            // No debugger attached — escalate to HardFault per ARMv6-M §C1.7.2, returning to the BKPT itself.
+            cpu.TriggerHardFaultAt(cpu.Registers.PC - 2);
         }
     }
 
@@ -241,7 +249,6 @@ public static class SystemOps
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Svc(ushort opcode, CortexM0Plus cpu)
     {
-        cpu.Registers.PendingSVCall = true;
-        cpu.Registers.InterruptsUpdated = true;
+        cpu.CallSupervisor();
     }
 }

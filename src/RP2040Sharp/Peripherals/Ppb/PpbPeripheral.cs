@@ -36,14 +36,35 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
     private const uint SCB_ICSR   = 0xD04;  // Interrupt Control / State
     private const uint SCB_VTOR   = 0xD08;  // Vector Table Offset
     private const uint SCB_AIRCR  = 0xD0C;  // Application Interrupt / Reset Control
+    private const uint SCB_SCR    = 0xD10;  // System Control Register
+    private const uint SCB_CCR    = 0xD14;  // Configuration and Control Register (read-only)
     private const uint SCB_SHPR2  = 0xD1C;  // System Handler Priority 2 (SVC bits 31:24)
     private const uint SCB_SHPR3  = 0xD20;  // System Handler Priority 3 (PendSV[23:16] / SysTick[31:24])
+    private const uint SCB_SHCSR  = 0xD24;  // System Handler Control and State (SVCALLPENDED bit 15)
+
+    // ── MPU offsets (datasheet 2.4.6: 8 regions, unified) ──────────────
+    private const uint MPU_TYPE   = 0xD90;
+    private const uint MPU_CTRL   = 0xD94;
+    private const uint MPU_RNR    = 0xD98;
+    private const uint MPU_RBAR   = 0xD9C;
+    private const uint MPU_RASR   = 0xDA0;
+
+    private const uint COUNTFLAG  = 1u << 16;
+
+    // Cycles per 1 us SysTick reference tick (the watchdog's timer_tick). Fixed at the 125 MHz system clock
+    // the emulator runs at, the same assumption TimerPeripheral makes (the PLL is a register stub).
+    private const long TICK_CYCLES = 125;
 
     private readonly CortexM0Plus _cpu;
 
     // SysTick state
     private uint _systCsr;
     private uint _systRvr;
+    // RVR has no defined power-on value (ARM ARM B3.3.3 "UNKNOWN") and firmware exists that never writes it:
+    // MicroPython's machine.bitstream enables SysTick with CSR = 5, then only clears CVR and polls it as a
+    // 24-bit down counter. Until RVR is first programmed the counter therefore reloads 0xFFFFFF, while RVR
+    // itself still reads 0 (the SVD reset value). A programmed RVR, including 0, follows the architecture.
+    private bool _systRvrWritten;
     private long _systCvr;      // kept as long to handle large delta gracefully
     private long _systAnchor;   // _cpu.Cycles at which _systCvr was last brought up to date
 
@@ -69,31 +90,97 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
     /// delta, but each core's SysTick advances with that core's own cycles.</summary>
     public void Tick(long deltaCycles) => SyncSysTick();
 
-    private long SystReload => _systRvr > 0 ? _systRvr : 0xFFFFFF;
+    // MPU registers. The regions are stored and read back, but nothing enforces them: accesses are never
+    // checked against an MPU region, so a violation does not fault (see docs/limitations).
+    private uint _mpuCtrl, _mpuRnr;
+    private readonly uint[] _mpuRbar = new uint[8];
+    private readonly uint[] _mpuRasr = new uint[8];
 
+    /// <summary>
+    /// AIRCR.SYSRESETREQ written with the VECTKEY (datasheet 2.4.4: it resets the Cortex-M0+ core that asked,
+    /// not the debug block or the rest of the chip). The machine performs the reset between core batches.
+    /// </summary>
+    public Action? OnSystemResetRequest;
+
+    /// <summary>Core reset: the SysTick, NVIC priority, SCR and MPU state this block owns returns to its reset value.</summary>
+    public void Reset()
+    {
+        _systCsr = _systRvr = 0;
+        _systRvrWritten = false;
+        _systCvr = 0;
+        _systAnchor = _cpu.Cycles;
+        Array.Clear(_nvicIpr);
+        _mpuCtrl = _mpuRnr = 0;
+        Array.Clear(_mpuRbar);
+        Array.Clear(_mpuRasr);
+    }
+
+    /// <summary>
+    /// Bring the SysTick counter up to date and report COUNTFLAG / the exception for the reloads crossed.
+    /// ARMv6-M B3.3: while enabled the counter, on each clock, reloads from RVR if it is 0, otherwise
+    /// decrements, and COUNTFLAG sets on the 1 -> 0 transition, so the period is RVR + 1 clocks and RVR = 0
+    /// never fires. A CVR write leaves it at 0 (the next clock reloads). The clock is the core clock when
+    /// CLKSOURCE = 1, otherwise the 1 us reference tick (datasheet 2.4.5.1.1).
+    /// </summary>
     private void SyncSysTick()
     {
         var now = _cpu.Cycles;
-        var delta = now - _systAnchor;
+        var before = _systAnchor;
         _systAnchor = now;
 
-        if ((_systCsr & 1) == 0 || delta <= 0) return;   // SysTick not enabled, or nothing elapsed
+        if ((_systCsr & 1) == 0 || now <= before) return;   // SysTick not enabled, or nothing elapsed
 
-        _systCvr -= delta;
+        var steps = (_systCsr & 4) != 0 ? now - before : now / TICK_CYCLES - before / TICK_CYCLES;
+        if (steps <= 0) return;
 
-        while (_systCvr <= 0)
+        var reload = _systRvrWritten ? (long)_systRvr : 0xFFFFFF;
+        var cvr = _systCvr;
+        var fired = false;
+
+        if (cvr > 0)
         {
-            _systCsr |= 1u << 16;   // COUNTFLAG
-            _systCvr += SystReload;
-
-            if ((_systCsr & 2) != 0)   // TICKINT
-                _cpu.TriggerSysTick();
+            if (steps < cvr)
+            {
+                _systCvr = cvr - steps;
+                return;
+            }
+            steps -= cvr;
+            cvr = 0;
+            fired = true;
         }
+
+        if (reload > 0 && steps > 0)
+        {
+            var period = reload + 1;
+            if (steps >= period) fired = true;
+            var rem = steps % period;
+            cvr = rem == 0 ? 0 : reload - (rem - 1);
+        }
+
+        _systCvr = cvr;
+        if (!fired) return;
+
+        _systCsr |= COUNTFLAG;
+        if ((_systCsr & 2) != 0)   // TICKINT
+            _cpu.TriggerSysTick();
     }
 
     // ── IMemoryMappedDevice — reads ──────────────────────────────────
 
     public uint ReadWord(uint address)
+    {
+        var value = Peek(address);
+
+        // ARMv6-M B3.3.2: COUNTFLAG is cleared by a read of SYST_CSR (not by the read-modify-write a
+        // narrow write performs, which goes through Peek).
+        if ((address & 0xFFF) == SYST_CSR)
+            _systCsr &= ~COUNTFLAG;
+
+        return value;
+    }
+
+    /// <summary>Register value without read side effects.</summary>
+    private uint Peek(uint address)
     {
         var offset = address & 0xFFF;
 
@@ -117,8 +204,16 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
             SCB_ICSR   => BuildIcsr(),
             SCB_VTOR   => _cpu.Registers.VTOR,
             SCB_AIRCR  => 0xFA050000,   // VECTKEY read value, no reset pending
+            SCB_SCR    => _cpu.Registers.SCR,
+            SCB_CCR    => 0x208,        // STKALIGN (bit 9) and UNALIGN_TRP (bit 3) read as one (datasheet 2.4.4)
             SCB_SHPR2  => _cpu.Registers.SHPR2,
             SCB_SHPR3  => _cpu.Registers.SHPR3,
+            SCB_SHCSR  => _cpu.Registers.PendingSVCall ? 1u << 15 : 0u,   // SVCALLPENDED
+            MPU_TYPE   => 0x800,        // DREGION = 8, unified (datasheet 2.4.6)
+            MPU_CTRL   => _mpuCtrl,
+            MPU_RNR    => _mpuRnr,
+            MPU_RBAR   => (_mpuRbar[_mpuRnr] & 0xFFFFFF00) | _mpuRnr,   // VALID reads as 0, REGION reads RNR
+            MPU_RASR   => _mpuRasr[_mpuRnr],
             _ => 0,
         };
     }
@@ -147,21 +242,21 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
         {
             case SYST_CSR:
                 SyncSysTick();
-                _systCsr = value & 0x7;   // ENABLE | TICKINT | CLKSOURCE
+                _systCsr = (_systCsr & COUNTFLAG) | (value & 0x7);   // ENABLE | TICKINT | CLKSOURCE
                 break;
 
             case SYST_RVR:
                 SyncSysTick();
                 _systRvr = value & 0x00FFFFFF;
+                _systRvrWritten = true;
                 break;
 
             case SYST_CVR:
                 SyncSysTick();
-                // ARMv6-M: a CVR write clears the counter and COUNTFLAG and must not raise a SysTick
-                // exception. Parking at 0 would instead roll over on the very next cycle, so seed the
-                // reload the hardware performs on the following clock.
-                _systCvr = SystReload;
-                _systCsr &= ~(1u << 16);   // clear COUNTFLAG
+                // Datasheet SYST_CVR: any write clears the counter to 0 and clears COUNTFLAG. It raises no
+                // exception; the next enabled clock reloads from RVR.
+                _systCvr = 0;
+                _systCsr &= ~COUNTFLAG;
                 break;
 
             case NVIC_ISER:
@@ -198,12 +293,32 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
                 }
                 break;
 
+            case SCB_SCR:
+                _cpu.Registers.SCR = value & 0x16;   // SEVONPEND | SLEEPDEEP | SLEEPONEXIT
+                break;
+
+            case SCB_SHCSR:
+                _cpu.Registers.PendingSVCall = (value & (1u << 15)) != 0;   // SVCALLPENDED
+                _cpu.Registers.InterruptsUpdated = true;
+                break;
+
+            case MPU_CTRL: _mpuCtrl = value & 0x7; break;   // PRIVDEFENA | HFNMIENA | ENABLE
+            case MPU_RNR:  _mpuRnr = value & 0x7; break;    // 8 regions: unimplemented bits are RAZ/WI
+            case MPU_RBAR:
+                if ((value & 0x10) != 0)                    // VALID: the REGION field selects the region
+                    _mpuRnr = value & 0x7;
+                _mpuRbar[_mpuRnr] = value & 0xFFFFFF00;
+                break;
+            case MPU_RASR: _mpuRasr[_mpuRnr] = value & 0xFFFFFF3F; break;
+
             case SCB_VTOR:
                 _cpu.Registers.VTOR = value & 0xFFFFFF00;
                 break;
 
             case SCB_AIRCR:
-                // SYSRESETREQ (bit2) could trigger board-level reset; ignored here
+                // Writes are ignored unless VECTKEY (bits 31:16) is 0x05FA. SYSRESETREQ resets the core.
+                if ((value >> 16) == 0x05FA && (value & 4) != 0)
+                    OnSystemResetRequest?.Invoke();
                 break;
 
             case SCB_SHPR2:
@@ -222,7 +337,7 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
     {
         var aligned = address & ~3u;
         var shift = (int)((address & 2) << 3);
-        var current = ReadWord(aligned);
+        var current = Peek(aligned);
         WriteWord(aligned, (current & ~(0xFFFFu << shift)) | ((uint)value << shift));
     }
 
@@ -230,7 +345,7 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
     {
         var aligned = address & ~3u;
         var shift = (int)((address & 3) << 3);
-        var current = ReadWord(aligned);
+        var current = Peek(aligned);
         WriteWord(aligned, (current & ~(0xFFu << shift)) | ((uint)value << shift));
     }
 
@@ -239,7 +354,9 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
     private uint BuildIcsr()
     {
         ref readonly var regs = ref _cpu.Registers;
-        var icsr = regs.IPSR & 0x3Fu;
+        var icsr = regs.IPSR & 0x3Fu;                       // VECTACTIVE
+        icsr |= _cpu.HighestPendingException() << 12;       // VECTPENDING
+        if ((regs.PendingInterrupts & regs.EnabledInterrupts) != 0) icsr |= 1u << 22;   // ISRPENDING
         if (regs.PendingNMI)     icsr |= 1u << 31;
         if (regs.PendingPendSV)  icsr |= 1u << 28;
         if (regs.PendingSystick) icsr |= 1u << 26;

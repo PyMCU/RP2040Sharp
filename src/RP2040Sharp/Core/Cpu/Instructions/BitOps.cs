@@ -466,21 +466,4 @@ public static class BitOps
         var rd = opcode & 0x7;
         cpu.Registers[rd] = cpu.Registers[rm] & 0xFFu;
     }
-
-    // ================================================================
-    // CLZ (Count Leading Zeros) — Thumb-2 32-bit, mask=0xFFF0 pattern=0xFAB0
-    // First halfword: 0xFABx (Rm in bits 3:0)
-    // Second halfword: 0xF08x (Rd in bits 11:8, Rm in bits 3:0)
-    // ================================================================
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void Clz(ushort opcode, CortexM0Plus cpu)
-    {
-        var rm = opcode & 0xF;
-        var second = cpu.Bus.ReadHalfWord(cpu.Registers.PC);
-        cpu.Registers.PC += 2;
-
-        var rd = (second >> 8) & 0xF;
-        cpu.Registers[rd] = (uint)BitOperations.LeadingZeroCount(cpu.Registers[rm]);
-    }
 }

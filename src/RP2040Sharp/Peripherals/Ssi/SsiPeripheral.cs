@@ -269,19 +269,10 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
         }
     }
 
-    public void WriteHalfWord(uint address, ushort value)
-    {
-        var aligned = address & ~3u;
-        var shift   = (int)((address & 2) << 3);
-        WriteWord(aligned, (ReadWord(aligned) & ~(0xFFFFu << shift)) | ((uint)value << shift));
-    }
+    // IO registers sample the whole write bus: a narrow write is replicated across it (datasheet 2.1.4).
+    public void WriteHalfWord(uint address, ushort value) => WriteWord(address & ~3u, value * 0x00010001u);
 
-    public void WriteByte(uint address, byte value)
-    {
-        var aligned = address & ~3u;
-        var shift   = (int)((address & 3) << 3);
-        WriteWord(aligned, (ReadWord(aligned) & ~(0xFFu << shift)) | ((uint)value << shift));
-    }
+    public void WriteByte(uint address, byte value) => WriteWord(address & ~3u, value * 0x01010101u);
 
     // ── Transaction helpers ───────────────────────────────────────────────────
 

@@ -31,7 +31,6 @@ public readonly struct SwitchDecoder : IInstructionDecoder
             case HandlerId.SystemOps_Wfe: SystemOps.Wfe(opcode, cpu); break;
             case HandlerId.SystemOps_Wfi: SystemOps.Wfi(opcode, cpu); break;
             case HandlerId.SystemOps_Msr: SystemOps.Msr(opcode, cpu); break;
-            case HandlerId.BitOps_Clz: BitOps.Clz(opcode, cpu); break;
             case HandlerId.ArithmeticOps_Adcs: ArithmeticOps.Adcs(opcode, cpu); break;
             case HandlerId.BitOps_Ands: BitOps.Ands(opcode, cpu); break;
             case HandlerId.BitOps_AsrsRegister: BitOps.AsrsRegister(opcode, cpu); break;
@@ -68,8 +67,6 @@ public readonly struct SwitchDecoder : IInstructionDecoder
             case HandlerId.MemoryOps_PopPc: MemoryOps.PopPc(opcode, cpu); break;
             case HandlerId.MemoryOps_Push: MemoryOps.Push(opcode, cpu); break;
             case HandlerId.MemoryOps_PushLr: MemoryOps.PushLr(opcode, cpu); break;
-            case HandlerId.FlowOps_Cbz: FlowOps.Cbz(opcode, cpu); break;
-            case HandlerId.FlowOps_Cbnz: FlowOps.Cbnz(opcode, cpu); break;
             case HandlerId.SystemOps_Bkpt: SystemOps.Bkpt(opcode, cpu); break;
             case HandlerId.SystemOps_Svc: SystemOps.Svc(opcode, cpu); break;
             case HandlerId.ArithmeticOps_AddHighToReg: ArithmeticOps.AddHighToReg(opcode, cpu); break;
