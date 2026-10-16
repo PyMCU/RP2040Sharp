@@ -323,7 +323,9 @@ public sealed class RP2040Machine : IDisposable
         // ── Tickable list ─────────────────────────────────────────────────
         // ppbRouter.Tick() internally ticks both Ppb (Core0) and Ppb1 (Core1),
         // so Ppb1 does not need a separate entry here.
-        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Adc, Usb, Dma];
+        // Spi0/Spi1 tick so their TX FIFO drains over time: the TX DREQ follows real occupancy
+        // (see WireSpiDreq), and a FIFO that never drains never frees a beat.
+        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Adc, Usb, Dma, Spi0, Spi1];
         Watchdog.OnReset = SystemReset;
 
         // ── DMA DREQ sources ──────────────────────────────────────────────
@@ -346,11 +348,11 @@ public sealed class RP2040Machine : IDisposable
         // Gate the PIO's per-tick NVIC recompute to the window where core 0 sleeps (a busy core
         // re-checks interrupts itself), removing the churn that dominated fine-grained stepping.
         Pio0.CoreWaiting = Pio1.CoreWaiting = () => Core0Waiting;
-        // SPI0 TX(16), RX(17), SPI1 TX(18), RX(19)
-        Dma.RegisterDreq(16, () => true);              // SPI0 TX always ready
-        Dma.RegisterDreq(17, () => Spi0.RxDataAvailable);
-        Dma.RegisterDreq(18, () => true);              // SPI1 TX always ready
-        Dma.RegisterDreq(19, () => Spi1.RxDataAvailable);
+        // SPI0 TX(16), RX(17), SPI1 TX(18), RX(19). The TX line follows the real FIFO occupancy —
+        // an always-ready TX let a channel drain its whole buffer at trigger time, overrunning the
+        // 8-deep RX FIFO — and both lines re-arm their channel so a stall is never permanent.
+        WireSpiDreq(Spi0, 16);
+        WireSpiDreq(Spi1, 18);
         // UART0 TX(20), RX(21), UART1 TX(22), RX(23)
         Dma.RegisterDreq(20, () => true);              // UART0 TX always ready
         Dma.RegisterDreq(21, () => Uart0.RxDataAvailable);
@@ -366,9 +368,8 @@ public sealed class RP2040Machine : IDisposable
         Dma.RegisterDreq(38, () => true);
         Dma.RegisterDreq(39, () => true);
         // A channel that stalled on an empty RX FIFO must re-arm when the peripheral produces data (the
-        // PIO already does this via OnRxPush); otherwise it stays BUSY forever.
-        Spi0.OnRxAvailable  += () => Dma.ResumeDreq(17);
-        Spi1.OnRxAvailable  += () => Dma.ResumeDreq(19);
+        // PIO already does this via OnRxPush); otherwise it stays BUSY forever. Spi0/Spi1 are not here:
+        // WireSpiDreq above already hooks both their RX and their TX resume.
         Uart0.OnRxAvailable += () => Dma.ResumeDreq(21);
         Uart1.OnRxAvailable += () => Dma.ResumeDreq(23);
         I2c0.OnRxAvailable  += () => Dma.ResumeDreq(33);
@@ -777,6 +778,19 @@ public sealed class RP2040Machine : IDisposable
             throw new ArgumentException("BootROM image exceeds 16 KB");
 
         image.CopyTo(new Span<byte>(Bus.PtrBootRom, image.Length));
+    }
+
+    /// <summary>Register a SPI's TX (<paramref name="dreqTx"/>) and RX (<paramref name="dreqTx"/>+1)
+    /// DMA DREQ lines and wire the resume hooks. Without the TX line tracking real FIFO occupancy a
+    /// paced channel drains its whole buffer at trigger time; without the resume hooks a channel that
+    /// stalls on an empty FIFO stays BUSY forever, which is what hung any <c>spi.write()</c> of 32
+    /// bytes or more (MicroPython's DMA threshold).</summary>
+    private void WireSpiDreq(SpiPeripheral spi, int dreqTx)
+    {
+        Dma.RegisterDreq(dreqTx,     () => spi.TxFifoNotFull);
+        Dma.RegisterDreq(dreqTx + 1, () => spi.RxDataAvailable);
+        spi.OnTxSpace     += () => Dma.ResumeDreq(dreqTx);
+        spi.OnRxAvailable += () => Dma.ResumeDreq(dreqTx + 1);
     }
 
     /// <summary>Total instructions executed by Core 0 since reset.</summary>
