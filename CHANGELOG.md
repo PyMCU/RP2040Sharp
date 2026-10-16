@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New: the SiliconTwin.Abstractions contract
+
+`RP2040Mcu` implements [`SiliconTwin.Abstractions`](https://github.com/silicon-twin/abstractions)
+(`IMcu`, `IGpio`, `IPwmSource`, `IAdcInput`, `IPeripheralMap`), the shared embedder contract of
+the Silicon Twin emulators, so a host drives an RP2040 and an AVR the same way.
+`new RP2040Mcu()` owns its machine; `new RP2040Mcu(machine)` wraps one you already have.
+
+- `IMcu.Run(cycleBudget)` is backed by the new `RP2040Machine.RunCycles`, which sizes its
+  instruction slices from the measured cycles per instruction. It overshoots by about one
+  instruction and costs the same as plain instruction batches. `Load` takes UF2, raw binary,
+  and `Auto`.
+- One `GPIO` bank of 30 pins, resolved through the function mux, with `SetInputs`,
+  `ReleaseInputs`, pull masks, and `PinChanged` batched per pad sweep with the cycle of the
+  write. It is armed on the first subscriber, so it costs nothing otherwise.
+- `IPwmSource` from the PWM slices, `IAdcInput.ReadChannelVolts` mapped onto `ReadChannel`
+  (3.3 V reference, 12-bit codes), and UART, SPI and I2C at byte level, including the
+  firmware-as-I2C-slave side.
+- Core additions: `IoBank0Peripheral.PadsChanged`, `GetPadOutputState`, `ReleaseExternalInput`,
+  `SioPeripheral.ReleaseGpioExternal` (a pad driven from outside can now be given back to its
+  pull), and `UartPeripheral.TryInjectByte`.
+
 ### Fixed: `spi.write()` of 32 bytes or more never returned
 
 MicroPython switches `spi.write()` to DMA at 32 bytes (`dma_min_size_threshold`), claiming one 8-bit

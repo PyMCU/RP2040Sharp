@@ -12,6 +12,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="SiliconTwin.Abstractions" Version="0.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="..\..\LICENSE-BUSL.txt" Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
 

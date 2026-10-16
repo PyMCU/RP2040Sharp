@@ -73,6 +73,15 @@ public sealed class UartPeripheral : IMemoryMappedDevice
         }
     }
 
+    /// <summary>Like <see cref="InjectByte"/>, but reports whether the byte fit: <c>false</c> when the RX
+    /// FIFO was full and the byte was dropped.</summary>
+    public bool TryInjectByte(byte value)
+    {
+        if (_rxFifo.Count >= 32) return false;
+        InjectByte(value);
+        return true;
+    }
+
     /// <summary>DREQ source for DMA RX: true when RX FIFO has data to read.</summary>
     public bool RxDataAvailable => _rxFifo.Count > 0;
 
