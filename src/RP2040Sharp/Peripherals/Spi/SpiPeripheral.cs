@@ -72,10 +72,10 @@ public sealed class SpiPeripheral : IMemoryMappedDevice, ITickable
     /// <summary>DREQ source for DMA TX: true while the TX FIFO has room for another beat.</summary>
     public bool TxFifoNotFull => _txLevel < FIFO_DEPTH;
 
-    /// <summary>Fired when a word lands in the RX FIFO — re-arms a DMA channel paced by this SPI's RX DREQ.</summary>
+    /// <summary>Raised when a word lands in the RX FIFO, so a DMA channel stalled on the RX DREQ can re-arm.</summary>
     public Action? OnRxAvailable;
 
-    /// <summary>Fired when the TX FIFO drains on a tick — re-arms a DMA channel paced by this SPI's TX DREQ.</summary>
+    /// <summary>Raised when the TX FIFO drains on a tick, so a DMA channel stalled on the TX DREQ can re-arm.</summary>
     public Action? OnTxSpace;
 
     /// <summary>Read-only snapshot of the SPI (PL022) configuration for external inspection.</summary>

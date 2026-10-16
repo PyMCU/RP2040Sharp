@@ -119,6 +119,15 @@ public sealed class UsbCdcHost
     private void HandleResetReceived()
     {
         _resumeSignaled = false;
+        // A bus reset starts enumeration from scratch. Drop everything learned from a previous session: after
+        // a device reboot (watchdog reset, rp2040.reboot()) the stale _descriptorsSize/_initialized would
+        // otherwise skip GET_DESCRIPTOR/SET_CONFIGURATION and the rebooted device would never be configured.
+        _initialized = false;
+        _descriptorsSize = null;
+        _descriptors.Clear();
+        _inEndpoint = -1;
+        _outEndpoint = -1;
+        _armedOutEp = -1;
         _usb.SendSetupPacket(SetDeviceAddressPacket(1));
     }
 

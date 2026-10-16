@@ -10,6 +10,12 @@ public sealed unsafe class RandomAccessMemory : IMemoryMappedDevice, IDisposable
     // multi-megabyte RAM/Flash/BootROM blocks out of the GC heap entirely — a pinned array of
     // this size would fragment the heap and resist compaction for its whole lifetime. Mirrors
     // the unmanaged-buffer pattern used by InstructionDecoder.
+    /// <summary>Slack allocated past the end of every backing store. The bus masks an address into the
+    /// buffer but then reads/writes a whole halfword/word from there, so an unaligned access at the last
+    /// 1-3 bytes spills past the masked end. Without the slack that was a host heap overflow reachable from
+    /// guest code (LDR/STR/LDM/STM, exception stacking with a hostile SP). Wider than any single access.</summary>
+    public const int TailPad = 16;
+
     public readonly byte* BasePtr;
     public uint Size { get; }
 
@@ -18,7 +24,7 @@ public sealed unsafe class RandomAccessMemory : IMemoryMappedDevice, IDisposable
     public RandomAccessMemory(int size)
     {
         // AllocZeroed preserves the zero-initialised semantics of `new byte[size]`.
-        BasePtr = (byte*)NativeMemory.AllocZeroed((nuint)size);
+        BasePtr = (byte*)NativeMemory.AllocZeroed((nuint)size + TailPad);
         Size = (uint)size;
     }
 

@@ -94,6 +94,12 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
 
     private readonly Queue<byte> _rxFifo = new(FIFO_DEPTH);
 
+    /// <summary>DREQ source for DMA RX: true when the RX FIFO has data.</summary>
+    public bool RxDataAvailable => _rxFifo.Count > 0;
+
+    /// <summary>Raised when a byte lands in the RX FIFO, so a DMA channel stalled on the RX DREQ can re-arm.</summary>
+    public Action? OnRxAvailable;
+
     private bool _inSlaveTransmit;
     private readonly Queue<byte> _slaveTxFifo = new(FIFO_DEPTH);
 
@@ -291,7 +297,10 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
         {
             var rxByte = OnRead?.Invoke(addr) ?? 0;
             if (_rxFifo.Count < FIFO_DEPTH)
+            {
                 _rxFifo.Enqueue(rxByte);
+                OnRxAvailable?.Invoke();
+            }
             _rawIntr |= 1u << 2;  // RX_FULL
             CheckInterrupts();
         }

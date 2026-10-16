@@ -166,7 +166,7 @@ public sealed unsafe class CortexM0Plus
 
         // All IRQs reset to priority level 0 (each InterruptPrioritiesN is the bitmask of
         // IRQs currently at that level; NVIC IPR writes move bits between buckets).
-        Registers.InterruptPriorities0 = 0x03FFFFFF;
+        Registers.InterruptPriorities0 = 0xFFFFFFFF;   // all 32 NVIC lines (26-31 are the unassigned lines the SDK hands out as user IRQs)
         Registers.InterruptPriorities1 = 0;
         Registers.InterruptPriorities2 = 0;
         Registers.InterruptPriorities3 = 0;
@@ -196,7 +196,13 @@ public sealed unsafe class CortexM0Plus
                 _fetchMask = BusInterconnect.MASK_BOOTROM & ~1u;
                 break;
             default:
+                // No direct fetch window. Poison the cached region id with a value no `pc >> 28` can
+                // equal, so the loop's region-change test fires again on the next fetch and re-raises
+                // the HardFault. Without this, a fault handler (or any PC change that reuses the same
+                // unfetchable region, or a Reset() vector pointing at one) matched the cached id and
+                // read through the null pointer.
                 _fetchPtr = null;
+                _currentRegionId = uint.MaxValue;
                 break;
         }
     }
@@ -569,10 +575,17 @@ public sealed unsafe class CortexM0Plus
 
     public void SetInterrupt(int irq, bool pending)
     {
-        if (irq is < 0 or > 25) return;
+        if (irq is < 0 or > 31) return;
         if (irq is not (IRQ_SIO_PROC0 or IRQ_SIO_PROC1))
             SiblingCore?.SetInterruptLine(irq, pending);
         SetInterruptLine(irq, pending);
+    }
+
+    /// <summary>Software-pends a line in THIS core's NVIC only (NVIC_ISPR is per core; <c>irq_set_pending()</c>).</summary>
+    public void PendInterruptLocal(int irq)
+    {
+        if (irq is < 0 or > 31) return;
+        SetInterruptLine(irq, true);
     }
 
     /// <summary>Drives this core's NVIC line only — never crosses to the sibling.</summary>

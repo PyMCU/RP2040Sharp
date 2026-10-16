@@ -319,7 +319,10 @@ public sealed class RP2040Machine : IDisposable
         // ── Tickable list ─────────────────────────────────────────────────
         // ppbRouter.Tick() internally ticks both Ppb (Core0) and Ppb1 (Core1),
         // so Ppb1 does not need a separate entry here.
-        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Usb, Spi0, Spi1];
+        // Spi0/Spi1 tick so their TX FIFO drains over time: the TX DREQ follows real occupancy
+        // (see WireSpiDreq), and a FIFO that never drains never frees a beat.
+        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Adc, Usb, Dma, Spi0, Spi1];
+        Watchdog.OnReset = SystemReset;
 
         // ── DMA DREQ sources ──────────────────────────────────────────────
         // PIO0 TX/RX SM0-3: DREQ 0-3 (TX), 4-7 (RX)
@@ -351,9 +354,21 @@ public sealed class RP2040Machine : IDisposable
         Dma.RegisterDreq(21, () => Uart0.RxDataAvailable);
         Dma.RegisterDreq(22, () => true);              // UART1 TX always ready
         Dma.RegisterDreq(23, () => Uart1.RxDataAvailable);
+        // I2C0 TX(32), RX(33), I2C1 TX(34), RX(35)
+        Dma.RegisterDreq(32, () => true);
+        Dma.RegisterDreq(33, () => I2c0.RxDataAvailable);
+        Dma.RegisterDreq(34, () => true);
+        Dma.RegisterDreq(35, () => I2c1.RxDataAvailable);
         // ADC DREQ 36: RX FIFO has data
         Dma.RegisterDreq(36, () => Adc.HasFifoData);
-        Adc.OnFifoData += () => Dma.ResumeDreq(36);
+        // A channel that stalled on an empty RX FIFO must re-arm when the peripheral produces data (the
+        // PIO already does this via OnRxPush); otherwise it stays BUSY forever. Spi0/Spi1 are not here:
+        // WireSpiDreq above already hooks both their RX and their TX resume.
+        Uart0.OnRxAvailable += () => Dma.ResumeDreq(21);
+        Uart1.OnRxAvailable += () => Dma.ResumeDreq(23);
+        I2c0.OnRxAvailable  += () => Dma.ResumeDreq(33);
+        I2c1.OnRxAvailable  += () => Dma.ResumeDreq(35);
+        Adc.OnFifoData      += () => Dma.ResumeDreq(36);
 
         // ── PIO GPIO integration ───────────────────────────────────────────
         // Shared helpers: read physical GPIO levels; update SIO output and notify IoBank0
@@ -630,11 +645,12 @@ public sealed class RP2040Machine : IDisposable
     /// </summary>
     private unsafe void FlashEraseHook(Core.Cpu.CortexM0Plus cpu)
     {
-        var offset = (int)(cpu.Registers.R0 & (Bus.FlashSize - 1));
-        var count  = (int)cpu.Registers.R1;
-        if (count < 0 || offset + count > (int)Bus.FlashSize) count = (int)Bus.FlashSize - offset;
+        var offset = (long)(cpu.Registers.R0 & (Bus.FlashSize - 1));
+        // long: guest-controlled offset + count must not wrap past the bounds check (host heap write).
+        var count  = (long)(int)cpu.Registers.R1;
+        if (count < 0 || offset + count > Bus.FlashSize) count = Bus.FlashSize - offset;
         if (count > 0)
-            new Span<byte>(Bus.PtrFlash + offset, count).Fill(0xFF);
+            new Span<byte>(Bus.PtrFlash + offset, (int)count).Fill(0xFF);
     }
 
     /// <summary>
@@ -644,12 +660,13 @@ public sealed class RP2040Machine : IDisposable
     /// </summary>
     private unsafe void FlashProgramHook(Core.Cpu.CortexM0Plus cpu)
     {
-        var flashOffset = (int)(cpu.Registers.R0 & (Bus.FlashSize - 1));
+        var flashOffset = (long)(cpu.Registers.R0 & (Bus.FlashSize - 1));
         var srcAddr     = cpu.Registers.R1;
-        var count       = (int)cpu.Registers.R2;
-        if (count < 0 || flashOffset + count > (int)Bus.FlashSize)
-            count = (int)Bus.FlashSize - flashOffset;
-        for (var i = 0; i < count; i++)
+        // long: guest-controlled offset + count must not wrap past the bounds check (host heap write).
+        var count       = (long)(int)cpu.Registers.R2;
+        if (count < 0 || flashOffset + count > Bus.FlashSize)
+            count = Bus.FlashSize - flashOffset;
+        for (var i = 0L; i < count; i++)
             Bus.PtrFlash[flashOffset + i] = Bus.ReadByte(srcAddr + (uint)i);
     }
 
@@ -977,6 +994,24 @@ public sealed class RP2040Machine : IDisposable
         LastElapsedCycles = delta;
         foreach (var t in _tickables)
             t.Tick(delta);
+    }
+
+    /// <summary>Number of system resets (watchdog reboots) performed.</summary>
+    public int ResetCount { get; private set; }
+
+    /// <summary>
+    /// Full system reset as raised by the watchdog (timer expiry, <c>CTRL.TRIGGER</c>, <c>watchdog_reboot()</c>,
+    /// <c>rp2040.reboot()</c>): both cores restart from the BootROM vector with clean core state; flash, SRAM and
+    /// the watchdog SCRATCH/REASON registers are preserved (firmware reads them to learn why it rebooted).
+    /// Invoked from the watchdog Tick, i.e. between core <see cref="Run"/> batches, so touching CPU state is safe.
+    /// </summary>
+    public void SystemReset()
+    {
+        ResetCount++;
+        Cpu.Registers = default;
+        Cpu1.Registers = default;
+        Reset();
+        Usb.Reset();
     }
 
     /// <summary>Reset Core 0. Core 1 is also reset and its launched state is cleared.</summary>
