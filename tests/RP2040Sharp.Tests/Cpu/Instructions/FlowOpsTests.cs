@@ -147,17 +147,30 @@ public abstract class FlowOpsTests
         [Fact]
         public void Should_BranchToAddress_StoredInRegister()
         {
-            // Arrange
+            // Arrange. The target has bit 0 set (Thumb state); BX clears it in PC.
             var opcode = InstructionEmiter.Bx(LR);
             Bus.WriteHalfWord(0x20000000, opcode);
 
-            Cpu.Registers.LR = 0x10000200;
+            Cpu.Registers.LR = 0x10000201;
 
             // Act
             Cpu.Step();
 
             // Assert
             Cpu.Registers.PC.Should().Be(0x10000200);
+        }
+
+        [Fact]
+        public void Should_HardFault_When_TargetAddressIsEven()
+        {
+            // ARMv6-M A2.3.1 BXWritePC: EPSR.T = address<0>. An even address selects ARM state, which
+            // ARMv6-M cannot execute, so the next fetch is an invalid-state fault (HardFault).
+            Bus.WriteHalfWord(0x20000000, InstructionEmiter.Bx(LR));
+            Cpu.Registers.LR = 0x10000200;
+
+            Cpu.Step();
+
+            Cpu.Registers.IPSR.Should().Be(3u);
         }
     }
 }

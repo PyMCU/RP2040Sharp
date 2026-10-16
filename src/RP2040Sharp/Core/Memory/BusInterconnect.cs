@@ -8,8 +8,22 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     public const uint REGION_FLASH = 0x1;
     public const uint REGION_SRAM = 0x2;
 
-    public const uint MASK_SRAM = 0x7FFFF;    // 512KB (covers 264KB + mirrors)
+    public const uint MASK_SRAM = 0x7FFFF;    // size of the backing buffer (512KB); SRAM_SIZE of it is addressable
     public const uint MASK_BOOTROM = 0x3FFF;  // 16KB
+
+    /// <summary>Addressable SRAM: 0x20000000-0x20041FFF, 264 KiB (datasheet 2.2.2). Anything above it is not mapped.</summary>
+    public const uint SRAM_SIZE = 0x42000;
+
+    /// <summary>Boot ROM size: 0x00000000-0x00003FFF. The rest of region 0 is not mapped (datasheet 2.2.1).</summary>
+    public const uint BOOTROM_SIZE = 0x4000;
+
+    // 0x10000000-0x17FFFFFF: the flash array through its XIP aliases. XIP_CTRL (0x14000000) and XIP_SRAM
+    // (0x15000000) sit inside it and are not modelled: they read the array like the rest of the window.
+    private const uint XIP_ARRAY_SPAN = 0x08000000;
+
+    // The non-striped aliases of SRAM0-3 (datasheet 2.6.1): 0x21000000-0x2103FFFF, one 64 KiB bank each.
+    private const uint SRAM_ALIAS_START = 0x21000000;
+    private const uint SRAM_ALIAS_SIZE = 0x40000;
 
     public uint FlashSize { get; }
     public uint MaskFlash { get; }
@@ -23,10 +37,17 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
 
     private readonly IMemoryMappedDevice[] _memoryMap = new IMemoryMappedDevice[16];
 
+    // What a bridged region decodes, cached from the device's IAddressDecoder when it is mapped, so a
+    // peripheral access checks it with two array loads instead of a type test and a call.
+    private readonly uint[] _decodeLimit = new uint[16];
+    private readonly bool[]?[] _slotPresent = new bool[]?[16];
+    private readonly int[] _slotShift = new int[16];
+
     // SSI peripheral lives inside the Flash region (0x18000000) — handled as a sub-device
     // so the flash fast path continues to serve 0x10000000–0x17FFFFFF unchanged.
     private IMemoryMappedDevice? _ssiDevice;
     private const uint SSI_BASE_ADDRESS = 0x18000000;
+    private const uint SSI_SPAN = 0x01000000;
 
     private readonly RandomAccessMemory _sram;
     private readonly RandomAccessMemory _bootRom;
@@ -57,6 +78,17 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
         if (regionIndex is < 0 or > 15)
             throw new ArgumentOutOfRangeException(nameof(regionIndex));
         _memoryMap[regionIndex] = device;
+        if (device is IAddressDecoder decoder)
+        {
+            _decodeLimit[regionIndex] = decoder.DecodeLimit;
+            _slotPresent[regionIndex] = decoder.SlotPresent;
+            _slotShift[regionIndex] = decoder.SlotShift;
+        }
+        else
+        {
+            _decodeLimit[regionIndex] = uint.MaxValue;
+            _slotPresent[regionIndex] = null;
+        }
     }
 
     /// <summary>
@@ -66,137 +98,223 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     /// </summary>
     public void RegisterSsi(IMemoryMappedDevice ssi) => _ssiDevice = ssi;
 
+    // Datasheet 2.2: "Unmapped address ranges raise a bus error when accessed." The Try* accessors report it
+    // (false) so the CPU can take a HardFault; the plain accessors below keep their lenient contract for the DMA
+    // front end, the debugger and tests, and read 0 / drop the write at an unmapped address.
+
+    // --- READS ---
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryReadByte(uint address, out byte value)
+    {
+        var sram = address - SRAM_START_ADDRESS;
+        if (sram < SRAM_SIZE) { value = PtrSram[sram]; return true; }
+        if (address - FLASH_START_ADDRESS < XIP_ARRAY_SPAN) { value = PtrFlash[address & MaskFlash]; return true; }
+        if (address < BOOTROM_SIZE) { value = PtrBootRom[address]; return true; }
+        return TryReadByteSlow(address, out value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryReadHalfWord(uint address, out ushort value)
+    {
+        var sram = address - SRAM_START_ADDRESS;
+        if (sram < SRAM_SIZE) { value = Unsafe.ReadUnaligned<ushort>(PtrSram + sram); return true; }
+        if (address - FLASH_START_ADDRESS < XIP_ARRAY_SPAN)
+        {
+            value = Unsafe.ReadUnaligned<ushort>(PtrFlash + (address & MaskFlash));
+            return true;
+        }
+        if (address < BOOTROM_SIZE) { value = Unsafe.ReadUnaligned<ushort>(PtrBootRom + address); return true; }
+        return TryReadHalfWordSlow(address, out value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryReadWord(uint address, out uint value)
+    {
+        var sram = address - SRAM_START_ADDRESS;
+        if (sram < SRAM_SIZE) { value = Unsafe.ReadUnaligned<uint>(PtrSram + sram); return true; }
+        if (address - FLASH_START_ADDRESS < XIP_ARRAY_SPAN)
+        {
+            value = Unsafe.ReadUnaligned<uint>(PtrFlash + (address & MaskFlash));
+            return true;
+        }
+        if (address < BOOTROM_SIZE) { value = Unsafe.ReadUnaligned<uint>(PtrBootRom + address); return true; }
+        return TryReadWordSlow(address, out value);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public byte ReadByte(uint address)
     {
-        var region = address >> 28;
-        if (region == REGION_SRAM)
-            return PtrSram[address & MASK_SRAM];
-        if (region == REGION_FLASH)
-        {
-            if (_ssiDevice != null && address >= SSI_BASE_ADDRESS)
-                return _ssiDevice.ReadByte(address - SSI_BASE_ADDRESS);
-            return PtrFlash[address & MaskFlash];
-        }
-        if (region == REGION_BOOTROM)
-            return PtrBootRom[address & MASK_BOOTROM];
-        return ReadByteDispatch(address);
+        TryReadByte(address, out var value);
+        return value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ushort ReadHalfWord(uint address)
     {
-        var region = address >> 28;
-        if (region == REGION_SRAM)
-            return Unsafe.ReadUnaligned<ushort>(PtrSram + (address & MASK_SRAM));
-        if (region == REGION_FLASH)
-        {
-            if (_ssiDevice != null && address >= SSI_BASE_ADDRESS)
-                return _ssiDevice.ReadHalfWord(address - SSI_BASE_ADDRESS);
-            return Unsafe.ReadUnaligned<ushort>(PtrFlash + (address & MaskFlash));
-        }
-        if (region == REGION_BOOTROM)
-            return Unsafe.ReadUnaligned<ushort>(PtrBootRom + (address & MASK_BOOTROM));
-        return ReadHalfWordDispatch(address);
+        TryReadHalfWord(address, out var value);
+        return value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint ReadWord(uint address)
     {
-        var region = address >> 28;
-        if (region == REGION_SRAM)
-            return Unsafe.ReadUnaligned<uint>(PtrSram + (address & MASK_SRAM));
-        if (region == REGION_FLASH)
-        {
-            if (_ssiDevice != null && address >= SSI_BASE_ADDRESS)
-                return _ssiDevice.ReadWord(address - SSI_BASE_ADDRESS);
-            return Unsafe.ReadUnaligned<uint>(PtrFlash + (address & MaskFlash));
-        }
-        if (region == REGION_BOOTROM)
-            return Unsafe.ReadUnaligned<uint>(PtrBootRom + (address & MASK_BOOTROM));
-        return ReadWordDispatch(address);
+        TryReadWord(address, out var value);
+        return value;
     }
 
-    // --- SLOW PATH DISPATCHERS ---
+    // --- SLOW PATH: the SSI window, the SRAM aliases, the bridged peripheral regions, and unmapped space ---
 
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private byte ReadByteDispatch(uint address) =>
-        _memoryMap[address >> 28] is { } d ? d.ReadByte(address & 0x0FFFFFFF)
-            : EmuStrict.NoteRet("mmio.read.unmapped-region", $"0x{address:X8}", (byte)0);
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private ushort ReadHalfWordDispatch(uint address) =>
-        _memoryMap[address >> 28] is { } d ? d.ReadHalfWord(address & 0x0FFFFFFF)
-            : EmuStrict.NoteRet("mmio.read.unmapped-region", $"0x{address:X8}", (ushort)0);
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private uint ReadWordDispatch(uint address) =>
-        _memoryMap[address >> 28] is { } d ? d.ReadWord(address & 0x0FFFFFFF)
-            : EmuStrict.NoteRet("mmio.read.unmapped-region", $"0x{address:X8}", 0u);
-
+    /// <summary>Byte offset into the striped SRAM array for an address in a non-striped alias bank, or false.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteWord(uint address, uint value)
+    private static bool TryMapSramAlias(uint address, out uint offset)
+    {
+        var a = address - SRAM_ALIAS_START;
+        if (a >= SRAM_ALIAS_SIZE) { offset = 0; return false; }
+        // Bank n is the 64 KiB at +n*64K; striped, word w of bank n is word w*4+n.
+        var bank = a >> 16;
+        var word = (a >> 2) & 0x3FFF;
+        offset = ((word << 2 | bank) << 2) | (a & 3);
+        return true;
+    }
+
+    /// <summary>The device for a bridged region if it decodes this address, else null (unmapped).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private IMemoryMappedDevice? Decode(uint address)
     {
         var region = address >> 28;
-        if (region == REGION_SRAM)
+        if (region <= REGION_SRAM) return null;
+        var device = _memoryMap[region];
+        if (device is null) return null;
+        var local = address & 0x0FFFFFFF;
+        if (local >= _decodeLimit[region]) return null;
+        var slots = _slotPresent[region];
+        if (slots is not null && !slots[(local >> _slotShift[region]) & 0xFF]) return null;
+        return device;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryReadByteSlow(uint address, out byte value)
+    {
+        if (Decode(address) is { } d) { value = d.ReadByte(address & 0x0FFFFFFF); return true; }
+        if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
         {
-            Unsafe.WriteUnaligned(PtrSram + (address & MASK_SRAM), value);
-            return;
+            value = _ssiDevice.ReadByte(address - SSI_BASE_ADDRESS);
+            return true;
         }
-        if (_ssiDevice != null && region == REGION_FLASH && address >= SSI_BASE_ADDRESS)
+        if (TryMapSramAlias(address, out var offset)) { value = PtrSram[offset]; return true; }
+        value = EmuStrict.NoteRet("mmio.read.unmapped-region", $"0x{address:X8}", (byte)0);
+        return false;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryReadHalfWordSlow(uint address, out ushort value)
+    {
+        if (Decode(address) is { } d) { value = d.ReadHalfWord(address & 0x0FFFFFFF); return true; }
+        if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
+        {
+            value = _ssiDevice.ReadHalfWord(address - SSI_BASE_ADDRESS);
+            return true;
+        }
+        if (TryMapSramAlias(address, out var offset)) { value = Unsafe.ReadUnaligned<ushort>(PtrSram + offset); return true; }
+        value = EmuStrict.NoteRet("mmio.read.unmapped-region", $"0x{address:X8}", (ushort)0);
+        return false;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryReadWordSlow(uint address, out uint value)
+    {
+        if (Decode(address) is { } d) { value = d.ReadWord(address & 0x0FFFFFFF); return true; }
+        if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
+        {
+            value = _ssiDevice.ReadWord(address - SSI_BASE_ADDRESS);
+            return true;
+        }
+        if (TryMapSramAlias(address, out var offset)) { value = Unsafe.ReadUnaligned<uint>(PtrSram + offset); return true; }
+        value = EmuStrict.NoteRet("mmio.read.unmapped-region", $"0x{address:X8}", 0u);
+        return false;
+    }
+
+    // --- WRITES ---
+    // ROM and the flash/XIP window take writes without effect (flash is programmed through the ROM routines),
+    // which is not a fault.
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryWriteWord(uint address, uint value)
+    {
+        var sram = address - SRAM_START_ADDRESS;
+        if (sram < SRAM_SIZE) { Unsafe.WriteUnaligned(PtrSram + sram, value); return true; }
+        if (address - FLASH_START_ADDRESS < XIP_ARRAY_SPAN || address < BOOTROM_SIZE) return true;
+        return TryWriteWordSlow(address, value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryWriteByte(uint address, byte value)
+    {
+        var sram = address - SRAM_START_ADDRESS;
+        if (sram < SRAM_SIZE) { PtrSram[sram] = value; return true; }
+        if (address - FLASH_START_ADDRESS < XIP_ARRAY_SPAN || address < BOOTROM_SIZE) return true;
+        return TryWriteByteSlow(address, value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryWriteHalfWord(uint address, ushort value)
+    {
+        var sram = address - SRAM_START_ADDRESS;
+        if (sram < SRAM_SIZE) { Unsafe.WriteUnaligned(PtrSram + sram, value); return true; }
+        if (address - FLASH_START_ADDRESS < XIP_ARRAY_SPAN || address < BOOTROM_SIZE) return true;
+        return TryWriteHalfWordSlow(address, value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteWord(uint address, uint value) => TryWriteWord(address, value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteByte(uint address, byte value) => TryWriteByte(address, value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteHalfWord(uint address, ushort value) => TryWriteHalfWord(address, value);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryWriteWordSlow(uint address, uint value)
+    {
+        if (Decode(address) is { } d) { d.WriteWord(address & 0x0FFFFFFF, value); return true; }
+        if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
         {
             _ssiDevice.WriteWord(address - SSI_BASE_ADDRESS, value);
-            return;
+            return true;
         }
-        if (region == REGION_FLASH || region == REGION_BOOTROM)
-            return;
-
-        WriteWordDispatch(region, address, value);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteByte(uint address, byte value)
-    {
-        var region = address >> 28;
-        if (region == REGION_SRAM)
-        {
-            PtrSram[address & MASK_SRAM] = value;
-            return;
-        }
-        if (_ssiDevice != null && region == REGION_FLASH && address >= SSI_BASE_ADDRESS)
-        {
-            _ssiDevice.WriteByte(address - SSI_BASE_ADDRESS, value);
-            return;
-        }
-        if (region <= REGION_FLASH)
-            return; // ROM(0) o FLASH(1)
-        _memoryMap[region]?.WriteByte(address & 0x0FFFFFFF, value);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteHalfWord(uint address, ushort value)
-    {
-        var region = address >> 28;
-        if (region == REGION_SRAM)
-        {
-            Unsafe.WriteUnaligned(PtrSram + (address & MASK_SRAM), value);
-            return;
-        }
-        if (_ssiDevice != null && region == REGION_FLASH && address >= SSI_BASE_ADDRESS)
-        {
-            _ssiDevice.WriteHalfWord(address - SSI_BASE_ADDRESS, value);
-            return;
-        }
-        if (region <= REGION_FLASH)
-            return;
-        _memoryMap[region]?.WriteHalfWord(address & 0x0FFFFFFF, value);
+        if (TryMapSramAlias(address, out var offset)) { Unsafe.WriteUnaligned(PtrSram + offset, value); return true; }
+        EmuStrict.Note("mmio.write.unmapped-region", $"0x{address:X8}");
+        return false;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void WriteWordDispatch(uint region, uint address, uint value)
+    private bool TryWriteByteSlow(uint address, byte value)
     {
-        if (_memoryMap[region] is { } d) d.WriteWord(address & 0x0FFFFFFF, value);
-        else EmuStrict.Note("mmio.write.unmapped-region", $"0x{address:X8}");
+        if (Decode(address) is { } d) { d.WriteByte(address & 0x0FFFFFFF, value); return true; }
+        if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
+        {
+            _ssiDevice.WriteByte(address - SSI_BASE_ADDRESS, value);
+            return true;
+        }
+        if (TryMapSramAlias(address, out var offset)) { PtrSram[offset] = value; return true; }
+        EmuStrict.Note("mmio.write.unmapped-region", $"0x{address:X8}");
+        return false;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryWriteHalfWordSlow(uint address, ushort value)
+    {
+        if (Decode(address) is { } d) { d.WriteHalfWord(address & 0x0FFFFFFF, value); return true; }
+        if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
+        {
+            _ssiDevice.WriteHalfWord(address - SSI_BASE_ADDRESS, value);
+            return true;
+        }
+        if (TryMapSramAlias(address, out var offset)) { Unsafe.WriteUnaligned(PtrSram + offset, value); return true; }
+        EmuStrict.Note("mmio.write.unmapped-region", $"0x{address:X8}");
+        return false;
     }
 
     public void Dispose()

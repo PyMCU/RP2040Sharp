@@ -167,59 +167,25 @@ public abstract class BitOpsExtTests
 
     // ================================================================
     // CLZ (Count Leading Zeros, Thumb-2 32-bit)
+    //
+    // CLZ is ARMv7-M. ARMv6-M A5.3 (Table A5-9/A5-10) allocates only BL, MSR, MRS, DSB/DMB/ISB and UDF in
+    // the 32-bit space; a first halfword of 0xFABx is UNDEFINED, so it must HardFault.
     // ================================================================
     public class Clz : CpuTestBase
     {
         [Fact]
-        public void Should_Count_Leading_Zeros()
+        public void Is_Undefined_On_ArmV6M()
         {
             var (h1, h2) = InstructionEmiter.Clz(R0, R1);
             Bus.WriteHalfWord(0x20000000, h1);
             Bus.WriteHalfWord(0x20000002, h2);
-            Cpu.Registers[R1] = 0x00080000;   // 12 leading zeros
+            Cpu.Registers[R0] = 0xDEADBEEF;
+            Cpu.Registers[R1] = 0x00080000;
 
             Cpu.Step();
 
-            Cpu.Registers[R0].Should().Be(12);
-        }
-
-        [Fact]
-        public void Should_Return_32_For_Zero_Input()
-        {
-            var (h1, h2) = InstructionEmiter.Clz(R0, R1);
-            Bus.WriteHalfWord(0x20000000, h1);
-            Bus.WriteHalfWord(0x20000002, h2);
-            Cpu.Registers[R1] = 0;
-
-            Cpu.Step();
-
-            Cpu.Registers[R0].Should().Be(32);
-        }
-
-        [Fact]
-        public void Should_Return_0_For_MSB_Set()
-        {
-            var (h1, h2) = InstructionEmiter.Clz(R0, R1);
-            Bus.WriteHalfWord(0x20000000, h1);
-            Bus.WriteHalfWord(0x20000002, h2);
-            Cpu.Registers[R1] = 0x80000000;
-
-            Cpu.Step();
-
-            Cpu.Registers[R0].Should().Be(0);
-        }
-
-        [Fact]
-        public void Should_Advance_PC_By_4()
-        {
-            var (h1, h2) = InstructionEmiter.Clz(R0, R1);
-            Bus.WriteHalfWord(0x20000000, h1);
-            Bus.WriteHalfWord(0x20000002, h2);
-            Cpu.Registers[R1] = 1;
-
-            Cpu.Step();
-
-            Cpu.Registers.PC.Should().Be(0x20000004);
+            Cpu.Registers.IPSR.Should().Be(3u);
+            Cpu.Registers[R0].Should().Be(0xDEADBEEF, "the instruction must not execute");
         }
     }
 }

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: spec audit findings (F-xx) against the RP2040 datasheet, the SVD and ARMv6-M
+
+Each item names the audit finding it closes. Behaviour the audit listed as open is not changed here.
+
+- **CPU (ARMv6-M).** `BX`, `BLX` and `POP {PC}` to an even address raise a HardFault instead of clearing bit 0 (F-05).
+  `EXC_RETURN` values are honoured only in Handler mode, so `BX LR` in Thread mode no longer unstacks (F-20).
+  Unaligned LDR/STR/LDRH/STRH/LDM/STM/PUSH/POP raise a HardFault (F-06). A synchronous fault (UNDEFINED, BKPT)
+  stacks the address of the faulting instruction, not the next one (F-08). An SVC that cannot be taken escalates
+  to HardFault (F-09).
+- **Decoder.** `YIELD` (`BF10`) is a hint, not `CBNZ` (F-03). `CBZ`, `CBNZ`, `CLZ` and `UDF.W` are undefined, as
+  they are in ARMv6-M (F-04). Barriers reject second halfwords other than DSB/DMB/ISB (not an audit finding).
+- **Bus.** Reads and writes to unmapped addresses raise a bus error (HardFault) instead of reading 0 and dropping
+  the write (F-07). Narrow writes to IO registers are replicated across the bus, as the datasheet describes (F-19).
+- **Bootrom.** With bootrom B2, the flash erase and program hooks sit at the B2 table entries, so the stack is no
+  longer unbalanced after a call (F-16).
+- **SysTick and SCB.** Reading `SYST_CSR` clears COUNTFLAG (F-02). CLKSOURCE selects the 1 us reference tick or the
+  core clock (F-23). Writing CVR clears the counter and COUNTFLAG, and RVR is used as written, including 0 (F-24).
+  `AIRCR.SYSRESETREQ` resets the core that wrote it, and ICSR reports VECTPENDING and ISRPENDING (F-25). SCR, CCR,
+  SHCSR and the MPU registers are stored (F-17, partial: the MPU does not check accesses).
+- **Timer and RTC.** TIMELW is applied when TIMEHW is written, so the 64-bit time can be set (F-10, partial: `PAUSE`
+  is still missing). The RTC uses the SVD register layout for the date, the alarm and the interrupt registers (F-14).
+- **PIO.** `DBG_CFGINFO` reports the SVD layout (F-15). The state machine reset values are CLKDIV 1.0, a right shift
+  for IN and OUT, and SET_COUNT 5 (F-37).
+- **GPIO and SIO.** The IO_BANK0 overrides (OUTOVER, OEOVER, INOVER, IRQOVER) take effect (F-38). Edge IRQs fire on
+  pads driven by SIO (F-18). PROC1 has its own INTE/INTF/INTS and drives core 1's IRQ (F-39). Pads reset to 0x56,
+  and IE and OD take effect (F-40). GPIO_OUT and GPIO_OE are 30 bits wide (F-41).
+- **Deferred.** The DMA findings F-11, F-12, F-13, F-33, F-34, F-35 and F-36 are not in this change. Applying
+  them made arduino-pico I2S and ADC streaming produce less output, and one I2S example hard-faulted, so they are
+  tracked in the README roadmap until that regression is understood.
+
 ### Fixed: bugs found by running arduino-pico 6.3.0 firmware (examples, API sketches and ~3,400 randomised runs)
 
 Each fix has a regression test under `tests/RP2040Sharp.Tests/Regression/` that fails without it (R08 is covered by the

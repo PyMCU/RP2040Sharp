@@ -21,7 +21,6 @@ public enum HandlerId : ushort
         SystemOps_Wfe,
         SystemOps_Wfi,
         SystemOps_Msr,
-        BitOps_Clz,
         ArithmeticOps_Adcs,
         BitOps_Ands,
         BitOps_AsrsRegister,
@@ -58,8 +57,6 @@ public enum HandlerId : ushort
         MemoryOps_PopPc,
         MemoryOps_Push,
         MemoryOps_PushLr,
-        FlowOps_Cbz,
-        FlowOps_Cbnz,
         SystemOps_Bkpt,
         SystemOps_Svc,
         ArithmeticOps_AddHighToReg,
@@ -144,10 +141,10 @@ public static unsafe class ThumbDecodeTables
         new(0xFFFF, 0xB672, HandlerId.SystemOps_Cpsid),
         new(0xFFFF, 0xBF00, HandlerId.SystemOps_Nop),
         new(0xFFFF, 0xBF40, HandlerId.SystemOps_Sev),
+        new(0xFFFF, 0xBF10, HandlerId.SystemOps_Nop),
         new(0xFFFF, 0xBF20, HandlerId.SystemOps_Wfe),
         new(0xFFFF, 0xBF30, HandlerId.SystemOps_Wfi),
         new(0xFFF0, 0xF380, HandlerId.SystemOps_Msr),
-        new(0xFFF0, 0xFAB0, HandlerId.BitOps_Clz),
         new(0xFFC0, 0x4140, HandlerId.ArithmeticOps_Adcs),
         new(0xFFC0, 0x4000, HandlerId.BitOps_Ands),
         new(0xFFC0, 0x4100, HandlerId.BitOps_AsrsRegister),
@@ -184,8 +181,6 @@ public static unsafe class ThumbDecodeTables
         new(0xFF00, 0xBD00, HandlerId.MemoryOps_PopPc),
         new(0xFF00, 0xB400, HandlerId.MemoryOps_Push),
         new(0xFF00, 0xB500, HandlerId.MemoryOps_PushLr),
-        new(0xF900, 0xB100, HandlerId.FlowOps_Cbz),
-        new(0xF900, 0xB900, HandlerId.FlowOps_Cbnz),
         new(0xFF00, 0xBE00, HandlerId.SystemOps_Bkpt),
         new(0xFF00, 0xDF00, HandlerId.SystemOps_Svc),
         new(0xFF00, 0x4400, HandlerId.ArithmeticOps_AddHighToReg),
@@ -242,7 +237,7 @@ public static unsafe class ThumbDecodeTables
         new(0xF800, 0x8800, HandlerId.MemoryOps_LdrhImmediate),
         new(0xF800, 0x0000, HandlerId.BitOps_LslsImm5),
         new(0xF800, 0x0800, HandlerId.BitOps_LsrsImm5),
-        new(0xBF00, 0xBF00, HandlerId.SystemOps_Nop),
+        new(0xFF0F, 0xBF00, HandlerId.SystemOps_Nop),
     ];
 
     /// <summary>65536-entry table of handler ids, indexed by 16-bit opcode.</summary>
@@ -264,7 +259,6 @@ public static unsafe class ThumbDecodeTables
         managedById[(int)HandlerId.SystemOps_Wfe] = SystemOps.Wfe;
         managedById[(int)HandlerId.SystemOps_Wfi] = SystemOps.Wfi;
         managedById[(int)HandlerId.SystemOps_Msr] = SystemOps.Msr;
-        managedById[(int)HandlerId.BitOps_Clz] = BitOps.Clz;
         managedById[(int)HandlerId.ArithmeticOps_Adcs] = ArithmeticOps.Adcs;
         managedById[(int)HandlerId.BitOps_Ands] = BitOps.Ands;
         managedById[(int)HandlerId.BitOps_AsrsRegister] = BitOps.AsrsRegister;
@@ -301,8 +295,6 @@ public static unsafe class ThumbDecodeTables
         managedById[(int)HandlerId.MemoryOps_PopPc] = MemoryOps.PopPc;
         managedById[(int)HandlerId.MemoryOps_Push] = MemoryOps.Push;
         managedById[(int)HandlerId.MemoryOps_PushLr] = MemoryOps.PushLr;
-        managedById[(int)HandlerId.FlowOps_Cbz] = FlowOps.Cbz;
-        managedById[(int)HandlerId.FlowOps_Cbnz] = FlowOps.Cbnz;
         managedById[(int)HandlerId.SystemOps_Bkpt] = SystemOps.Bkpt;
         managedById[(int)HandlerId.SystemOps_Svc] = SystemOps.Svc;
         managedById[(int)HandlerId.ArithmeticOps_AddHighToReg] = ArithmeticOps.AddHighToReg;
@@ -378,6 +370,6 @@ public static unsafe class ThumbDecodeTables
     internal static void Undefined(ushort opcode, CortexM0Plus cpu)
     {
         System.Console.Error.WriteLine($"Undefined instruction 0x{opcode:X4} at PC=0x{cpu.Registers.PC:X8}");
-        cpu.TriggerHardFault();
+        cpu.TriggerHardFaultAt(cpu.Registers.PC - 2);
     }
 }

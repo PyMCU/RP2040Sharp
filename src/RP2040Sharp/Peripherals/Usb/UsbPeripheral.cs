@@ -367,10 +367,8 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
             DpramUpdated(alignedW, ReadDpramWord(alignedW));
             return;
         }
-        var aligned = address & ~3u;
-        var shift   = (int)((address & 2) << 3);
-        var current = ReadWord(aligned);
-        WriteWord(aligned, (current & ~(0xFFFFu << shift)) | ((uint)value << shift));
+        // The registers are IO registers: a narrow write is replicated across the bus (datasheet 2.1.4)
+        WriteWord(address & ~3u, value * 0x00010001u);
     }
 
     public void WriteByte(uint address, byte value)
@@ -383,10 +381,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
             DpramUpdated(alignedW, ReadDpramWord(alignedW));
             return;
         }
-        var aligned = address & ~3u;
-        var shift   = (int)((address & 3) << 3);
-        var current = ReadWord(aligned);
-        WriteWord(aligned, (current & ~(0xFFu << shift)) | ((uint)value << shift));
+        WriteWord(address & ~3u, value * 0x01010101u);
     }
 
     // ── Public host-side helpers ─────────────────────────────────────────

@@ -47,10 +47,12 @@ public sealed unsafe class InstructionDecoder : IDisposable
             new OpcodeRule(0xFFFF, 0xB662, &SystemOps.Cpsie),
             // CPSID i (disable interrupts)
             new OpcodeRule(0xFFFF, 0xB672, &SystemOps.Cpsid),
-            // NOP — must be exact match to prevent CBNZ(mask 0xFB00) from overriding
+            // NOP
             new OpcodeRule(0xFFFF, 0xBF00, &SystemOps.Nop),
             // SEV
             new OpcodeRule(0xFFFF, 0xBF40, &SystemOps.Sev),
+            // YIELD: architecturally a hint; no-op on a single-thread-per-core system.
+            new OpcodeRule(0xFFFF, 0xBF10, &SystemOps.Nop),
             // WFE
             new OpcodeRule(0xFFFF, 0xBF20, &SystemOps.Wfe),
             // WFI
@@ -60,8 +62,6 @@ public sealed unsafe class InstructionDecoder : IDisposable
             // ================================================================
             // MSR spec_reg, Rn (F38x)
             new OpcodeRule(0xFFF0, 0xF380, &SystemOps.Msr),
-            // CLZ Rd, Rm (Thumb-2 32-bit: first halfword 0xFABx)
-            new OpcodeRule(0xFFF0, 0xFAB0, &BitOps.Clz),
             // ================================================================
             // GROUP 3: Mask 0xFFC0 (10 bits significant)
             // IMPORTANT: Must come before 0xFF00 to prevent generic instructions
@@ -139,22 +139,15 @@ public sealed unsafe class InstructionDecoder : IDisposable
             new OpcodeRule(0xFF80, 0xB000, &ArithmeticOps.AddSpImmediate7),
             // Sub (SP - imm)
             new OpcodeRule(0xFF80, 0xB080, &ArithmeticOps.SubSp),
-            // Stack Operations — must be before CBZ/CBNZ (0xF900 mask) since 0xFF00 is more specific
-            // but CBZ/CBNZ would match 0xB5xx (PUSH with LR) due to broader mask 0xF900
+            // Stack Operations
             new OpcodeRule(0xFF00, 0xBC00, &MemoryOps.Pop),
             new OpcodeRule(0xFF00, 0xBD00, &MemoryOps.PopPc),
             new OpcodeRule(0xFF00, 0xB400, &MemoryOps.Push),
             new OpcodeRule(0xFF00, 0xB500, &MemoryOps.PushLr),
             // ================================================================
-            // GROUP 5b: Mask 0xFB00 — CBZ / CBNZ
-            // NOTE: Hint instructions (NOP/WFE/WFI/SEV) overlap with CBNZ(i=1)
-            // but are already registered in Group 1 with exact match, so they
-            // take priority in the lookup table.
+            // GROUP 5b: no CBZ / CBNZ. They are Thumb-2 only; ARMv6-M A5.2.5 leaves 0xB1xx, 0xB3xx, 0xB7xx,
+            // 0xB9xx and 0xBBxx UNDEFINED, so they fall through to HandleUndefined (HardFault).
             // ================================================================
-            // CBZ  Rn, label  (0xB1xx i=0, 0xB3xx i=1)
-            new OpcodeRule(0xF900, 0xB100, &FlowOps.Cbz),
-            // CBNZ Rn, label (0xB9xx i=0, 0xBBxx i=1)
-            new OpcodeRule(0xF900, 0xB900, &FlowOps.Cbnz),
             // ================================================================
             // GROUP 6: Mask 0xFF00 (8 bits significant - Broad Categories)
             // ================================================================
@@ -269,7 +262,10 @@ public sealed unsafe class InstructionDecoder : IDisposable
             // GROUP 9: Mask 0xBF00
             // ================================================================
             // NOP (Hint)
-            new OpcodeRule(0xBF00, 0xBF00, &SystemOps.Nop),
+            // Unallocated hints (opA any, opB == 0) execute as NOP (ARMv6-M A5.2.5, Table A5-7); opB != 0 is
+            // UNDEFINED. (The old mask 0xBF00 also matched 0xFFxx, the first halfword of an undefined 32-bit
+            // encoding.)
+            new OpcodeRule(0xFF0F, 0xBF00, &SystemOps.Nop),
         ];
 
         for (var i = 0; i < 65536; i++)
@@ -307,7 +303,7 @@ public sealed unsafe class InstructionDecoder : IDisposable
         // ARMv6-M B1.5.6: executing an UNDEFINED encoding raises HardFault.
         // Do not throw a C# exception — let the handler vector take over.
         System.Console.Error.WriteLine($"Undefined instruction 0x{opcode:X4} at PC=0x{cpu.Registers.PC:X8}");
-        cpu.TriggerHardFault();
+        cpu.TriggerHardFaultAt(cpu.Registers.PC - 2);
     }
 
     [ExcludeFromCodeCoverage]

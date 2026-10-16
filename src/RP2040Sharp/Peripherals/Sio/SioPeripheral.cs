@@ -10,7 +10,7 @@ namespace RP2040.Peripherals.Sio;
 /// Addresses received are already masked (address &amp; 0x0FFFFFFF); since SIO is the
 /// only device in region 0xD, local offset = address directly.
 /// </summary>
-public sealed class SioPeripheral : IMemoryMappedDevice
+public sealed class SioPeripheral : IMemoryMappedDevice, IAddressDecoder
 {
     // ── CPUID ────────────────────────────────────────────────────────────
     private const uint CPUID = 0x000;  // 0 = Core0, 1 = Core1
@@ -156,6 +156,10 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
     public uint Size => 0x10000;  // wide enough to cover spinlocks at 0x100–0x17C
 
+    public uint DecodeLimit => Size;
+    public bool[]? SlotPresent => null;
+    public int SlotShift => 0;
+
     /// <summary>
     /// PADS_BANK0, so a floating input reads the level its pull resistor sets. Without it every
     /// unconnected pin read as 0 — <c>Pin(n, Pin.IN, Pin.PULL_UP)</c> looked permanently pressed,
@@ -167,11 +171,34 @@ public sealed class SioPeripheral : IMemoryMappedDevice
     /// <summary>Pins whose level is imposed by something outside SIO: the PIO, or a wired signal.</summary>
     private uint _gpioDriven;
 
+    /// <summary>
+    /// IO_BANK0's view of the pads: the level of every pad after the GPIO function mux, the OUTOVER / OEOVER overrides
+    /// and the pad's own IE and OD. When set, GPIO_IN reads it, because GPIO_IN is the pad, not a copy of SIO's
+    /// own output register (datasheet 2.3.1.2); otherwise SIO's standalone estimate is used.
+    /// </summary>
+    internal Func<uint>? PadInputProvider;
+
+    /// <summary>Told which pads SIO just changed (GPIO_OUT / GPIO_OE), so IO_BANK0 can latch edges for pins SIO drives.</summary>
+    internal Action<uint>? PadSink;
+
     /// <summary>Optionally feed current GPIO input state from IO_BANK0.</summary>
     public uint GpioIn
     {
-        get => EffectiveGpioIn;
+        get => PadInputProvider?.Invoke() ?? EffectiveGpioIn;
         set => _gpioIn = value;
+    }
+
+    /// <summary>
+    /// Levels of pads nothing on the chip drives: whatever a wired signal or the PIO imposed from outside, or the
+    /// pull resistor for a pad nothing holds. IO_BANK0 merges this with the pads the chip does drive.
+    /// </summary>
+    internal uint UndrivenLevels
+    {
+        get
+        {
+            var pullUp = PadsBank0?.PullUpMask ?? 0;
+            return (_gpioIn & _gpioDriven) | (pullUp & ~_gpioDriven);
+        }
     }
 
     /// <summary>
@@ -201,7 +228,9 @@ public sealed class SioPeripheral : IMemoryMappedDevice
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void NotifyGpio(uint changed)
     {
-        if (changed != 0) OnGpioChanged?.Invoke(changed);
+        if (changed == 0) return;
+        PadSink?.Invoke(changed);
+        OnGpioChanged?.Invoke(changed);
     }
 
     public void DriveGpioIn(uint value, uint mask)
@@ -209,6 +238,9 @@ public sealed class SioPeripheral : IMemoryMappedDevice
         _gpioIn = (_gpioIn & ~mask) | (value & mask);
         _gpioDriven |= mask;
     }
+
+    private const uint GpioMask   = (1u << 30) - 1;
+    private const uint GpioHiMask = (1u << 6) - 1;
 
     public uint GpioOe  => _gpioOe;
     public uint GpioOut => _gpioOut;
@@ -242,16 +274,16 @@ public sealed class SioPeripheral : IMemoryMappedDevice
 
         // Interpolator 0
         if (address >= INTERP0_BASE && address < INTERP0_BASE + 0x40)
-            return ReadInterp(ref _interp0[CoreIdx], address - INTERP0_BASE);
+            return ReadInterp(ref _interp0[CoreIdx], false, address - INTERP0_BASE);
 
         // Interpolator 1
         if (address >= INTERP1_BASE && address < INTERP1_BASE + 0x40)
-            return ReadInterp(ref _interp1[CoreIdx], address - INTERP1_BASE);
+            return ReadInterp(ref _interp1[CoreIdx], true, address - INTERP1_BASE);
 
         return address switch
         {
             CPUID        => (uint)(GetActiveCoreId?.Invoke() ?? 0),
-            GPIO_IN      => EffectiveGpioIn,
+            GPIO_IN      => GpioIn,
             // GPIO_HI_IN: QSPI GPIO inputs. Bit 1 = QSPI_SS_N (active-low flash select / BOOTSEL).
             // It must read HIGH (1) so the bootrom BOOTSEL check sees "button not pressed" and
             // proceeds to flash boot instead of USB BOOTSEL mode.
@@ -295,14 +327,14 @@ public sealed class SioPeripheral : IMemoryMappedDevice
         // Interpolator 0
         if (address >= INTERP0_BASE && address < INTERP0_BASE + 0x40)
         {
-            WriteInterp(ref _interp0[CoreIdx], address - INTERP0_BASE, value);
+            WriteInterp(ref _interp0[CoreIdx], false, address - INTERP0_BASE, value);
             return;
         }
 
         // Interpolator 1
         if (address >= INTERP1_BASE && address < INTERP1_BASE + 0x40)
         {
-            WriteInterp(ref _interp1[CoreIdx], address - INTERP1_BASE, value);
+            WriteInterp(ref _interp1[CoreIdx], true, address - INTERP1_BASE, value);
             return;
         }
 
@@ -310,22 +342,23 @@ public sealed class SioPeripheral : IMemoryMappedDevice
         {
             // Apply first, then announce: the listener re-reads the pad through GetPadOutputLevel,
             // so notifying before the store shows it the old level and the change is lost.
-            case GPIO_OUT:     { var d = _gpioOut ^ value;  _gpioOut  =  value; NotifyGpio(d);     break; }
-            case GPIO_OUT_SET: { var d = value & ~_gpioOut; _gpioOut |=  value; NotifyGpio(d);     break; }
-            case GPIO_OUT_CLR: { var d = value &  _gpioOut; _gpioOut &= ~value; NotifyGpio(d);     break; }
-            case GPIO_OUT_XOR: {                            _gpioOut ^=  value; NotifyGpio(value); break; }
-            case GPIO_OE:      { var d = _gpioOe ^ value;   _gpioOe   =  value; NotifyGpio(d);     break; }
-            case GPIO_OE_SET:  { var d = value & ~_gpioOe;  _gpioOe  |=  value; NotifyGpio(d);     break; }
-            case GPIO_OE_CLR:  { var d = value &  _gpioOe;  _gpioOe  &= ~value; NotifyGpio(d);     break; }
-            case GPIO_OE_XOR:  {                            _gpioOe  ^=  value; NotifyGpio(value); break; }
-            case GPIO_HI_OUT:      _gpioHiOut  =  value; break;
-            case GPIO_HI_OUT_SET:  _gpioHiOut |=  value; break;
+            // GPIO_OUT and GPIO_OE hold the 30 user pins (bits 29:0); the GPIO_HI_* registers the 6 QSPI pins.
+            case GPIO_OUT:     { value &= GpioMask; var d = _gpioOut ^ value;  _gpioOut  =  value; NotifyGpio(d);     break; }
+            case GPIO_OUT_SET: { value &= GpioMask; var d = value & ~_gpioOut; _gpioOut |=  value; NotifyGpio(d);     break; }
+            case GPIO_OUT_CLR: { value &= GpioMask; var d = value &  _gpioOut; _gpioOut &= ~value; NotifyGpio(d);     break; }
+            case GPIO_OUT_XOR: { value &= GpioMask;                            _gpioOut ^=  value; NotifyGpio(value); break; }
+            case GPIO_OE:      { value &= GpioMask; var d = _gpioOe ^ value;   _gpioOe   =  value; NotifyGpio(d);     break; }
+            case GPIO_OE_SET:  { value &= GpioMask; var d = value & ~_gpioOe;  _gpioOe  |=  value; NotifyGpio(d);     break; }
+            case GPIO_OE_CLR:  { value &= GpioMask; var d = value &  _gpioOe;  _gpioOe  &= ~value; NotifyGpio(d);     break; }
+            case GPIO_OE_XOR:  { value &= GpioMask;                            _gpioOe  ^=  value; NotifyGpio(value); break; }
+            case GPIO_HI_OUT:      _gpioHiOut  =  value & GpioHiMask; break;
+            case GPIO_HI_OUT_SET:  _gpioHiOut |=  value & GpioHiMask; break;
             case GPIO_HI_OUT_CLR:  _gpioHiOut &= ~value; break;
-            case GPIO_HI_OUT_XOR:  _gpioHiOut ^=  value; break;
-            case GPIO_HI_OE:       _gpioHiOe  =  value; break;
-            case GPIO_HI_OE_SET:   _gpioHiOe |=  value; break;
+            case GPIO_HI_OUT_XOR:  _gpioHiOut ^=  value & GpioHiMask; break;
+            case GPIO_HI_OE:       _gpioHiOe  =  value & GpioHiMask; break;
+            case GPIO_HI_OE_SET:   _gpioHiOe |=  value & GpioHiMask; break;
             case GPIO_HI_OE_CLR:   _gpioHiOe &= ~value; break;
-            case GPIO_HI_OE_XOR:   _gpioHiOe ^=  value; break;
+            case GPIO_HI_OE_XOR:   _gpioHiOe ^=  value & GpioHiMask; break;
 
             case FIFO_WR:
             {
@@ -419,46 +452,52 @@ public sealed class SioPeripheral : IMemoryMappedDevice
         }
     }
 
-    public void WriteHalfWord(uint address, ushort value)
-    {
-        var aligned = address & ~3u;
-        var shift = (int)((address & 2) << 3);
-        WriteWord(aligned, (ReadWord(aligned) & ~(0xFFFFu << shift)) | ((uint)value << shift));
-    }
+    // The SIO registers are IO registers too: a narrow write is replicated across the data bus (datasheet 2.1.4).
+    public void WriteHalfWord(uint address, ushort value) => WriteWord(address & ~3u, value * 0x00010001u);
 
-    public void WriteByte(uint address, byte value)
-    {
-        var aligned = address & ~3u;
-        var shift = (int)((address & 3) << 3);
-        WriteWord(aligned, (ReadWord(aligned) & ~(0xFFu << shift)) | ((uint)value << shift));
-    }
+    public void WriteByte(uint address, byte value) => WriteWord(address & ~3u, value * 0x01010101u);
 
     // ── Interpolator implementation ──────────────────────────────────
+    // Datasheet 2.3.1.6. Each lane shifts, masks and optionally sign-extends one accumulator; the lane values are
+    // added to BASE0, BASE1 and (both together, with BASE2) to form RESULT0, RESULT1 and the FULL result.
 
-    private static uint ReadInterp(ref InterpState st, uint offset)
+    private const uint CTRL_SIGNED       = 1u << 15;
+    private const uint CTRL_CROSS_INPUT  = 1u << 16;
+    private const uint CTRL_CROSS_RESULT = 1u << 17;
+    private const uint CTRL_ADD_RAW      = 1u << 18;
+    private const uint CTRL_BLEND        = 1u << 21;   // lane 0 of INTERP0 only
+    private const uint CTRL_CLAMP        = 1u << 22;   // lane 0 of INTERP1 only
+
+    private static uint ReadInterp(ref InterpState st, bool interp1, uint offset)
     {
-        return offset switch
+        switch (offset)
         {
-            INTERP_ACCUM0     => st.Accum0,
-            INTERP_ACCUM1     => st.Accum1,
-            INTERP_BASE0      => st.Base0,
-            INTERP_BASE1      => st.Base1,
-            INTERP_BASE2      => st.Base2,
-            INTERP_CTRL_LANE0 => st.Ctrl0,
-            INTERP_CTRL_LANE1 => st.Ctrl1,
-            INTERP_PEEK_LANE0 => ComputeLane(ref st, 0),
-            INTERP_PEEK_LANE1 => ComputeLane(ref st, 1),
-            INTERP_PEEK_FULL  => ComputeFull(ref st),
-            INTERP_POP_LANE0  => PopLane(ref st, 0),
-            INTERP_POP_LANE1  => PopLane(ref st, 1),
-            INTERP_POP_FULL   => PopFull(ref st),
-            INTERP_ACCUM0_ADD => st.Accum0,
-            INTERP_ACCUM1_ADD => st.Accum1,
-            _                 => 0,
-        };
+            case INTERP_ACCUM0: return st.Accum0;
+            case INTERP_ACCUM1: return st.Accum1;
+            case INTERP_BASE0:  return st.Base0;
+            case INTERP_BASE1:  return st.Base1;
+            case INTERP_BASE2:  return st.Base2;
+            case INTERP_CTRL_LANE0:
+            {
+                // OVERF0 / OVERF1 / OVERF (bits 23-25) are read-only status of the shift and mask stage
+                var r = Evaluate(ref st, interp1);
+                return st.Ctrl0 | (r.Overf0 ? 1u << 23 : 0) | (r.Overf1 ? 1u << 24 : 0) | (r.Overf0 || r.Overf1 ? 1u << 25 : 0);
+            }
+            case INTERP_CTRL_LANE1: return st.Ctrl1;
+            case INTERP_PEEK_LANE0: return Evaluate(ref st, interp1).PresentedResult0;
+            case INTERP_PEEK_LANE1: return Evaluate(ref st, interp1).PresentedResult1;
+            case INTERP_PEEK_FULL:  return Evaluate(ref st, interp1).Result2;
+            case INTERP_POP_LANE0:  return Pop(ref st, interp1).PresentedResult0;
+            case INTERP_POP_LANE1:  return Pop(ref st, interp1).PresentedResult1;
+            case INTERP_POP_FULL:   return Pop(ref st, interp1).Result2;
+            // Reading ACCUMx_ADD yields the lane's raw shift-and-mask value (BASEx not added)
+            case INTERP_ACCUM0_ADD: return Evaluate(ref st, interp1).Mask0;
+            case INTERP_ACCUM1_ADD: return Evaluate(ref st, interp1).Mask1;
+            default: return 0;
+        }
     }
 
-    private static void WriteInterp(ref InterpState st, uint offset, uint value)
+    private static void WriteInterp(ref InterpState st, bool interp1, uint offset, uint value)
     {
         switch (offset)
         {
@@ -467,132 +506,117 @@ public sealed class SioPeripheral : IMemoryMappedDevice
             case INTERP_BASE0:      st.Base0  = value; break;
             case INTERP_BASE1:      st.Base1  = value; break;
             case INTERP_BASE2:      st.Base2  = value; break;
-            case INTERP_CTRL_LANE0: st.Ctrl0  = value; break;
-            case INTERP_CTRL_LANE1: st.Ctrl1  = value; break;
-            case INTERP_ACCUM0_ADD: st.Accum0 += value; break;
-            case INTERP_ACCUM1_ADD: st.Accum1 += value; break;
+            // BLEND exists on INTERP0 lane 0, CLAMP on INTERP1 lane 0; OVERF is read-only. FORCE_MSB..SHIFT
+            // (bits 20:0) exist on both lanes.
+            case INTERP_CTRL_LANE0: st.Ctrl0  = value & (interp1 ? 0x005FFFFFu : 0x003FFFFFu); break;
+            case INTERP_CTRL_LANE1: st.Ctrl1  = value & 0x001FFFFFu; break;
+            case INTERP_ACCUM0_ADD: st.Accum0 += value & 0x00FFFFFFu; break;   // 23:0
+            case INTERP_ACCUM1_ADD: st.Accum1 += value & 0x00FFFFFFu; break;
             case INTERP_BASE_1AND0:
-                // sets BASE0 and BASE1 from a combined 32-bit write:
-                // BASE0 = bits [15:0], BASE1 = bits [31:16]
-                st.Base0 = (ushort)value;
-                st.Base1 = value >> 16;
+            {
+                // Two 16-bit halves, each sign-extended if the lane's SIGNED is set; in blend mode LANE1's
+                // SIGNED decides for both (datasheet 2.3.1.6.2).
+                var blend = !interp1 && (st.Ctrl0 & CTRL_BLEND) != 0;
+                var signed0 = ((blend ? st.Ctrl1 : st.Ctrl0) & CTRL_SIGNED) != 0;
+                var signed1 = (st.Ctrl1 & CTRL_SIGNED) != 0;
+                st.Base0 = signed0 ? (uint)(short)value : (ushort)value;
+                st.Base1 = signed1 ? (uint)(short)(value >> 16) : value >> 16;
                 break;
+            }
         }
     }
 
-    /// <summary>
-    /// Compute the primary (pre-CROSS_RESULT) result for one lane.
-    /// Implements the full RP2040 TRM §2.3.1 interpolator pipeline:
-    /// shift → mask → sign-extend → +BASE, with ADD_RAW, BLEND, CLAMP modes.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ComputeLane(ref InterpState st, int lane)
+    private struct InterpResult
     {
-        var ctrl    = lane == 0 ? st.Ctrl0 : st.Ctrl1;
-        var shift   = (int)(ctrl & 0x1F);
-        var maskLsb = (int)((ctrl >> 5) & 0x1F);
-        var maskMsb = (int)((ctrl >> 10) & 0x1F);
-        var signed  = (ctrl & (1u << 15)) != 0;
-        var crossIn = (ctrl & (1u << 16)) != 0;
-        var addRaw  = (ctrl & (1u << 20)) != 0;  // ADD_RAW: add raw (unshifted) accum to result
-        var blend   = (ctrl & (1u << 21)) != 0;  // BLEND: linear interpolation (lane 0 ctrl only)
-        var clamp   = (ctrl & (1u << 22)) != 0;  // CLAMP: clamp result to [BASE0, BASE1]
+        public uint Mask0, Mask1;                 // lane shift+mask(+sign extension) values
+        public uint Result0, Result1, Result2;    // as they feed the accumulators on POP
+        public uint PresentedResult0, PresentedResult1;   // as the processor reads them (FORCE_MSB applied)
+        public bool Overf0, Overf1;
+    }
 
-        uint accum = crossIn
-            ? (lane == 0 ? st.Accum1 : st.Accum0)
-            : (lane == 0 ? st.Accum0 : st.Accum1);
+    /// <summary>One lane's shift, mask and sign-extension of <paramref name="input"/>.</summary>
+    private static uint ShiftMask(uint input, uint ctrl, out bool overflow)
+    {
+        var shift = (int)(ctrl & 0x1F);
+        var lsb = (int)((ctrl >> 5) & 0x1F);
+        var msb = (int)((ctrl >> 10) & 0x1F);
 
-        // BLEND mode (RP2040 TRM §2.3.1.4): only used for lane 0; result = Base0 + alpha*(Base1-Base0)/256
-        // where alpha = accum0[7:0]. Ignores shift/mask/sign.
-        if (blend && lane == 0)
+        var shifted = input >> shift;
+        var upTo = (uint)(((ulong)1 << (msb + 1)) - 1);            // bits 0..msb
+        var below = (uint)(((ulong)1 << lsb) - 1);                 // bits 0..lsb-1
+        var masked = msb < lsb ? 0u : shifted & upTo & ~below;
+        overflow = (shifted & ~upTo) != 0;                         // set bits above the mask
+
+        // Sign extension "from the top of the mask": bit MSB is ORed into every more significant bit
+        if ((ctrl & CTRL_SIGNED) != 0 && ((shifted >> msb) & 1) != 0)
+            masked |= ~upTo;
+        return masked;
+    }
+
+    private static InterpResult Evaluate(ref InterpState st, bool interp1)
+    {
+        var in0 = (st.Ctrl0 & CTRL_CROSS_INPUT) != 0 ? st.Accum1 : st.Accum0;
+        var in1 = (st.Ctrl1 & CTRL_CROSS_INPUT) != 0 ? st.Accum0 : st.Accum1;
+        var sm0 = ShiftMask(in0, st.Ctrl0, out var overf0);
+        var sm1 = ShiftMask(in1, st.Ctrl1, out var overf1);
+
+        // ADD_RAW bypasses shift and mask for the lane result (not for FULL)
+        var val0 = (st.Ctrl0 & CTRL_ADD_RAW) != 0 ? in0 : sm0;
+        var val1 = (st.Ctrl1 & CTRL_ADD_RAW) != 0 ? in1 : sm1;
+
+        var r = new InterpResult { Mask0 = sm0, Mask1 = sm1, Overf0 = overf0, Overf1 = overf1 };
+
+        if (!interp1 && (st.Ctrl0 & CTRL_BLEND) != 0)
         {
-            uint alpha = st.Accum0 & 0xFF;
-            // Arithmetic on signed Base values to handle Base1 < Base0 wrap
-            int blended = (int)st.Base0 + (int)((alpha * ((long)(int)st.Base1 - (int)st.Base0)) / 256);
-            return (uint)blended;
+            // Blend (2.3.1.6.2): lane 0 yields the 8-bit alpha, lane 1 the interpolation of BASE0 and BASE1,
+            // and FULL leaves lane 1 out. The 40-bit intermediate is signed or unsigned per LANE1.SIGNED.
+            var alpha = sm1 & 0xFF;
+            var signed1 = (st.Ctrl1 & CTRL_SIGNED) != 0;
+            long b0 = signed1 ? (int)st.Base0 : st.Base0;
+            long b1 = signed1 ? (int)st.Base1 : st.Base1;
+            r.Result0 = alpha;
+            r.Result1 = (uint)(b0 + ((alpha * (b1 - b0)) >> 8));
+            r.Result2 = st.Base2 + sm0;
         }
-
-        uint shifted = signed
-            ? (uint)((int)accum >> shift)
-            : accum >> shift;
-
-        uint mask   = BuildMask(maskLsb, maskMsb);
-        uint masked = shifted & mask;
-
-        // Sign-extend at maskMsb when SIGNED
-        if (signed && maskMsb < 31)
+        else if (interp1 && (st.Ctrl0 & CTRL_CLAMP) != 0)
         {
-            uint signBit = 1u << maskMsb;
-            if ((masked & signBit) != 0)
-                masked |= ~mask;
+            // Clamp (2.3.1.6.3): lane 0 is the lane value held between BASE0 and BASE1, nothing added
+            var clamped = sm0;
+            if ((st.Ctrl0 & CTRL_SIGNED) != 0)
+            {
+                if ((int)clamped > (int)st.Base1) clamped = st.Base1;
+                if ((int)clamped < (int)st.Base0) clamped = st.Base0;
+            }
+            else
+            {
+                if (clamped > st.Base1) clamped = st.Base1;
+                if (clamped < st.Base0) clamped = st.Base0;
+            }
+            r.Result0 = clamped;
+            r.Result1 = val1 + st.Base1;
+            r.Result2 = st.Base2 + sm0 + sm1;
         }
-
-        uint baseVal = lane == 0 ? st.Base0 : st.Base1;
-
-        uint result;
-        if (addRaw)
-            // ADD_RAW: skip mask, add the raw shifted (but not masked) accumulator to BASE
-            result = shifted + baseVal;
         else
-            result = masked + baseVal;
-
-        // CLAMP (RP2040 TRM §2.3.1.5): only applies to lane 0; clamp to [BASE0, BASE1].
-        // Base0 is the lower bound, Base1 the upper bound (unsigned comparison).
-        if (clamp && lane == 0)
         {
-            if (result < st.Base0) result = st.Base0;
-            if (result > st.Base1) result = st.Base1;
+            r.Result0 = val0 + st.Base0;
+            r.Result1 = val1 + st.Base1;
+            r.Result2 = st.Base2 + sm0 + sm1;
         }
 
-        return result;
+        // FORCE_MSB is ORed into bits 29:28 of what the processor reads; the internal datapath is untouched
+        r.PresentedResult0 = r.Result0 | (((st.Ctrl0 >> 19) & 3) << 28);
+        r.PresentedResult1 = r.Result1 | (((st.Ctrl1 >> 19) & 3) << 28);
+        return r;
     }
 
-    /// <summary>
-    /// Compute the FULL result: applies CROSS_RESULT routing and adds BASE2.
-    /// CROSS_RESULT on a lane swaps which lane's primary result feeds into the full output.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ComputeFull(ref InterpState st)
+    /// <summary>A POPx read: the same value as PEEKx, and the lane results are written back to the accumulators
+    /// (swapped when a lane's CROSS_RESULT is set).</summary>
+    private static InterpResult Pop(ref InterpState st, bool interp1)
     {
-        uint r0 = ComputeLane(ref st, 0);
-        uint r1 = ComputeLane(ref st, 1);
-
-        // CROSS_RESULT (bit 17): if set for lane 0, lane 0's contribution to FULL uses lane 1's result.
-        // If set for lane 1, lane 1's contribution is ignored for FULL (the full result uses lane 0).
-        // Per TRM: FULL = RESULT0 + BASE2, with CROSS_RESULT_0 swapping RESULT0 ↔ RESULT1 for that slot.
-        var crossResult0 = (st.Ctrl0 & (1u << 17)) != 0;
-        uint fullBase = crossResult0 ? r1 : r0;
-        return fullBase + st.Base2;
-    }
-
-    private static uint PopLane(ref InterpState st, int lane)
-    {
-        uint r0 = ComputeLane(ref st, 0);
-        uint r1 = ComputeLane(ref st, 1);
-        // POP writes results back to accumulators (advances the pipeline)
-        st.Accum0 = r0;
-        st.Accum1 = r1;
-        return lane == 0 ? r0 : r1;
-    }
-
-    private static uint PopFull(ref InterpState st)
-    {
-        uint r0 = ComputeLane(ref st, 0);
-        uint r1 = ComputeLane(ref st, 1);
-        st.Accum0 = r0;
-        st.Accum1 = r1;
-        var crossResult0 = (st.Ctrl0 & (1u << 17)) != 0;
-        uint fullBase = crossResult0 ? r1 : r0;
-        return fullBase + st.Base2;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint BuildMask(int lsb, int msb)
-    {
-        if (msb < lsb) return 0;
-        int bits = msb - lsb + 1;
-        uint mask = bits >= 32 ? 0xFFFFFFFF : (1u << bits) - 1;
-        return mask << lsb;
+        var r = Evaluate(ref st, interp1);
+        st.Accum0 = (st.Ctrl0 & CTRL_CROSS_RESULT) != 0 ? r.Result1 : r.Result0;
+        st.Accum1 = (st.Ctrl1 & CTRL_CROSS_RESULT) != 0 ? r.Result0 : r.Result1;
+        return r;
     }
 
     // ── Divider ──────────────────────────────────────────────────────

@@ -65,6 +65,7 @@ public struct Registers
     public bool InterruptsUpdated;    // Signal Run() to call CheckForInterrupts
     public bool EventRegistered;      // SEV/WFE event flag
     public bool Waiting;              // WFI/WFE sleep state
+    public uint SCR;                  // SCB.SCR: SLEEPONEXIT (bit 1), SLEEPDEEP (bit 2), SEVONPEND (bit 4)
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public byte GetC() => Unsafe.As<bool, byte>(ref C);
