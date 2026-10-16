@@ -121,8 +121,12 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         {
             _sm[i] = new PioStateMachine();
             _sm[i].SmIndex = i;
-            // Default wrap: top=31, bottom=0
+            // Reset values (SVD SMn_*): wrap top=31 bottom=0, clock divider 1.0, shift right for both ISR and OSR
+            // (IN_SHIFTDIR / OUT_SHIFTDIR set), SET_COUNT 5.
             _sm[i].ExecCtrl = (31u << 12);
+            _sm[i].ClkDiv = 1u << 16;
+            _sm[i].ShiftCtrl = 3u << 18;
+            _sm[i].PinCtrl = 5u << 26;
         }
     }
 
@@ -289,12 +293,13 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             REG_CTRL        => BuildCtrl(),
             REG_FSTAT       => BuildFstat(),
             REG_FDEBUG      => _fdebug,
+            REG_INPUT_SYNC  => _inputSyncBypass,
             REG_DBG_PADOUT  => _dbgPadOut,
             REG_DBG_PADOE   => _dbgPadOe,
             REG_FLEVEL      => BuildFlevel(),
             REG_IRQ         => _irq,
             REG_IRQ_FORCE   => 0,
-            REG_DBG_CFGINFO => (SM_COUNT << 16) | (INSTR_COUNT << 8) | 2u,
+            REG_DBG_CFGINFO => ((uint)INSTR_COUNT << 16) | ((uint)SM_COUNT << 8) | 4u,
             REG_INTR        => BuildIntr(),
             REG_IRQ0_INTE   => _irq0Inte,
             REG_IRQ0_INTF   => _irq0Intf,
@@ -358,6 +363,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
         switch (off)
         {
             case REG_CTRL:      WriteCtrl(value); break;
+            case REG_INPUT_SYNC: _inputSyncBypass = value; break;   // stored; the input synchroniser's latency is not modelled
             case REG_FDEBUG:    _fdebug &= ~value; break;  // write 1 to clear
             case REG_IRQ:       Mutated(); _irq &= ~value; IrqUpdated(); break;       // write 1 to clear
             case REG_IRQ_FORCE: Mutated(); _irq |= value & 0xFF; IrqUpdated(); break;
@@ -712,6 +718,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     // set_consecutive_pindirs-before-enable flow, which silicon drives too).
     private uint _dbgPadOut;
     private uint _dbgPadOe;
+    private uint _inputSyncBypass;
 
     private void DriveGpioPins(uint value, uint mask)
     {

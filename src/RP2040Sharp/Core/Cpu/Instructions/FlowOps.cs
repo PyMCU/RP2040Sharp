@@ -10,6 +10,14 @@ public static class FlowOps
         ref var pc = ref cpu.Registers.PC;
         var opcodeH2 = cpu.Bus.ReadHalfWord(pc);
 
+        // A5.3.1 Table A5-10: BL needs second halfword 1x1xxxxx (bit 15 = 1, bit 14 = 1, bit 12 = 1) after the
+        // 11110 prefix. Anything else here is UNDEFINED, including the permanent UDF.W (F7Fx A0xx).
+        if ((opcodeH2 & 0xD000) != 0xD000)
+        {
+            cpu.TriggerHardFaultAt(pc - 2);
+            return;
+        }
+
         pc += 2;
         var nextPc = pc;
 
@@ -44,7 +52,17 @@ public static class FlowOps
         cpu.Registers.LR = pc | 0x1;
 
         var targetAddress = cpu.Registers[rm];
-        pc = targetAddress & 0xFFFFFFFE;
+        // BLXWritePC: EPSR.T = address<0>; T == 0 faults when the next instruction is fetched (A2.3.1), so the
+        // fault is raised here with the target as the faulting address.
+        if ((targetAddress & 1) == 0)
+        {
+            pc = targetAddress;
+            cpu.TriggerHardFault();
+        }
+        else
+        {
+            pc = targetAddress & 0xFFFFFFFE;
+        }
 
         // rp2040js BLX: base 1 (loop) + 1.
         cpu.Cycles++;
@@ -170,48 +188,12 @@ public static class FlowOps
         // rp2040js BX: base 1 (loop) + 1, charged whether the target is a normal address or an
         // EXC_RETURN (BXWritePC → exceptionReturn adds 0 under the accurate model).
         cpu.Cycles++;
-        if (target >= 0xFFFFFFF0)
+        if ((target & 1) != 0 && target < 0xFFFFFFF0)
         {
-            cpu.ExceptionReturn(target);
+            cpu.Registers.PC = target & 0xFFFFFFFE;
             return;
         }
-        cpu.Registers.PC = target & 0xFFFFFFFE;
-    }
-
-    // ================================================================
-    // CBZ / CBNZ  (Compare and Branch if Zero/Non-Zero)
-    // mask=0xF500, CBZ=0xB100, CBNZ=0xB900
-    // Encoding: bit11=0(CBZ)/1(CBNZ), bit9=imm5[5], bits[7:3]=imm5[4:0]
-    // offset = imm5:0 (zero-extended, already bit1=0 so effective *2)
-    // Branch target = PC_after_fetch + offset  (PC was already +2 at dispatch)
-    // ================================================================
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void Cbz(ushort opcode, CortexM0Plus cpu)
-    {
-        if (cpu.Registers[opcode & 0x7] == 0)
-            TakeCbBranch(opcode, cpu);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void Cbnz(ushort opcode, CortexM0Plus cpu)
-    {
-        if (cpu.Registers[opcode & 0x7] != 0)
-            TakeCbBranch(opcode, cpu);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void TakeCbBranch(ushort opcode, CortexM0Plus cpu)
-    {
-        // imm32 = ZeroExtend(i:imm5:0, 32)
-        // i = bit[10], imm5 = bits[7:3]
-        // combined: (imm5 | (i << 5)) << 1
-        var imm32 = (uint)((((opcode >> 3) & 0x1F) | ((opcode >> 5) & 0x20)) << 1);
-        // PC was already advanced by 2 (speculative fetch); add imm32 + 2 more
-        cpu.Registers.PC += imm32 + 2;
-        // Taken branch: base 1 (loop) + 1 (rp2040js has no CBZ/CBNZ on ARMv6-M, but a taken branch
-        // costs the same +1 there).
-        cpu.Cycles++;
+        cpu.BxWritePc(target);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

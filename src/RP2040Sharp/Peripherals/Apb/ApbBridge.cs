@@ -10,12 +10,18 @@ namespace RP2040.Peripherals.Apb;
 /// into the same 16 KiB slot.
 /// The local address passed to each device is address &amp; 0xFFF (4 KiB window).
 /// </summary>
-public sealed class ApbBridge : IMemoryMappedDevice
+public sealed class ApbBridge : IMemoryMappedDevice, IAddressDecoder
 {
     // 256 slots, each covering 16 KiB of the APB space
     private readonly IMemoryMappedDevice?[] _devices = new IMemoryMappedDevice?[256];
+    private readonly bool[] _present = new bool[256];
 
     public uint Size => 0x10000000;
+
+    // 256 slots of 16 KiB: the bridge decodes 0x40000000-0x403FFFFF, and only where a peripheral sits
+    public uint DecodeLimit => 0x400000;
+    public bool[]? SlotPresent => _present;
+    public int SlotShift => 14;
 
     /// <summary>
     /// Register a device at its APB base address (full 32-bit address, e.g. 0x40034000).
@@ -25,6 +31,7 @@ public sealed class ApbBridge : IMemoryMappedDevice
         // Mask off region nibble → local address, then extract 16 KiB slot index
         var localBase = baseAddress & 0x0FFFFFFF;
         _devices[(localBase >> 14) & 0xFF] = device;
+        _present[(localBase >> 14) & 0xFF] = true;
     }
 
     public uint ReadWord(uint address)
@@ -72,51 +79,13 @@ public sealed class ApbBridge : IMemoryMappedDevice
         });
     }
 
-    public void WriteHalfWord(uint address, ushort value)
-    {
-        var device = _devices[(address >> 14) & 0xFF];
-        if (device == null) { EmuStrict.Note("apb.write.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return; }
+    // Datasheet 2.1.4: IO registers ignore the width of a write and sample the whole 32-bit data bus, and the
+    // Cortex-M0+ and the DMA replicate narrow data across all lanes. So a byte or halfword write is a word write
+    // of the replicated value to the word the address falls in, the atomic aliases included (a narrow SET ORs the
+    // replicated value into the register).
+    public void WriteHalfWord(uint address, ushort value) =>
+        WriteWord(address & ~3u, value * 0x00010001u);
 
-        var atomicType = (address >> 12) & 0x3;
-        var offset = address & 0xFFF;
-
-        if (atomicType == 0) { device.WriteHalfWord(offset, value); return; }
-
-        var aligned = offset & ~3u;
-        var shift = (int)((offset & 2) << 3);
-        var current = device.ReadWord(aligned);
-        uint expanded = (uint)value << shift;
-        uint mask = 0xFFFFu << shift;
-        device.WriteWord(aligned, atomicType switch
-        {
-            1 => (current & ~mask) | ((current ^ expanded) & mask),
-            2 => current | expanded,
-            3 => current & ~expanded,
-            _ => (current & ~mask) | expanded,
-        });
-    }
-
-    public void WriteByte(uint address, byte value)
-    {
-        var device = _devices[(address >> 14) & 0xFF];
-        if (device == null) { EmuStrict.Note("apb.write.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return; }
-
-        var atomicType = (address >> 12) & 0x3;
-        var offset = address & 0xFFF;
-
-        if (atomicType == 0) { device.WriteByte(offset, value); return; }
-
-        var aligned = offset & ~3u;
-        var shift = (int)((offset & 3) << 3);
-        var current = device.ReadWord(aligned);
-        uint expanded = (uint)value << shift;
-        uint mask = 0xFFu << shift;
-        device.WriteWord(aligned, atomicType switch
-        {
-            1 => (current & ~mask) | ((current ^ expanded) & mask),
-            2 => current | expanded,
-            3 => current & ~expanded,
-            _ => (current & ~mask) | expanded,
-        });
-    }
+    public void WriteByte(uint address, byte value) =>
+        WriteWord(address & ~3u, value * 0x01010101u);
 }

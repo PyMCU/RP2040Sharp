@@ -84,11 +84,15 @@ public sealed unsafe class CortexM0Plus
 
     private byte* _fetchPtr;
     private uint _fetchMask;
-    private uint _currentRegionId;
+    private uint _fetchBase;
+    private uint _fetchLen;
 
     private const uint EXC_RETURN_HANDLER = 0xFFFFFFF1; // Return to Handler mode, using MSP
     private const uint EXC_RETURN_THREAD_MSP = 0xFFFFFFF9; // Return to Thread mode, using MSP
     private const uint EXC_RETURN_THREAD_PSP = 0xFFFFFFFD; // Return to Thread mode, using PSP
+
+    private const uint SCR_SLEEPONEXIT = 1u << 1;
+    private const uint SCR_SEVONPEND   = 1u << 4;
 
     private const uint EXC_NMI = 2;
     private const uint EXC_HARDFAULT = 3;
@@ -176,36 +180,49 @@ public sealed unsafe class CortexM0Plus
         Cycles = 0;
     }
 
+    /// <summary>
+    /// Point the fetch window at the memory holding <paramref name="pc"/>. The run loop tests every fetch against
+    /// the window with one unsigned compare, so a PC outside every executable range (the unmapped gaps, the
+    /// peripheral regions, past the end of SRAM or the boot ROM) misses it each time and lands here with no
+    /// window, which raises the HardFault.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void UpdateFetchCache(uint pc)
     {
-        _currentRegionId = pc >> 28;
-
-        switch (_currentRegionId)
+        if (pc < BusInterconnect.BOOTROM_SIZE)
         {
-            case BusInterconnect.REGION_FLASH:
-                _fetchPtr = Bus.PtrFlash;
-                _fetchMask = Bus.MaskFlash & ~1u;
-                break;
-            case BusInterconnect.REGION_SRAM:
-                _fetchPtr = Bus.PtrSram;
-                _fetchMask = BusInterconnect.MASK_SRAM & ~1u;
-                break;
-            case BusInterconnect.REGION_BOOTROM:
-                _fetchPtr = Bus.PtrBootRom;
-                _fetchMask = BusInterconnect.MASK_BOOTROM & ~1u;
-                break;
-            default:
-                // No direct fetch window. Poison the cached region id with a value no `pc >> 28` can
-                // equal, so the loop's region-change test fires again on the next fetch and re-raises
-                // the HardFault. Without this, a fault handler (or any PC change that reuses the same
-                // unfetchable region, or a Reset() vector pointing at one) matched the cached id and
-                // read through the null pointer.
-                _fetchPtr = null;
-                _currentRegionId = uint.MaxValue;
-                break;
+            _fetchPtr = Bus.PtrBootRom;
+            _fetchMask = BusInterconnect.MASK_BOOTROM & ~1u;
+            _fetchBase = 0;
+            _fetchLen = BusInterconnect.BOOTROM_SIZE;
+        }
+        else if (pc - BusInterconnect.FLASH_START_ADDRESS < XipSpan)
+        {
+            _fetchPtr = Bus.PtrFlash;
+            _fetchMask = Bus.MaskFlash & ~1u;
+            _fetchBase = BusInterconnect.FLASH_START_ADDRESS;
+            _fetchLen = XipSpan;
+        }
+        else if (pc - BusInterconnect.SRAM_START_ADDRESS < BusInterconnect.SRAM_SIZE)
+        {
+            _fetchPtr = Bus.PtrSram;
+            _fetchMask = BusInterconnect.MASK_SRAM & ~1u;
+            _fetchBase = BusInterconnect.SRAM_START_ADDRESS;
+            _fetchLen = BusInterconnect.SRAM_SIZE;
+        }
+        else
+        {
+            // No direct fetch window. A zero-length one makes the loop's range test fail again on the next
+            // fetch and re-raise the HardFault. Without this, a fault handler (or any PC change that stays
+            // in the same unfetchable range, or a Reset() vector pointing at one) matched the cached window
+            // and read through the null pointer.
+            _fetchPtr = null;
+            _fetchBase = 0;
+            _fetchLen = 0;
         }
     }
+
+    private const uint XipSpan = 0x08000000;   // 0x10000000-0x17FFFFFF, see BusInterconnect
 
     /// <summary>
     /// Execute up to <paramref name="instructions"/> steps using the currently selected 16-bit decoder.
@@ -231,7 +248,8 @@ public sealed unsafe class CortexM0Plus
     {
         var fetchPtr = _fetchPtr;
         var fetchMask = _fetchMask;
-        var regionId = _currentRegionId;
+        var fetchBase = _fetchBase;
+        var fetchLen = _fetchLen;
 
         while (instructions-- > 0)
         {
@@ -247,7 +265,8 @@ public sealed unsafe class CortexM0Plus
                     UpdateFetchCache(Registers.PC);
                     fetchPtr = _fetchPtr;
                     fetchMask = _fetchMask;
-                    regionId = _currentRegionId;
+                    fetchBase = _fetchBase;
+                    fetchLen = _fetchLen;
                 }
             }
 
@@ -276,14 +295,15 @@ public sealed unsafe class CortexM0Plus
             var pc = Registers.PC;
 
             // FAST GUARD
-            if ((pc >> 28) != regionId)
+            if (pc - fetchBase >= fetchLen)
             {
                 // FALLBACK
                 UpdateFetchCache(pc);
 
                 fetchPtr = _fetchPtr;
                 fetchMask = _fetchMask;
-                regionId = _currentRegionId;
+                fetchBase = _fetchBase;
+                fetchLen = _fetchLen;
 
                 if (fetchPtr == null)
                 {
@@ -293,7 +313,8 @@ public sealed unsafe class CortexM0Plus
                     UpdateFetchCache(Registers.PC);
                     fetchPtr  = _fetchPtr;
                     fetchMask = _fetchMask;
-                    regionId  = _currentRegionId;
+                    fetchBase = _fetchBase;
+                    fetchLen = _fetchLen;
                     continue;
                 }
             }
@@ -317,7 +338,8 @@ public sealed unsafe class CortexM0Plus
                 UpdateFetchCache(Registers.PC);
                 fetchPtr  = _fetchPtr;
                 fetchMask = _fetchMask;
-                regionId  = _currentRegionId;
+                fetchBase = _fetchBase;
+                fetchLen = _fetchLen;
                 Cycles++;
                 continue;
             }
@@ -333,7 +355,8 @@ public sealed unsafe class CortexM0Plus
             decoder.Dispatch16(opcode, this);
         }
 
-        _currentRegionId = regionId;
+        _fetchBase = fetchBase;
+        _fetchLen = fetchLen;
         _fetchPtr = fetchPtr;
         _fetchMask = fetchMask;
     }
@@ -352,7 +375,8 @@ public sealed unsafe class CortexM0Plus
 
         var fetchPtr = _fetchPtr;
         var fetchMask = _fetchMask;
-        var regionId = _currentRegionId;
+        var fetchBase = _fetchBase;
+        var fetchLen = _fetchLen;
 
         while (instructions-- > 0)
         {
@@ -366,7 +390,8 @@ public sealed unsafe class CortexM0Plus
                     UpdateFetchCache(Registers.PC);
                     fetchPtr = _fetchPtr;
                     fetchMask = _fetchMask;
-                    regionId = _currentRegionId;
+                    fetchBase = _fetchBase;
+                    fetchLen = _fetchLen;
                 }
             }
 
@@ -386,13 +411,14 @@ public sealed unsafe class CortexM0Plus
 
             var pc = Registers.PC;
 
-            if ((pc >> 28) != regionId)
+            if (pc - fetchBase >= fetchLen)
             {
                 UpdateFetchCache(pc);
 
                 fetchPtr = _fetchPtr;
                 fetchMask = _fetchMask;
-                regionId = _currentRegionId;
+                fetchBase = _fetchBase;
+                fetchLen = _fetchLen;
 
                 if (fetchPtr == null)
                 {
@@ -401,7 +427,8 @@ public sealed unsafe class CortexM0Plus
                     UpdateFetchCache(Registers.PC);
                     fetchPtr  = _fetchPtr;
                     fetchMask = _fetchMask;
-                    regionId  = _currentRegionId;
+                    fetchBase = _fetchBase;
+                    fetchLen = _fetchLen;
                     continue;
                 }
             }
@@ -423,7 +450,8 @@ public sealed unsafe class CortexM0Plus
                 UpdateFetchCache(Registers.PC);
                 fetchPtr  = _fetchPtr;
                 fetchMask = _fetchMask;
-                regionId  = _currentRegionId;
+                fetchBase = _fetchBase;
+                fetchLen = _fetchLen;
                 Cycles++;
                 continue;
             }
@@ -439,7 +467,8 @@ public sealed unsafe class CortexM0Plus
             decoder.Dispatch(opcode, this);
         }
 
-        _currentRegionId = regionId;
+        _fetchBase = fetchBase;
+        _fetchLen = fetchLen;
         _fetchPtr = fetchPtr;
         _fetchMask = fetchMask;
     }
@@ -581,6 +610,16 @@ public sealed unsafe class CortexM0Plus
         SetInterruptLine(irq, pending);
     }
 
+    /// <summary>
+    /// Drives a line of THIS core's NVIC only, for interrupt sources that are wired per core (IO_BANK0's
+    /// PROC0 / PROC1 interrupts reach the NVIC of the core they belong to, not both).
+    /// </summary>
+    public void SetInterruptLocal(int irq, bool pending)
+    {
+        if (irq is < 0 or > 31) return;
+        SetInterruptLine(irq, pending);
+    }
+
     /// <summary>Software-pends a line in THIS core's NVIC only (NVIC_ISPR is per core; <c>irq_set_pending()</c>).</summary>
     public void PendInterruptLocal(int irq)
     {
@@ -593,9 +632,17 @@ public sealed unsafe class CortexM0Plus
     {
         var bit = 1u << irq;
         if (pending)
+        {
+            // SCR.SEVONPEND (B3.2.7): a not-pending -> pending transition, even of a disabled interrupt,
+            // registers an event that wakes WFE.
+            if ((Registers.SCR & SCR_SEVONPEND) != 0 && (Registers.PendingInterrupts & bit) == 0)
+                Registers.EventRegistered = true;
             Registers.PendingInterrupts |= bit;
+        }
         else
+        {
             Registers.PendingInterrupts &= ~bit;
+        }
         Registers.InterruptsUpdated = true;
     }
 
@@ -614,6 +661,61 @@ public sealed unsafe class CortexM0Plus
     public void TriggerSysTick() { Registers.PendingSystick = true; Registers.InterruptsUpdated = true; }
     public void TriggerPendSv() { Registers.PendingPendSV = true; Registers.InterruptsUpdated = true; }
     public void TriggerHardFault() => ExceptionEntry(EXC_HARDFAULT);
+
+    /// <summary>
+    /// BXWritePC / LoadWritePC (A2.3.1) for the cases the inlined fast path does not take. An EXC_RETURN value
+    /// (0xFFFFFFF0-0xFFFFFFFF) only means "return from exception" in Handler mode; in Thread mode it is just an
+    /// address nothing can be fetched from. An even target sets EPSR.T = 0, which faults when the next
+    /// instruction is fetched, so the HardFault is taken here with the target as the faulting address.
+    /// </summary>
+    public void BxWritePc(uint target)
+    {
+        if (target >= 0xFFFFFFF0 && Registers.IPSR != 0)
+        {
+            ExceptionReturn(target);
+            return;
+        }
+        if ((target & 1) == 0)
+        {
+            Registers.PC = target;
+            ExceptionEntry(EXC_HARDFAULT);
+            return;
+        }
+        Registers.PC = target & 0xFFFFFFFE;
+    }
+
+    /// <summary>
+    /// HardFault from a synchronous (precise) fault: ARMv6-M B1.5.6 ReturnAddress() is the address of the
+    /// instruction that caused it (UNDEFINED, BKPT with no debugger, unaligned or unmapped access), not the
+    /// next one, so the caller passes the faulting instruction's address.
+    /// </summary>
+    public void TriggerHardFaultAt(uint instructionAddress)
+    {
+        Registers.PC = instructionAddress;
+        ExceptionEntry(EXC_HARDFAULT);
+    }
+
+    /// <summary>
+    /// SVC executed. It pends SVCall like any exception, unless SVCall's group priority is not strictly
+    /// higher than the current execution priority (PRIMASK counts as priority 0, so SVC with interrupts
+    /// masked, or from a handler at the same or a higher priority): then it escalates to HardFault
+    /// (B1.5.4 "Priority escalation"), with the ReturnAddress of the SVC, i.e. the next instruction.
+    /// </summary>
+    public void CallSupervisor()
+    {
+        var execPriority = ExceptionPriority(Registers.IPSR);
+        if (Registers.PRIMASK != 0 && execPriority > 0)
+            execPriority = 0;
+        if (ExceptionPriority(EXC_SVCALL) < execPriority)
+        {
+            Registers.PendingSVCall = true;
+            Registers.InterruptsUpdated = true;
+        }
+        else
+        {
+            ExceptionEntry(EXC_HARDFAULT);
+        }
+    }
 
     private int IrqPriority(int irq)
     {
@@ -637,6 +739,37 @@ public sealed unsafe class CortexM0Plus
         >= 16 => IrqPriority((int)exceptionNumber - 16),
         _ => -3,
     };
+
+    /// <summary>
+    /// ICSR.VECTPENDING (B3.2.4): number of the highest-priority pending exception, 0 when none. Enable and
+    /// priority are honoured, PRIMASK and the current execution priority are not.
+    /// </summary>
+    public uint HighestPendingException()
+    {
+        uint best = 0;
+        var bestPriority = int.MaxValue;
+        if (Registers.PendingNMI) return EXC_NMI;
+        if (Registers.PendingSVCall)  { best = EXC_SVCALL; bestPriority = ExceptionPriority(EXC_SVCALL); }
+        if (Registers.PendingPendSV)
+        {
+            var p = ExceptionPriority(EXC_PENDSV);
+            if (p < bestPriority) { best = EXC_PENDSV; bestPriority = p; }
+        }
+        if (Registers.PendingSystick)
+        {
+            var p = ExceptionPriority(EXC_SYSTICK);
+            if (p < bestPriority) { best = EXC_SYSTICK; bestPriority = p; }
+        }
+        var pending = Registers.PendingInterrupts & Registers.EnabledInterrupts;
+        while (pending != 0)
+        {
+            var irq = System.Numerics.BitOperations.TrailingZeroCount(pending);
+            pending &= pending - 1;
+            var p = IrqPriority(irq);
+            if (p < bestPriority) { best = (uint)(irq + 16); bestPriority = p; }
+        }
+        return best;
+    }
 
     /// <summary>Returns true if an interrupt was taken (PC changed).</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -785,6 +918,14 @@ public sealed unsafe class CortexM0Plus
         // that already happened. rp2040js cortex-m0-core.ts:339-341 sets both flags.
         Registers.InterruptsUpdated = true;
         Registers.EventRegistered = true;
+
+        // SCR.SLEEPONEXIT (B3.2.7): returning to Thread mode puts the core to sleep until the next exception.
+        // A still-pending exception is taken first (interrupts are checked before the sleep test), which wakes it.
+        if (returnToThread && (Registers.SCR & SCR_SLEEPONEXIT) != 0)
+        {
+            Registers.EventRegistered = false;   // the return's own event must not cancel the sleep
+            Registers.Waiting = true;
+        }
 
         OnExceptionReturn?.Invoke(excReturn);
     }

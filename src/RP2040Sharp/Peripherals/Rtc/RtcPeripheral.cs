@@ -22,19 +22,20 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
     private const uint CTRL_ACTIVE  = 1u << 1;
     private const uint CTRL_LOAD    = 1u << 4;
 
-    // IRQ_SETUP_0 bit masks
-    // ENA bits are one position above the MSB of each value field to avoid overlap
-    private const uint IRQ0_MATCH_ENA  = 1u << 31;
-    private const uint IRQ0_YEAR_ENA   = 1u << 28;  // YEAR [27:16] — bit above field OK
-    private const uint IRQ0_MONTH_ENA  = 1u << 12;  // MONTH [11:8] — ENA at 12, not 11
-    private const uint IRQ0_DAY_ENA    = 1u << 5;   // DAY [4:0]   — ENA at 5, not 4
-
-    // IRQ_SETUP_1 bit masks
-    private const uint IRQ1_MATCH_ACTIVE = 1u << 31;
-    private const uint IRQ1_DOTW_ENA   = 1u << 28;  // DOTW [26:24] — bit 28 OK (gap at 27)
-    private const uint IRQ1_HOUR_ENA   = 1u << 21;  // HOUR [20:16] — ENA at 21, not 20
-    private const uint IRQ1_MIN_ENA    = 1u << 14;  // MIN  [13:8]  — ENA at 14, not 13
-    private const uint IRQ1_SEC_ENA    = 1u << 6;   // SEC  [5:0]   — ENA at 6, not 5
+    // Layout per RP2040 datasheet 4.8 / SVD (SETUP_0, SETUP_1, IRQ_SETUP_0/1):
+    //   SETUP_0 / IRQ_SETUP_0 : YEAR[23:12] MONTH[11:8] DAY[4:0]
+    //   SETUP_1 / IRQ_SETUP_1 : DOTW[26:24] HOUR[20:16] MIN[13:8] SEC[5:0]
+    private const int  YEAR_SHIFT = 12;
+    private const uint IRQ0_MATCH_ACTIVE = 1u << 29;   // RO
+    private const uint IRQ0_MATCH_ENA  = 1u << 28;
+    private const uint IRQ0_YEAR_ENA   = 1u << 26;
+    private const uint IRQ0_MONTH_ENA  = 1u << 25;
+    private const uint IRQ0_DAY_ENA    = 1u << 24;
+    private const uint IRQ1_DOTW_ENA   = 1u << 31;
+    private const uint IRQ1_HOUR_ENA   = 1u << 30;
+    private const uint IRQ1_MIN_ENA    = 1u << 29;
+    private const uint IRQ1_SEC_ENA    = 1u << 28;
+    private uint _inte, _intf;
 
     private const int  RTC_IRQ        = 25;
     private const long CLK_HZ         = 125_000_000; // 125 MHz
@@ -51,6 +52,9 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
     private uint _rtcTime;   // DOTW[26:24] HOUR[20:16] MIN[13:8] SEC[5:0]
 
     private long _accumCycles;
+    private bool _matchActive;
+
+    private void UpdateIrq() => _cpu?.SetInterrupt(RTC_IRQ, (((_matchActive ? 1u : 0u) | _intf) & _inte & 1u) != 0);
 
     public uint Size => 0x1000;
 
@@ -58,14 +62,14 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
     {
         _cpu = cpu;
         // Default to 2024-01-01 Monday 00:00:00
-        _rtcDate = (2024u << 16) | (1u << 8) | 1u;
+        _rtcDate = (2024u << YEAR_SHIFT) | (1u << 8) | 1u;
         _rtcTime = (1u << 24); // Monday
     }
 
     /// <summary>Inject a specific date/time into the RTC.</summary>
     public void SetDateTime(int year, int month, int day, int dayOfWeek, int hour, int min, int sec)
     {
-        _rtcDate = ((uint)year << 16) | ((uint)month << 8) | (uint)day;
+        _rtcDate = ((uint)year << YEAR_SHIFT) | ((uint)month << 8) | (uint)day;
         _rtcTime = ((uint)dayOfWeek << 24) | ((uint)hour << 16) | ((uint)min << 8) | (uint)sec;
     }
 
@@ -74,7 +78,7 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
         bool Enabled, int Year, int Month, int Day, int DayOfWeek, int Hour, int Minute, int Second);
     public RtcSnapshot GetSnapshot() => new(
         (_ctrl & CTRL_ENABLE) != 0,
-        (int)((_rtcDate >> 16) & 0xFFF),   // YEAR
+        (int)((_rtcDate >> YEAR_SHIFT) & 0xFFF),   // YEAR
         (int)((_rtcDate >> 8)  & 0xF),     // MONTH
         (int)(_rtcDate & 0x1F),            // DAY
         (int)((_rtcTime >> 24) & 0x7),     // DOTW
@@ -105,7 +109,11 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
         RTC_SETUP0  => _setup0,
         RTC_SETUP1  => _setup1,
         RTC_CTRL    => (_ctrl & CTRL_ENABLE) != 0 ? (_ctrl | CTRL_ACTIVE) : _ctrl,
-        IRQ_SETUP_0 => _irqSetup0,
+        IRQ_SETUP_0 => _irqSetup0 | (_matchActive ? IRQ0_MATCH_ACTIVE : 0u),
+        0x20        => _matchActive ? 1u : 0u,                       // INTR
+        0x24        => _inte,
+        0x28        => _intf,
+        0x2C        => ((_matchActive ? 1u : 0u) | _intf) & _inte,   // INTS
         IRQ_SETUP_1 => _irqSetup1,
         RTC_RTC1    => _rtcDate,   // RTC_1 (0x18) = YEAR/MONTH/DAY
         RTC_RTC0    => _rtcTime,   // RTC_0 (0x1C) = DOTW/HOUR/MIN/SEC
@@ -137,11 +145,15 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
                 }
                 _ctrl = value & CTRL_ENABLE; // LOAD is strobe, ACTIVE is read-only
                 break;
-            case IRQ_SETUP_0: _irqSetup0 = value; break;
+            case IRQ_SETUP_0:
+                _irqSetup0 = value & ~IRQ0_MATCH_ACTIVE;
+                if ((value & IRQ0_MATCH_ENA) == 0) _matchActive = false;   // clearing MATCH_ENA clears MATCH_ACTIVE
+                UpdateIrq();
+                break;
+            case 0x24: _inte = value & 1; UpdateIrq(); break;
+            case 0x28: _intf = value & 1; UpdateIrq(); break;
             case IRQ_SETUP_1:
-                // bit 31 (MATCH_ACTIVE) is write-1-to-clear
-                if ((value & IRQ1_MATCH_ACTIVE) != 0) _irqSetup1 &= ~IRQ1_MATCH_ACTIVE;
-                _irqSetup1 = (_irqSetup1 & IRQ1_MATCH_ACTIVE) | (value & ~IRQ1_MATCH_ACTIVE);
+                _irqSetup1 = value;
                 break;
         }
     }
@@ -170,7 +182,7 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
         var dotw  = (int)((_rtcTime >> 24) & 0x7);
         var day   = (int)(_rtcDate & 0x1F);
         var month = (int)((_rtcDate >> 8) & 0xF);
-        var year  = (int)((_rtcDate >> 16) & 0xFFF);
+        var year  = (int)((_rtcDate >> YEAR_SHIFT) & 0xFFF);
 
         sec++;
         if (sec >= 60) { sec = 0; min++; }
@@ -186,7 +198,7 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
             if (month > 12) { month = 1; year++; }
         }
 
-        _rtcDate = ((uint)year << 16) | ((uint)month << 8) | (uint)day;
+        _rtcDate = ((uint)year << YEAR_SHIFT) | ((uint)month << 8) | (uint)day;
         _rtcTime = ((uint)dotw << 24) | ((uint)hour << 16) | ((uint)min << 8) | (uint)sec;
     }
 
@@ -200,10 +212,10 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
         var dotw  = (_rtcTime >> 24) & 0x7;
         var day   = _rtcDate & 0x1F;
         var month = (_rtcDate >> 8) & 0xF;
-        var year  = (_rtcDate >> 16) & 0xFFF;
+        var year  = (_rtcDate >> YEAR_SHIFT) & 0xFFF;
 
         var matched = true;
-        if ((_irqSetup0 & IRQ0_YEAR_ENA)  != 0) matched &= ((_irqSetup0 >> 16) & 0xFFF) == year;
+        if ((_irqSetup0 & IRQ0_YEAR_ENA)  != 0) matched &= ((_irqSetup0 >> YEAR_SHIFT) & 0xFFF) == year;
         if ((_irqSetup0 & IRQ0_MONTH_ENA) != 0) matched &= ((_irqSetup0 >> 8)  & 0xF)   == month;
         if ((_irqSetup0 & IRQ0_DAY_ENA)   != 0) matched &= (_irqSetup0 & 0x1F)           == day;
         if ((_irqSetup1 & IRQ1_DOTW_ENA)  != 0) matched &= ((_irqSetup1 >> 24) & 0x7)   == dotw;
@@ -213,8 +225,8 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
 
         if (matched)
         {
-            _irqSetup1 |= IRQ1_MATCH_ACTIVE;  // set MATCH_ACTIVE flag
-            _cpu?.SetInterrupt(RTC_IRQ, true);
+            _matchActive = true;
+            UpdateIrq();
         }
     }
 }

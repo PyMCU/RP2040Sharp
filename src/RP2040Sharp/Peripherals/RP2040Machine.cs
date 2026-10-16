@@ -128,6 +128,9 @@ public sealed class RP2040Machine : IDisposable
         // Route PPB accesses to the correct per-core PPB based on the active core.
         var ppbRouter = new PerCorePpbRouter(Ppb, Ppb1, () => _activeCoreId);
         Bus.MapDevice(0xE, ppbRouter);
+        // AIRCR.SYSRESETREQ resets the core that wrote it (datasheet 2.4.2.9), nothing else.
+        Ppb.OnSystemResetRequest  += ResetCore0FromAircr;
+        Ppb1.OnSystemResetRequest += ResetCore1FromAircr;
 
         // ── SIO (0xD) ────────────────────────────────────────────────────
         Sio = new SioPeripheral(Cpu);
@@ -141,7 +144,7 @@ public sealed class RP2040Machine : IDisposable
         Bus.MapDevice(4, apb);
 
         // System info / config (slots 0–1)
-        SysInfo = new SysInfoPeripheral();
+        SysInfo = new SysInfoPeripheral(bootrom);
         apb.Register(0x40000000, SysInfo);
 
         SysCfg = new SysCfgPeripheral();
@@ -163,15 +166,16 @@ public sealed class RP2040Machine : IDisposable
         apb.Register(0x40010000, Psm);
 
         // IO_BANK0 @ 0x40014000 (slot 5)
-        IoBank0 = new IoBank0Peripheral(Sio, Cpu);
+        IoBank0 = new IoBank0Peripheral(Sio, Cpu) { Cpu1 = Cpu1 };
         apb.Register(0x40014000, IoBank0);
 
         // PADS_BANK0 @ 0x4001C000 (slot 7), PADS_QSPI @ 0x40020000 (slot 8)
         PadsBank0 = new PadsPeripheral();
         apb.Register(0x4001C000, PadsBank0);
         Sio.PadsBank0 = PadsBank0;   // floating inputs settle on their pull resistor
+        IoBank0.Pads = PadsBank0;    // IE gates the input buffer, OD the driver; changes re-evaluate the pads
 
-        PadsQspi = new PadsPeripheral();
+        PadsQspi = new PadsPeripheral(qspi: true);
         apb.Register(0x40020000, PadsQspi);
 
         // XOSC @ 0x40024000 (slot 9)
@@ -361,6 +365,8 @@ public sealed class RP2040Machine : IDisposable
         Dma.RegisterDreq(35, () => I2c1.RxDataAvailable);
         // ADC DREQ 36: RX FIFO has data
         Dma.RegisterDreq(36, () => Adc.HasFifoData);
+        Dma.RegisterDreq(38, () => true);
+        Dma.RegisterDreq(39, () => true);
         // A channel that stalled on an empty RX FIFO must re-arm when the peripheral produces data (the
         // PIO already does this via OnRxPush); otherwise it stays BUSY forever. Spi0/Spi1 are not here:
         // WireSpiDreq above already hooks both their RX and their TX resume.
@@ -452,10 +458,13 @@ public sealed class RP2040Machine : IDisposable
 
             // Register C# hooks only for flash erase/program at their real bootrom
             // addresses so MicroPython's LittleFS formatter can modify emulated flash.
-            Cpu.RegisterNativeHook(0x237C, FlashEraseHook);
-            Cpu.RegisterNativeHook(0x23C4, FlashProgramHook);
-            Cpu1.RegisterNativeHook(0x237C, FlashEraseHook);
-            Cpu1.RegisterNativeHook(0x23C4, FlashProgramHook);
+            // Hook the real function ENTRY points resolved from the ROM table ('RE'/'RP'); the old fixed
+            // 0x237C/0x23C4 are B1-only and, on B2, landed mid-function (after PUSH {r3-r7,lr}), leaving
+            // the caller's SP 24 bytes low and R4-R7 clobbered.
+            var eraseEntry = RomFuncLookup(Bus.PtrBootRom, 'R', 'E') & ~1u;
+            var progEntry  = RomFuncLookup(Bus.PtrBootRom, 'R', 'P') & ~1u;
+            if (eraseEntry != 0) { Cpu.RegisterNativeHook(eraseEntry, FlashEraseHook); Cpu1.RegisterNativeHook(eraseEntry, FlashEraseHook); }
+            if (progEntry  != 0) { Cpu.RegisterNativeHook(progEntry,  FlashProgramHook); Cpu1.RegisterNativeHook(progEntry,  FlashProgramHook); }
 
             // Where Core 1 lands when its entry function returns (see LaunchCore1).
             _core1WaitForVector = RomFuncLookup(Bus.PtrBootRom, 'W', 'V');
@@ -762,147 +771,6 @@ public sealed class RP2040Machine : IDisposable
         }
     }
 
-    /// 
-    /// The stub implements the ROM API (rom_table_lookup, memcpy44, memset4) using
-    /// hand-assembled ARM Thumb opcodes.  Entry [0] (initial SP) and entry [1]
-    /// (reset PC) are left at zero and must be patched by the caller after
-    /// locating the firmware's own vector table.
-    /// </summary>
-    private static unsafe void WriteBootRomStub(byte* rom)
-    {
-        // ── helpers ─────────────────────────────────────────────────────────
-        static void W16(byte* p, int off, ushort v)
-        {
-            p[off]     = (byte)(v & 0xFF);
-            p[off + 1] = (byte)(v >> 8);
-        }
-        static void W32(byte* p, int off, uint v)
-        {
-            p[off]     = (byte)( v        & 0xFF);
-            p[off + 1] = (byte)((v >>  8) & 0xFF);
-            p[off + 2] = (byte)((v >> 16) & 0xFF);
-            p[off + 3] = (byte)( v >> 24);
-        }
-
-        // ── Exception vector table (0x0000 – 0x003F + IRQs) ─────────────────
-        //   Entry [0] = Initial SP    ← patched later by LoadFlash
-        //   Entry [1] = Reset PC      ← patched later by LoadFlash
-        //   All others → default_handler (BX LR at 0x0180) with Thumb bit
-        const uint defaultHandler = 0x0181u;
-        W32(rom, 0x0000, 0x20041000);       // BootROM initial SP (overwritten later)
-        for (int i = 1; i < 16; i++)
-            W32(rom, i * 4, defaultHandler);
-        for (int i = 0; i < 26; i++)        // RP2040 has 26 external IRQs
-            W32(rom, 0x0040 + i * 4, defaultHandler);
-
-        // ── ROM API infrastructure (in reserved Cortex-M0+ vector slots) ─────
-        //   0x0010 – ROM code magic, 0x0012 – version, 0x0014 – func_table_ptr,
-        //   0x0016 – data_table_ptr, 0x0018 – rom_table_lookup fn ptr
-        W16(rom, 0x0010, 0x0210);   // ROM code magic (matches real RP2040 BootROM)
-        W16(rom, 0x0012, 0x02);     // ROM version 2
-        W16(rom, 0x0014, 0x0200);   // function table at 0x0200
-        W16(rom, 0x0016, 0x0250);   // data table at 0x0250 (just a terminator)
-        W16(rom, 0x0018, 0x0061);   // rom_table_lookup at 0x0060 (Thumb bit = 0x0061)
-
-        // ── default_handler at 0x0180: BX LR ─────────────────────────────────
-        W16(rom, 0x0180, 0x4770);   // BX LR
-
-        // ── rom_table_lookup at 0x0060 ────────────────────────────────────────
-        //   r0 = table (uint16_t*), r1 = code → r0 = func addr (with Thumb bit) or 0
-        //   Branch offsets: ARMv6-M PC = instruction_address + 4 when computing branch target.
-        //   loop(0x60): ldrh r2,[r0]; cbz r2,not_found(0x74); uxth r3,r1; cmp r2,r3
-        //               beq found(0x6E); adds r0,#4; b loop(0x60)
-        //   found(0x6E): ldrh r0,[r0,#2]; bx lr
-        //   not_found(0x74): movs r0,#0; bx lr
-        ReadOnlySpan<ushort> lookup =
-        [
-            0x8802,  // 0x0060  LDRH r2, [r0, #0]             ; loop:
-            0xB13A,  // 0x0062  CBZ  r2, not_found  ; PC=0x0066, +14 → 0x0074
-            0xB28B,  // 0x0064  UXTH r3, r1
-            0x429A,  // 0x0066  CMP  r2, r3
-            0xD001,  // 0x0068  BEQ  found          ; PC=0x006C, +1×2=2 → 0x006E
-            0x3004,  // 0x006A  ADDS r0, r0, #4
-            0xE7F8,  // 0x006C  B    loop            ; PC=0x0070, -8×2=-16 → 0x0060
-            0x8840,  // 0x006E  LDRH r0, [r0, #2]   ; found:
-            0x4770,  // 0x0070  BX   LR
-            0x2000,  // 0x0072  MOVS r0, #0          ; not_found:
-            0x4770,  // 0x0074  BX   LR
-        ];
-        for (int i = 0; i < lookup.Length; i++) W16(rom, 0x0060 + i * 2, lookup[i]);
-
-        // ── memcpy44 at 0x0100 ────────────────────────────────────────────────
-        //   void *memcpy44(void *dst, const void *src, uint n)  -- n bytes (multiple of 4)
-        //   Uses CBZ up-front guard so n=0 returns immediately without corrupting memory.
-        //   Layout: 0x0100 – 0x0110 (9 halfwords = 18 bytes)
-        ReadOnlySpan<ushort> memcpy44 =
-        [
-            0xB510,  // 0x0100  PUSH {r4, lr}
-            0x4604,  // 0x0102  MOV  r4, r0               ; save original dst
-            0xB11A,  // 0x0104  CBZ  r2, done (+6)         ; PC=0x0108, +6 → 0x010E
-            0xC908,  // 0x0106  LDMIA r1!, {r3}            ; loop: r3 = *src++
-            0xC008,  // 0x0108  STMIA r0!, {r3}            ; *dst++ = r3
-            0x3A04,  // 0x010A  SUBS r2, r2, #4
-            0xD1FB,  // 0x010C  BNE  loop          (-10)   ; PC=0x0110, -10 → 0x0106
-            0x4620,  // 0x010E  MOV  r0, r4                ; done: return original dst
-            0xBD10,  // 0x0110  POP  {r4, pc}
-        ];
-        for (int i = 0; i < memcpy44.Length; i++) W16(rom, 0x0100 + i * 2, memcpy44[i]);
-
-        // ── memset4  at 0x0120 ────────────────────────────────────────────────
-        //   void *memset4(void *dst, uint8_t c, uint n)
-        //   Fills n bytes (multiple of 4) with word pattern (c,c,c,c); returns dst.
-        //   Uses CBZ up-front guard: decrements n AFTER each store (no off-by-one).
-        //   Layout: 0x0120 – 0x0138 (13 halfwords = 26 bytes)
-        ReadOnlySpan<ushort> memset4 =
-        [
-            0xB510,  // 0x0120  PUSH {r4, lr}
-            0x4604,  // 0x0122  MOV  r4, r0              ; save original dst
-            0xB2C9,  // 0x0124  UXTB r1, r1              ; r1 = c & 0xFF (zero-extend)
-            0x020B,  // 0x0126  LSLS r3, r1, #8
-            0x4319,  // 0x0128  ORRS r1, r3              ; r1 = c | (c<<8)
-            0x040B,  // 0x012A  LSLS r3, r1, #16
-            0x4319,  // 0x012C  ORRS r1, r3              ; r1 = 4-byte word pattern
-            0xB112,  // 0x012E  CBZ  r2, done (+4)        ; PC=0x0132, +4 → 0x0136
-            0xC002,  // 0x0130  STMIA r0!, {r1}          ; loop: *dst++ = word
-            0x3A04,  // 0x0132  SUBS r2, r2, #4
-            0xD1FC,  // 0x0134  BNE  loop          (-8)   ; PC=0x0138, -8 → 0x0130
-            0x4620,  // 0x0136  MOV  r0, r4              ; done: return original dst
-            0xBD10,  // 0x0138  POP  {r4, pc}
-        ];
-        for (int i = 0; i < memset4.Length; i++) W16(rom, 0x0120 + i * 2, memset4[i]);
-
-        // ── Native-hook stubs ─────────────────────────────────────────────────
-        //   0x0190: flash_range_erase  hook  — BX LR fallback (hook fires first)
-        //   0x01A0: flash_range_program hook — BX LR fallback
-        //   0x01C0: popcount32, 0x01D0: reverse32, 0x01E0: clz32, 0x01F0: ctz32
-        W16(rom, 0x0190, 0x4770);  // BX LR
-        W16(rom, 0x01A0, 0x4770);  // BX LR
-        W16(rom, 0x01C0, 0x4770);  // BX LR (popcount32 — native hook)
-        W16(rom, 0x01D0, 0x4770);  // BX LR (reverse32 — native hook)
-        W16(rom, 0x01E0, 0x4770);  // BX LR (clz32 — native hook)
-        W16(rom, 0x01F0, 0x4770);  // BX LR (ctz32 — native hook)
-
-        // ── Function lookup table at 0x0200 ───────────────────────────────────
-        //   Format: pairs of uint16_t {code, func_ptr}, terminated by {0, 0}.
-        //   'RE' and 'RP' point to native-hook stubs so C# code can modify flash.
-        ReadOnlySpan<ushort> funcTable =
-        [
-            0x434D, 0x0101,  // 'MC' = MEMCPY / MEMCPY44     (Thumb bit: 0x0100|1)
-            0x534D, 0x0121,  // 'MS' = MEMSET / MEMSET4      (Thumb bit: 0x0120|1)
-            0x4649, 0x0181,  // 'IF' = connect_internal_flash (no-op BX LR)
-            0x5845, 0x0181,  // 'EX' = flash_exit_xip         (no-op BX LR)
-            0x4552, 0x0191,  // 'RE' = flash_range_erase  →  native hook at 0x0190
-            0x5052, 0x01A1,  // 'RP' = flash_range_program → native hook at 0x01A0
-            0x4346, 0x0181,  // 'FC' = flash_flush_cache       (no-op BX LR)
-            0x5843, 0x0181,  // 'CX' = flash_enter_cmd_xip    (no-op BX LR)
-            0x0000, 0x0000,  // terminator
-        ];
-        for (int i = 0; i < funcTable.Length; i++) W16(rom, 0x0200 + i * 2, funcTable[i]);
-
-        // Data table at 0x0250: just a terminator
-        W16(rom, 0x0250, 0x0000);
-    }
-
     /// <summary>Load a binary image into BootROM at 0x00000000 (max 16 KB).</summary>
     public unsafe void LoadBootRom(ReadOnlySpan<byte> image)
     {
@@ -1011,7 +879,43 @@ public sealed class RP2040Machine : IDisposable
         Cpu.Registers = default;
         Cpu1.Registers = default;
         Reset();
+        Ppb.Reset();
+        Ppb1.Reset();
         Usb.Reset();
+    }
+
+    /// <summary>
+    /// <c>AIRCR.SYSRESETREQ</c> (<c>NVIC_SystemReset()</c>) on Core 0. Datasheet 2.4.2.9: the NVIC resets the
+    /// Cortex-M0+ core only, not the debug block, the power-on state machine or the peripherals, so only this core
+    /// restarts, from the bootrom vector, while SRAM, peripherals and Core 1 keep their state. The cycle counter
+    /// is not rewound: the write happens inside <see cref="CortexM0Plus.Run"/>, whose caller measures elapsed time
+    /// from it, and time does not go backwards on a core reset.
+    /// </summary>
+    private void ResetCore0FromAircr()
+    {
+        ResetCount++;
+        var cycles = Cpu.Cycles;
+        Cpu.Registers = default;
+        Cpu.Reset();
+        Cpu.Cycles = cycles;
+        Ppb.Reset();
+    }
+
+    /// <summary><c>AIRCR.SYSRESETREQ</c> on Core 1: it falls back to the bootrom's wait-for-launch state, like a PSM reset.</summary>
+    private void ResetCore1FromAircr()
+    {
+        ResetCount++;
+        var cycles = Cpu1.Cycles;
+        _core1Launched = false;
+        Sio.ResetMulticoreLaunch();
+        Cpu1.Registers = default;
+        Cpu1.Reset();
+        Cpu1.Cycles = cycles;
+        Ppb1.Reset();
+        Sio.SignalCore1BootromReady();
+        // Park it: the batch in flight must not run bootrom code the emulator does not execute for Core 1.
+        Cpu1.Registers.EventRegistered = false;
+        Cpu1.Registers.Waiting = true;
     }
 
     /// <summary>Reset Core 0. Core 1 is also reset and its launched state is cleared.</summary>
@@ -1115,7 +1019,7 @@ public sealed class RP2040Machine : IDisposable
     /// <see cref="PpbPeripheral"/> based on the currently-active core ID.
     /// Each core has its own private NVIC, SysTick and SCB in the real RP2040.
     /// </summary>
-    private sealed class PerCorePpbRouter : IMemoryMappedDevice, ITickable
+    private sealed class PerCorePpbRouter : IMemoryMappedDevice, IAddressDecoder, ITickable
     {
         private readonly PpbPeripheral _ppb0;
         private readonly PpbPeripheral _ppb1;
@@ -1133,6 +1037,11 @@ public sealed class RP2040Machine : IDisposable
             _getActiveCoreId() == 1 ? _ppb1 : _ppb0;
 
         public uint Size => 0x10000000;  // covers the full 0xE region
+
+        // The private peripheral bus is 0xE0000000-0xE00FFFFF; the rest of the region is not mapped (ARMv6-M B3.1)
+        public uint DecodeLimit => 0x00100000;
+        public bool[]? SlotPresent => null;
+        public int SlotShift => 0;
 
         public uint   ReadWord(uint address)              => Active.ReadWord(address);
         public ushort ReadHalfWord(uint address)          => Active.ReadHalfWord(address);
