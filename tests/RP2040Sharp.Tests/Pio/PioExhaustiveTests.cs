@@ -347,7 +347,9 @@ public sealed class PioExhaustiveTests
         {
             using var f = new Fixture();
             f.GpioIn = 0xAB;
-            // IN PINS,8 (left shift default) ; PUSH
+            // SHIFTCTRL resets to IN/OUT shift RIGHT (SVD reset 0x000C0000), so left shift is configured
+            f.Pio.WriteWord(SHIFTCTRL(0), 0);
+            // IN PINS,8 (left shift) ; PUSH
             f.Load(0, In(0, 8), Push(block: true));
             f.Enable(0);
             f.Tick(2);
@@ -358,6 +360,7 @@ public sealed class PioExhaustiveTests
         public void In_x_source()
         {
             using var f = new Fixture();
+            f.Pio.WriteWord(SHIFTCTRL(0), 0);   // reset is shift right; this test is about the left-shift layout
             f.Load(0, Set(D_X, 0x1F), In(1 /*X*/, 5), Push(block: true));
             f.Enable(0);
             f.Tick(3);
@@ -382,7 +385,8 @@ public sealed class PioExhaustiveTests
         {
             using var f = new Fixture();
             f.Pio.WriteWord(TXF(0), 0xABCD1234u);
-            // PULL ; OUT X,16 (left shift default → top 16 bits)
+            f.Pio.WriteWord(SHIFTCTRL(0), 0);   // reset is shift right; configure left explicitly
+            // PULL ; OUT X,16 (left shift → top 16 bits)
             f.Load(0, Pull(block: true), Out(D_X, 16));
             f.Enable(0);
             f.Tick(2);

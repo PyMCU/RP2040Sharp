@@ -385,27 +385,30 @@ public abstract class PioTests
         }
 
         [Fact]
-        public void Sideset_not_applied_when_SM_stalls()
+        public void Sideset_is_applied_on_the_first_cycle_even_when_the_instruction_stalls()
         {
             using var f = new Fixture();
-            var sidesetCallCount = 0;
-            f.Pio.WriteGpioPins = (_, _) => sidesetCallCount++;
+            uint capturedPins = 0, capturedMask = 0;
+            f.Pio.WriteGpioPins = (v, m) => { capturedPins = v; capturedMask = m; };
 
             // Configure sideset on pin 0
             f.Pio.WriteWord(Fixture.SM0_PINCTRL, PinCtrl(1, 0));
             f.Pio.WriteWord(Fixture.SM0_EXECCTRL, ExecCtrl(false));
             f.Pio.WriteWord(Fixture.SM0_CLKDIV, 1u << 16);
 
-            // PULL block — will stall because TX FIFO is empty
-            // sideset value = 1 → field bit 4 = 1 → field = 0b10000 = 16
+            // PULL block — stalls because the TX FIFO is empty; sideset value = 1 → field = 0b10000 = 16.
+            // Side-set takes effect when the instruction starts, stalled or not (pico-examples uart_tx.pio:
+            // "pull side 1 [7] ; Assert stop bit, or stall with line in idle state"); only the delay and the
+            // PC advance wait for the stall to end.
             var pullField = (ushort)(EncodePull(block: true) | (16 << 8));
             f.Pio.WriteWord(Fixture.INSTR_MEM0, pullField);
             f.Pio.WriteWord(Fixture.CTRL, 1u);
 
-            // Run 5 ticks — SM stalls on empty FIFO every tick
             f.Tick(5);
 
-            sidesetCallCount.Should().Be(0, "sideset must not fire on stall cycles");
+            (capturedMask & 1u).Should().Be(1u, "sideset fires on the stalled instruction's first cycle");
+            (capturedPins & 1u).Should().Be(1u, "the idle line is held high by the side-set of the stalled PULL");
+            f.Pio.ReadWord(Fixture.SM0_ADDR).Should().Be(0u, "the PC does not advance while stalled");
         }
 
         [Fact]

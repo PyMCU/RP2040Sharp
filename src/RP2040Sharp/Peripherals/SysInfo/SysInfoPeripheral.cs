@@ -12,14 +12,19 @@ public sealed class SysInfoPeripheral : IMemoryMappedDevice
     private const uint PLATFORM      = 0x04;   // 0=FPGA, 1=ASIC, 2=SIMULATION
     private const uint GITREF_RP2040 = 0x40;   // ROM git ref
 
-    // RP2040-B2 chip ID: MANUFACTURER=0x927, PART=0x2, REVISION=2 → 0x10029927
-    private const uint RP2040_CHIP_ID = 0x10029927;
+    // CHIP_ID: REVISION[31:28] PART[27:12]=0x0002 MANUFACTURER[11:0]=0x927 (RP2040 datasheet 2.20 SYSINFO / SVD).
+    // B0 and B1 silicon report REVISION 1 (the default bootrom model), B2 reports REVISION 2 (0x20002927, which
+    // is also the SVD reset value).
+    private readonly uint _chipId;
+
+    public SysInfoPeripheral(RP2040BootromRevision revision = RP2040BootromRevision.B1) =>
+        _chipId = revision == RP2040BootromRevision.B2 ? 0x20002927u : 0x10002927u;
 
     public uint Size => 0x1000;
 
     public uint ReadWord(uint address) => address switch
     {
-        CHIP_ID       => RP2040_CHIP_ID,
+        CHIP_ID       => _chipId,
         PLATFORM      => 1,    // ASIC
         GITREF_RP2040 => 0,
         _             => 0,

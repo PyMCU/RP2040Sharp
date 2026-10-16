@@ -189,21 +189,22 @@ public abstract class MemoryOpsTests
         public class Unaligned : CpuTestBase
         {
             [Fact]
-            public void Should_HandleUnalignedAccess_WhenUsingUnsafeRead()
+            public void Should_HardFault_WhenAddressIsUnaligned()
             {
-                // Arrange
+                // ARMv6-M A3.2 / B1.5.14: an unaligned LDR takes a HardFault (CCR.UNALIGN_TRP is fixed at 1).
+                // The old behaviour, a silent unaligned read through Unsafe.ReadUnaligned, is not what the chip does.
                 var opcode = InstructionEmiter.LdrImmediate(R0, R1, 0);
                 Bus.WriteHalfWord(0x20000000, opcode);
 
                 const uint unalignedAddr = 0x20000101;
                 Cpu.Registers[R1] = unalignedAddr;
+                Cpu.Registers[R0] = 0x1234;
                 Bus.WriteWord(unalignedAddr, 0xDEADBEEF);
 
-                // Act
                 Cpu.Step();
 
-                // Assert
-                Cpu.Registers[R0].Should().Be(0xDEADBEEF, "Our Bus uses Unsafe.ReadUnaligned");
+                Cpu.Registers.IPSR.Should().Be(3u);
+                Cpu.Registers[R0].Should().Be(0x1234, "a faulting load leaves its destination alone");
             }
         }
     }
@@ -294,22 +295,33 @@ public abstract class MemoryOpsTests
         }
 
         [Fact]
-        public void Should_HandleStackWrapAround_WithoutThrowing()
+        public void Should_HardFault_WhenStackPointerIsPastTheEndOfSram()
         {
-            // Arrange
-            const uint nearlyEnd =
-                BusInterconnect.SRAM_START_ADDRESS + BusInterconnect.MASK_SRAM - 2;
-            Cpu.Registers.SP = nearlyEnd;
+            // SRAM ends at 0x20041FFF (datasheet 2.2). The old 512 KB mirror let a POP at the end wrap silently.
+            const uint sramEnd = BusInterconnect.SRAM_START_ADDRESS + BusInterconnect.SRAM_SIZE;
+            Cpu.Registers.SP = sramEnd;
 
-            var opcode = InstructionEmiter.Pop(false, 1 << R0);
-            Bus.WriteHalfWord(0x20000000, opcode);
+            Bus.WriteHalfWord(0x20000000, InstructionEmiter.Pop(false, 1 << R0));
 
-            // Act
-            var act = () => Cpu.Step();
+            Cpu.Step();
 
-            // Assert
-            act.Should().NotThrow();
-            Cpu.Registers[SP].Should().Be(nearlyEnd + 4);
+            Cpu.Registers.IPSR.Should().Be(3u);
+        }
+
+        [Fact]
+        public void Should_PopTheLastWordOfSram()
+        {
+            const uint lastWord = BusInterconnect.SRAM_START_ADDRESS + BusInterconnect.SRAM_SIZE - 4;
+            Bus.WriteWord(lastWord, 0xCAFEF00D);
+            Cpu.Registers.SP = lastWord;
+
+            Bus.WriteHalfWord(0x20000000, InstructionEmiter.Pop(false, 1 << R0));
+
+            Cpu.Step();
+
+            Cpu.Registers.IPSR.Should().Be(0u);
+            Cpu.Registers[R0].Should().Be(0xCAFEF00D);
+            Cpu.Registers[SP].Should().Be(lastWord + 4);
         }
     }
 

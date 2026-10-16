@@ -42,6 +42,7 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
 
     // Latched high word when timelr is read (for consistent 64-bit reads)
     private uint _latchedHigh;
+    private uint _pendingLow;
 
     private readonly uint[] _alarm = new uint[4];
     private uint _armed;   // bit N = 1 means alarm N is enabled
@@ -165,12 +166,11 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
     {
         switch (address)
         {
-            case TIMEHW:
-                // High word written first; no-op in sim (low write triggers)
-                break;
             case TIMELW:
-                // Setting timer (e.g. during boot); snap to a specific time
-                _timeMicros = ((ulong)_latchedHigh << 32) | value;
+                _pendingLow = value;          // datasheet 4.6: not copied to time until TIMEHW is written
+                break;
+            case TIMEHW:
+                _timeMicros = ((ulong)value << 32) | _pendingLow;
                 // Firmware is allowed to wind this counter BACKWARDS, so the write has to clear the
                 // monotonic floor that LiveMicros keeps and re-base the mid-block cycle origin.
                 // Otherwise the floor silently swallows the write and the counter keeps reporting the

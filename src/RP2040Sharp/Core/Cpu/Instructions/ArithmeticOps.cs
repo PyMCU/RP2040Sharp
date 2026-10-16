@@ -83,6 +83,7 @@ public static class ArithmeticOps
     {
         var rm = (opcode >> 3) & 0xF;
         var valRm = cpu.Registers[rm];
+        valRm += (uint)((rm + 1) >> 4) << 1;
 
         ref var pc = ref cpu.Registers.PC;
 
@@ -102,6 +103,7 @@ public static class ArithmeticOps
         // explicit stack operations (MSR SP, PUSH, POP) must be word-aligned.
         var rm = (opcode >> 3) & 0xF;
         var valRm = cpu.Registers[rm];
+        valRm += (uint)((rm + 1) >> 4) << 1;
 
         cpu.Registers.SP += valRm;
     }
@@ -114,7 +116,10 @@ public static class ArithmeticOps
 
         ref var ptrDn = ref cpu.Registers[dn];
 
+        // Rm == PC reads as the instruction address + 4 (Registers.PC already holds + 2), e.g.
+        // `add r0, pc` in rustc/LLVM's TBH-style jump tables.
         var valRm = cpu.Registers[rm];
+        valRm += (uint)((rm + 1) >> 4) << 1;
 
         ptrDn += valRm;
     }

@@ -305,16 +305,20 @@ public class RP2040McuContractTests
     [Fact]
     public void Pull_masks_follow_the_pads_registers()
     {
+        const ulong AllGpio = (1UL << 30) - 1;   // GPIO0-29
+
         using var mcu = new RP2040Mcu();
         var bank = GpioBank(mcu);
+        // PADS_BANK0_GPIOn resets to 0x56 (IE, 4 mA, PDE, Schmitt) per the SVD, so every GPIO comes
+        // out of reset pulled down — that is the silicon's state, not a blank one.
         bank.PullUpMask.Should().Be(0);
-        bank.PullDownMask.Should().Be(0);
+        bank.PullDownMask.Should().Be(AllGpio);
 
-        mcu.Machine.PadsBank0.WriteWord(4 + 5 * 4, (1 << 6) | (1 << 3));    // GPIO5: IE + PUE
+        mcu.Machine.PadsBank0.WriteWord(4 + 5 * 4, (1 << 6) | (1 << 3));    // GPIO5: IE + PUE, clears PDE
         mcu.Machine.PadsBank0.WriteWord(4 + 9 * 4, (1 << 6) | (1 << 2));    // GPIO9: IE + PDE
 
         bank.PullUpMask.Should().Be(1UL << 5);
-        bank.PullDownMask.Should().Be(1UL << 9);
+        bank.PullDownMask.Should().Be(AllGpio & ~(1UL << 5));
     }
 
     // ── GPIO: events ─────────────────────────────────────────────────────

@@ -6,6 +6,26 @@ namespace RP2040.Core.Cpu.Instructions;
 
 public static unsafe class MemoryOps
 {
+    /// <summary>True when a <paramref name="bytes"/>-long burst starting at <paramref name="addr"/> lies wholly inside
+    /// SRAM (<paramref name="offset"/> is then its offset into the SRAM array). The multi-register fast paths
+    /// advance a raw pointer from the start address, so a burst that runs off the end of SRAM has to take the
+    /// per-word path, where the first unmapped word faults.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool SramBurst(uint addr, uint bytes, out uint offset)
+    {
+        offset = addr - BusInterconnect.SRAM_START_ADDRESS;
+        return offset <= BusInterconnect.SRAM_SIZE - bytes;
+    }
+
+    /// <summary>
+    /// A load or store that cannot complete takes a precise HardFault (ARMv6-M B1.5.14): an unaligned address
+    /// (A3.2: ARMv6-M always faults, CCR.UNALIGN_TRP is fixed at 1) or one the bus cannot decode (datasheet 2.2: a
+    /// bus error). The stacked return address is the instruction itself; the destination register and any base
+    /// writeback are left untouched because the caller returns without applying them.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Fault(CortexM0Plus cpu) => cpu.TriggerHardFaultAt(cpu.Registers.PC - 2);
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void LdrImmediate(ushort opcode, CortexM0Plus cpu)
     {
@@ -13,7 +33,7 @@ public static unsafe class MemoryOps
         var rn = (opcode >> 3) & 0x7;
         var imm5 = (uint)((opcode >> 6) & 0x1F) << 2;
 
-        cpu.Registers[rt] = ReadWordWithCycles(cpu, cpu.Registers[rn] + imm5);
+        if (TryReadWord(cpu, cpu.Registers[rn] + imm5, out var value)) cpu.Registers[rt] = value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -23,7 +43,7 @@ public static unsafe class MemoryOps
         var imm8 = (uint)(opcode & 0xFF) << 2;
         var nextPc = cpu.Registers.PC + 2;
         var addr = (nextPc & 0xFFFFFFFC) + imm8;
-        cpu.Registers[rt] = ReadWordWithCycles(cpu, addr);
+        if (TryReadWord(cpu, addr, out var value)) cpu.Registers[rt] = value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -32,7 +52,7 @@ public static unsafe class MemoryOps
         var rt = opcode & 0x7;
         var rn = (opcode >> 3) & 0x7;
         var rm = (opcode >> 6) & 0x7;
-        cpu.Registers[rt] = ReadWordWithCycles(cpu, cpu.Registers[rn] + cpu.Registers[rm]);
+        if (TryReadWord(cpu, cpu.Registers[rn] + cpu.Registers[rm], out var value)) cpu.Registers[rt] = value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -40,7 +60,7 @@ public static unsafe class MemoryOps
     {
         var rt = (opcode >> 8) & 0x7;
         var imm8 = (uint)(opcode & 0xFF) << 2;
-        cpu.Registers[rt] = ReadWordWithCycles(cpu, cpu.Registers.SP + imm8);
+        if (TryReadWord(cpu, cpu.Registers.SP + imm8, out var value)) cpu.Registers[rt] = value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -52,9 +72,11 @@ public static unsafe class MemoryOps
         var sp = cpu.Registers.SP;
         var finalSp = sp + (regCount * 4);
 
-        if ((sp >> 28) == BusInterconnect.REGION_SRAM)
+        if ((sp & 3) != 0) { Fault(cpu); return; }
+
+        if (SramBurst(sp, regCount * 4, out var sramOffset))
         {
-            var rawPtr = cpu.Bus.PtrSram + (sp & BusInterconnect.MASK_SRAM);
+            var rawPtr = cpu.Bus.PtrSram + sramOffset;
 
             while (mask != 0)
             {
@@ -70,7 +92,8 @@ public static unsafe class MemoryOps
             while (mask != 0)
             {
                 var regIdx = BitOperations.TrailingZeroCount(mask);
-                cpu.Registers[regIdx] = cpu.Bus.ReadWord(sp);
+                if (!cpu.Bus.TryReadWord(sp, out var word)) { Fault(cpu); return; }
+                cpu.Registers[regIdx] = word;
                 sp += 4;
                 mask &= (mask - 1);
             }
@@ -90,10 +113,12 @@ public static unsafe class MemoryOps
         var sp = cpu.Registers.SP;
         var finalSp = sp + ((regCount + 1) * 4);
 
+        if ((sp & 3) != 0) { Fault(cpu); return; }
+
         uint newPc;
-        if ((sp >> 28) == BusInterconnect.REGION_SRAM)
+        if (SramBurst(sp, (regCount + 1) * 4, out var sramOffset))
         {
-            var rawPtr = cpu.Bus.PtrSram + (sp & BusInterconnect.MASK_SRAM);
+            var rawPtr = cpu.Bus.PtrSram + sramOffset;
 
             while (mask != 0)
             {
@@ -109,11 +134,12 @@ public static unsafe class MemoryOps
             while (mask != 0)
             {
                 var regIdx = BitOperations.TrailingZeroCount(mask);
-                cpu.Registers[regIdx] = cpu.Bus.ReadWord(sp);
+                if (!cpu.Bus.TryReadWord(sp, out var word)) { Fault(cpu); return; }
+                cpu.Registers[regIdx] = word;
                 sp += 4;
                 mask &= (mask - 1);
             }
-            newPc = cpu.Bus.ReadWord(sp);
+            if (!cpu.Bus.TryReadWord(sp, out newPc)) { Fault(cpu); return; }
         }
 
         // SP must reflect the post-pop value before ExceptionReturn unstacks the
@@ -126,10 +152,11 @@ public static unsafe class MemoryOps
         // model) counts the same as a plain PC load.
         cpu.Cycles += 2 + regCount;
 
-        if (newPc >= 0xFFFFFFF0)
-            cpu.ExceptionReturn(newPc);
-        else
+        // LoadWritePC is BXWritePC: EXC_RETURN in Handler mode, T == 0 faults.
+        if ((newPc & 1) != 0 && newPc < 0xFFFFFFF0)
             cpu.Registers.PC = newPc & 0xFFFFFFFE;
+        else
+            cpu.BxWritePc(newPc);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -142,9 +169,11 @@ public static unsafe class MemoryOps
         var oldSp = cpu.Registers.SP;
         var newSp = oldSp - totalBytes;
 
-        if ((newSp >> 28) == BusInterconnect.REGION_SRAM)
+        if ((newSp & 3) != 0) { Fault(cpu); return; }
+
+        if (SramBurst(newSp, totalBytes, out var sramOffset))
         {
-            var rawPtr = cpu.Bus.PtrSram + (newSp & BusInterconnect.MASK_SRAM);
+            var rawPtr = cpu.Bus.PtrSram + sramOffset;
 
             while (mask != 0)
             {
@@ -163,7 +192,7 @@ public static unsafe class MemoryOps
             {
                 var regIdx = BitOperations.TrailingZeroCount(mask);
                 var val = cpu.Registers[regIdx];
-                cpu.Bus.WriteWord(writePtr, val);
+                if (!cpu.Bus.TryWriteWord(writePtr, val)) { Fault(cpu); return; }
 
                 writePtr += 4;
                 mask &= (mask - 1);
@@ -185,9 +214,11 @@ public static unsafe class MemoryOps
         var oldSp = cpu.Registers.SP;
         var newSp = oldSp - totalBytes;
 
-        if ((newSp >> 28) == BusInterconnect.REGION_SRAM)
+        if ((newSp & 3) != 0) { Fault(cpu); return; }
+
+        if (SramBurst(newSp, totalBytes, out var sramOffset))
         {
-            var rawPtr = cpu.Bus.PtrSram + (newSp & BusInterconnect.MASK_SRAM);
+            var rawPtr = cpu.Bus.PtrSram + sramOffset;
 
             while (mask != 0)
             {
@@ -204,11 +235,11 @@ public static unsafe class MemoryOps
             while (mask != 0)
             {
                 var regIdx = BitOperations.TrailingZeroCount(mask);
-                cpu.Bus.WriteWord(writePtr, cpu.Registers[regIdx]);
+                if (!cpu.Bus.TryWriteWord(writePtr, cpu.Registers[regIdx])) { Fault(cpu); return; }
                 writePtr += 4;
                 mask &= (mask - 1);
             }
-            cpu.Bus.WriteWord(writePtr, cpu.Registers.LR);
+            if (!cpu.Bus.TryWriteWord(writePtr, cpu.Registers.LR)) { Fault(cpu); return; }
         }
 
         cpu.Registers.SP = newSp;
@@ -226,12 +257,14 @@ public static unsafe class MemoryOps
         var regCount = (uint)BitOperations.PopCount(mask);
         var baseAddr = cpu.Registers[rn];
 
+        if ((baseAddr & 3) != 0) { Fault(cpu); return; }
+
         var isRnInList = (mask >> rn) & 1;
         var writeBackOffset = (regCount * 4) * (isRnInList ^ 1);
 
-        if ((baseAddr >> 28) == BusInterconnect.REGION_SRAM)
+        if (SramBurst(baseAddr, regCount * 4, out var sramOffset))
         {
-            var ptr = cpu.Bus.PtrSram + (baseAddr & BusInterconnect.MASK_SRAM);
+            var ptr = cpu.Bus.PtrSram + sramOffset;
 
             while (mask != 0)
             {
@@ -248,7 +281,8 @@ public static unsafe class MemoryOps
             while (mask != 0)
             {
                 var regIdx = BitOperations.TrailingZeroCount(mask);
-                cpu.Registers[regIdx] = cpu.Bus.ReadWord(readPtr);
+                if (!cpu.Bus.TryReadWord(readPtr, out var word)) { Fault(cpu); return; }
+                cpu.Registers[regIdx] = word;
 
                 readPtr += 4;
                 mask &= (mask - 1);
@@ -351,7 +385,7 @@ public static unsafe class MemoryOps
         var rt = opcode & 0x7;
         var rn = (opcode >> 3) & 0x7;
         var imm5 = (uint)((opcode >> 6) & 0x1F);
-        cpu.Registers[rt] = ReadByteWithCycles(cpu, cpu.Registers[rn] + imm5);
+        if (TryReadByte(cpu, cpu.Registers[rn] + imm5, out var value)) cpu.Registers[rt] = value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -360,7 +394,7 @@ public static unsafe class MemoryOps
         var rt = opcode & 0x7;
         var rn = (opcode >> 3) & 0x7;
         var rm = (opcode >> 6) & 0x7;
-        cpu.Registers[rt] = ReadByteWithCycles(cpu, cpu.Registers[rn] + cpu.Registers[rm]);
+        if (TryReadByte(cpu, cpu.Registers[rn] + cpu.Registers[rm], out var value)) cpu.Registers[rt] = value;
     }
 
     // ================================================================
@@ -373,7 +407,7 @@ public static unsafe class MemoryOps
         var rt = opcode & 0x7;
         var rn = (opcode >> 3) & 0x7;
         var imm5 = (uint)((opcode >> 6) & 0x1F) << 1;
-        cpu.Registers[rt] = ReadHalfWordWithCycles(cpu, cpu.Registers[rn] + imm5);
+        if (TryReadHalfWord(cpu, cpu.Registers[rn] + imm5, out var value)) cpu.Registers[rt] = value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -382,7 +416,7 @@ public static unsafe class MemoryOps
         var rt = opcode & 0x7;
         var rn = (opcode >> 3) & 0x7;
         var rm = (opcode >> 6) & 0x7;
-        cpu.Registers[rt] = ReadHalfWordWithCycles(cpu, cpu.Registers[rn] + cpu.Registers[rm]);
+        if (TryReadHalfWord(cpu, cpu.Registers[rn] + cpu.Registers[rm], out var value)) cpu.Registers[rt] = value;
     }
 
     // ================================================================
@@ -395,7 +429,7 @@ public static unsafe class MemoryOps
         var rt = opcode & 0x7;
         var rn = (opcode >> 3) & 0x7;
         var rm = (opcode >> 6) & 0x7;
-        cpu.Registers[rt] = (uint)(sbyte)ReadByteWithCycles(cpu, cpu.Registers[rn] + cpu.Registers[rm]);
+        if (TryReadByte(cpu, cpu.Registers[rn] + cpu.Registers[rm], out var value)) cpu.Registers[rt] = (uint)(sbyte)value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -404,7 +438,7 @@ public static unsafe class MemoryOps
         var rt = opcode & 0x7;
         var rn = (opcode >> 3) & 0x7;
         var rm = (opcode >> 6) & 0x7;
-        cpu.Registers[rt] = (uint)(short)ReadHalfWordWithCycles(cpu, cpu.Registers[rn] + cpu.Registers[rm]);
+        if (TryReadHalfWord(cpu, cpu.Registers[rn] + cpu.Registers[rm], out var value)) cpu.Registers[rt] = (uint)(short)value;
     }
 
     // ================================================================
@@ -420,9 +454,11 @@ public static unsafe class MemoryOps
         var regCount = (uint)BitOperations.PopCount(mask);
         var baseAddr = cpu.Registers[rn];
 
-        if ((baseAddr >> 28) == BusInterconnect.REGION_SRAM)
+        if ((baseAddr & 3) != 0) { Fault(cpu); return; }
+
+        if (SramBurst(baseAddr, regCount * 4, out var sramOffset))
         {
-            var ptr = cpu.Bus.PtrSram + (baseAddr & BusInterconnect.MASK_SRAM);
+            var ptr = cpu.Bus.PtrSram + sramOffset;
 
             while (mask != 0)
             {
@@ -439,7 +475,7 @@ public static unsafe class MemoryOps
             while (mask != 0)
             {
                 var regIdx = BitOperations.TrailingZeroCount(mask);
-                cpu.Bus.WriteWord(writePtr, cpu.Registers[regIdx]);
+                if (!cpu.Bus.TryWriteWord(writePtr, cpu.Registers[regIdx])) { Fault(cpu); return; }
 
                 writePtr += 4;
                 mask &= (mask - 1);
@@ -458,45 +494,56 @@ public static unsafe class MemoryOps
 
     // Single-register load/store wait-states: the address-dependent penalty of rp2040js cyclesIO()
     // is added on top of the loop's base cycle, straight-line where the address is already known.
+    // The Try forms also take the precise HardFault of Fault() when the access cannot complete, and then
+    // return false so the caller leaves its destination register alone.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ReadWordWithCycles(CortexM0Plus cpu, uint address)
+    private static bool TryReadWord(CortexM0Plus cpu, uint address, out uint value)
     {
         cpu.Cycles += CortexM0Plus.CyclesIO(address, false);
-        return cpu.Bus.ReadWord(address);
+        if ((address & 3) == 0 && cpu.Bus.TryReadWord(address, out value)) return true;
+        value = 0;
+        Fault(cpu);
+        return false;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ReadByteWithCycles(CortexM0Plus cpu, uint address)
+    private static bool TryReadByte(CortexM0Plus cpu, uint address, out uint value)
     {
         cpu.Cycles += CortexM0Plus.CyclesIO(address, false);
-        return cpu.Bus.ReadByte(address);
+        if (cpu.Bus.TryReadByte(address, out var b)) { value = b; return true; }
+        value = 0;
+        Fault(cpu);
+        return false;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ReadHalfWordWithCycles(CortexM0Plus cpu, uint address)
+    private static bool TryReadHalfWord(CortexM0Plus cpu, uint address, out uint value)
     {
         cpu.Cycles += CortexM0Plus.CyclesIO(address, false);
-        return cpu.Bus.ReadHalfWord(address);
+        if ((address & 1) == 0 && cpu.Bus.TryReadHalfWord(address, out var h)) { value = h; return true; }
+        value = 0;
+        Fault(cpu);
+        return false;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteWordWithCycles(CortexM0Plus cpu, uint address, uint value)
     {
         cpu.Cycles += CortexM0Plus.CyclesIO(address, true);
-        cpu.Bus.WriteWord(address, value);
+        if ((address & 3) != 0 || !cpu.Bus.TryWriteWord(address, value)) Fault(cpu);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteByteWithCycles(CortexM0Plus cpu, uint address, byte value)
     {
         cpu.Cycles += CortexM0Plus.CyclesIO(address, true);
-        cpu.Bus.WriteByte(address, value);
+        if (!cpu.Bus.TryWriteByte(address, value)) Fault(cpu);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteHalfWordWithCycles(CortexM0Plus cpu, uint address, ushort value)
     {
         cpu.Cycles += CortexM0Plus.CyclesIO(address, true);
-        cpu.Bus.WriteHalfWord(address, value);
+        if ((address & 1) != 0 || !cpu.Bus.TryWriteHalfWord(address, value)) Fault(cpu);
     }
 }

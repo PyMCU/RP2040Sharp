@@ -65,6 +65,8 @@ public abstract class ExceptionReturnTests
 
             Cpu.Registers.SP  = StackBase;
             Cpu.Registers[LR] = EXC_RETURN_THREAD_MSP;
+            // ARMv6-M A2.3.1 BXWritePC: an EXC_RETURN value is only honoured in Handler mode.
+            Cpu.Registers.IPSR = 16;
 
             // BX LR — encoding 0x4770.
             Bus.WriteHalfWord(0x20000000, InstructionEmiter.Bx(LR));
@@ -161,6 +163,7 @@ public abstract class ExceptionReturnTests
                 xpsr:  0x01000000u);
 
             Cpu.Registers.SP = stackAtPop;
+            Cpu.Registers.IPSR = 16;   // LoadWritePC honours EXC_RETURN only in Handler mode (A2.3.1)
 
             // POP {pc} — encoding 0xBD00.
             Bus.WriteHalfWord(0x20000000, InstructionEmiter.Pop(true, 0));
@@ -196,6 +199,7 @@ public abstract class ExceptionReturnTests
                 xpsr:  0x01000000u);
 
             Cpu.Registers.SP = stackAtPop;
+            Cpu.Registers.IPSR = 16;   // LoadWritePC honours EXC_RETURN only in Handler mode (A2.3.1)
 
             // POP {r4, pc} — register list bit 4 set, P bit set.
             Bus.WriteHalfWord(0x20000000, InstructionEmiter.Pop(true, 1u << 4));

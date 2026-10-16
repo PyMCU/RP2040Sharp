@@ -28,6 +28,8 @@ public sealed class Sdpcm
     public const int SdpcmHeaderLen = 12;
     public const int IoctlHeaderLen = 16;
     public const int BdcHeaderLen = 4;
+    /// <summary>Where the BDC header sits in a chip-to-host DATA / ASYNCEVENT frame: SDPCM header plus 2 pad bytes.</summary>
+    private const int DataBdcOffset = SdpcmHeaderLen + 2;
 
     private const int ControlHeader = 0;
     private const int AsyncEventHeader = 1;
@@ -484,19 +486,22 @@ public sealed class Sdpcm
     /// Used by the join/link state machine (Fase 5) to deliver WLC_E_* notifications.</summary>
     public void EnqueueAsyncEvent(byte[] bcmEventEthFrame)
     {
-        // For a chip→host packet the receiver reads the BDC header at header_length (=12) and the
-        // payload at bdc + BDC_HEADER_LEN + (data_offset<<2). So the BDC sits immediately after the
-        // 12-byte SDPCM header (no send-side +2 pad), data_offset 0, then the BCM-event Ethernet frame.
-        var size = SdpcmHeaderLen + BdcHeaderLen + bcmEventEthFrame.Length;
+        // For a chip→host packet the receiver reads the BDC header at header_length and the payload at
+        // bdc + BDC_HEADER_LEN + (data_offset<<2). header_length is SDPCM_HEADER_LEN + 2 (the same 2-byte pad
+        // the host puts on its own frames), data_offset 0, then the BCM-event Ethernet frame. The pad matters
+        // beyond looks: it puts the frame at 2 mod 4 in the driver's word-aligned receive buffer, which is what
+        // the driver's header-fixup loop (an STMIA from the frame start minus 2) assumes; with 12 it stores to a
+        // misaligned address, a HardFault on a Cortex-M0+ (ARMv6-M A3.2).
+        var size = DataBdcOffset + BdcHeaderLen + bcmEventEthFrame.Length;
         var buf = new byte[Align4(size)];
         Put16(buf, 0, size);
         Put16(buf, 2, ~size & 0xffff);
         buf[4] = _chipSeq++;
         buf[5] = AsyncEventHeader;
         buf[6] = 0;
-        buf[7] = SdpcmHeaderLen;
+        buf[7] = DataBdcOffset;
         buf[9] = GrantedCredit;
-        var bdc = SdpcmHeaderLen;
+        var bdc = DataBdcOffset;
         buf[bdc + 0] = 0x20;            // flags
         buf[bdc + 3] = 0;               // data_offset (in 4-byte units)
         Array.Copy(bcmEventEthFrame, 0, buf, bdc + BdcHeaderLen, bcmEventEthFrame.Length);
@@ -507,16 +512,16 @@ public sealed class Sdpcm
     /// The virtual network (DHCP/ARP/peer traffic) uses this to deliver frames to the STA/AP netif.</summary>
     public void EnqueueEthernet(int itf, byte[] ethFrame)
     {
-        var size = SdpcmHeaderLen + BdcHeaderLen + ethFrame.Length;
+        var size = DataBdcOffset + BdcHeaderLen + ethFrame.Length;   // header_length is 14, see EnqueueAsyncEvent
         var buf = new byte[Align4(size)];
         Put16(buf, 0, size);
         Put16(buf, 2, ~size & 0xffff);
         buf[4] = _chipSeq++;
         buf[5] = DataHeader;
         buf[6] = 0;
-        buf[7] = SdpcmHeaderLen;
+        buf[7] = DataBdcOffset;
         buf[9] = GrantedCredit;
-        var bdc = SdpcmHeaderLen;
+        var bdc = DataBdcOffset;
         buf[bdc + 0] = 0x20;       // flags
         buf[bdc + 2] = (byte)itf;  // flags2 = interface
         buf[bdc + 3] = 0;          // data_offset (4-byte units)
@@ -524,8 +529,13 @@ public sealed class Sdpcm
         Enqueue(buf);
     }
 
+    // A guest that only writes (never reads) would queue a response per ioctl for ever; the real chip has a
+    // finite buffer pool. Far more than any bring-up or scan leaves unread.
+    private const int MaxQueuedPackets = 1024;
+
     private void Enqueue(byte[] pkt)
     {
+        if (_txq.Count >= MaxQueuedPackets) return;
         _txq.Enqueue(pkt);
         OnPacketReadyChanged?.Invoke(true, NextPacketLen);
     }

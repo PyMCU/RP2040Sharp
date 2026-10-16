@@ -69,6 +69,7 @@ public sealed class UartPeripheral : IMemoryMappedDevice
             _rxFifo.Enqueue(value);
             _ris |= (1u << 4);   // RXRIS — RX interrupt raw
             CheckInterrupts();
+            OnRxAvailable?.Invoke();
         }
     }
 
@@ -83,6 +84,9 @@ public sealed class UartPeripheral : IMemoryMappedDevice
 
     /// <summary>DREQ source for DMA RX: true when RX FIFO has data to read.</summary>
     public bool RxDataAvailable => _rxFifo.Count > 0;
+
+    /// <summary>Raised when a byte lands in the RX FIFO, so a DMA channel stalled on the RX DREQ can re-arm.</summary>
+    public Action? OnRxAvailable;
 
     /// <summary>Read-only snapshot of the UART line configuration for external inspection.</summary>
     public readonly record struct UartConfigSnapshot(

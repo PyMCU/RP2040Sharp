@@ -31,6 +31,7 @@ public sealed class Backplane
     private const byte  AircReset = 0x01;
 
     private readonly Dictionary<uint, byte> _mem = new(4096);
+    private const int MaxStoredBytes = 1 << 20;
 
     /// <summary>True once the host has taken the WLAN-ARM core out of reset (RESETCTRL←0). The
     /// downloaded firmware would now be "running", so the F2 (WLAN data) channel reports ready.</summary>
@@ -72,6 +73,8 @@ public sealed class Backplane
             if (Bt.OwnsRegister(addr)) { Bt.WriteRegByte(addr, value); return; }
             if (addr >= SdioIntStatus && addr < SdioIntStatus + 4) { Bt.ClearSdioInt(value << (int)((addr - SdioIntStatus) * 8)); return; }
         }
+        // Sparse guest-chosen addresses would grow the map without bound; the chip's RAM is far smaller.
+        if (_mem.Count >= MaxStoredBytes && !_mem.ContainsKey(addr)) return;
         _mem[addr] = value;
         // Taking WLAN-ARM out of reset (RESETCTRL bit0 cleared) is the moment the firmware starts;
         // surface it so the bus layer can flip the F2-ready status the bring-up loop waits on.
@@ -83,7 +86,11 @@ public sealed class Backplane
 
     /// <summary>Raw byte access to the chip address space (used by the BT shared bus for its rings).</summary>
     public byte MemReadByte(uint addr) => _mem.TryGetValue(addr, out var v) ? v : (byte)0;
-    public void MemWriteByte(uint addr, byte value) => _mem[addr] = value;
+    public void MemWriteByte(uint addr, byte value)
+    {
+        if (_mem.Count >= MaxStoredBytes && !_mem.ContainsKey(addr)) return;
+        _mem[addr] = value;
+    }
     public uint MemReadU32(uint addr) =>
         (uint)(MemReadByte(addr) | MemReadByte(addr + 1) << 8 | MemReadByte(addr + 2) << 16 | MemReadByte(addr + 3) << 24);
     public void MemWriteU32(uint addr, uint v)

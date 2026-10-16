@@ -34,12 +34,11 @@ public sealed class WatchdogPeripheral : IMemoryMappedDevice, ITickable
     private const uint TICK_RUNNING = 1u << 10;
     private const uint TICK_ENABLE  = 1u << 9;
 
-    // Per RP2040-E1 errata: the watchdog timer decrements at 2 MHz (twice per expected tick).
-    // 125 MHz / 2 MHz = 62.5 cycles per decrement tick → use 62 (slight fast-side bias is safe).
-    // Note: simulation keeps the logical rate at 1 tick = 1 µs (125 CPU cycles) so that firmware
-    // load values map intuitively to microseconds. The errata doubles the real-hardware rate but
-    // pico-sdk compensates internally; MicroPython integration tests validate end-to-end timing.
-    private const long CYCLES_PER_WDOG_TICK = 125;
+    // Per RP2040-E1 errata the watchdog counter decrements TWICE per 1 MHz tick (hence pico-sdk loading
+    // delay_ms * 2000, WATCHDOG_XFACTOR = 2). At 125 MHz that is one decrement per 62.5 cycles. (The model used
+    // to decrement once per microsecond "so load values map intuitively to microseconds"; the SDK already
+    // compensates for the errata, so that made every watchdog take twice as long as requested.)
+    private const long HALF_CYCLES_PER_WDOG_TICK = 125;   // _accumUs counts half-cycles: 2 per CPU cycle
 
     private uint _ctrl;
     private uint _load;
@@ -47,7 +46,7 @@ public sealed class WatchdogPeripheral : IMemoryMappedDevice, ITickable
     private uint _tick = TICK_ENABLE | TICK_RUNNING | 12;  // enabled, running, 12 cycles (default)
     private readonly uint[] _scratch = new uint[8];
 
-    private long _accumUs;   // accumulated sub-microsecond cycles
+    private long _accumUs;   // accumulated sub-decrement time, in half CPU cycles
     private uint _countDown; // current countdown in µs×2 (mirrors CTRL[23:0])
 
     /// <summary>Invoked when the watchdog timer expires. Simulate a system reset here.</summary>
@@ -136,9 +135,9 @@ public sealed class WatchdogPeripheral : IMemoryMappedDevice, ITickable
         if ((_ctrl & CTRL_ENABLE) == 0) return;
         if (_countDown == 0) return;
 
-        _accumUs += deltaCycles;
-        var ticks = _accumUs / CYCLES_PER_WDOG_TICK; // decrement ticks at 2 MHz per RP2040-E1
-        _accumUs %= CYCLES_PER_WDOG_TICK;
+        _accumUs += deltaCycles * 2;
+        var ticks = _accumUs / HALF_CYCLES_PER_WDOG_TICK;   // decrement ticks at 2 MHz per RP2040-E1
+        _accumUs %= HALF_CYCLES_PER_WDOG_TICK;
 
         if (ticks <= 0) return;
 

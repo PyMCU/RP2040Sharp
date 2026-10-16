@@ -27,6 +27,129 @@ the Silicon Twin emulators, so a host drives an RP2040 and an AVR the same way.
 - Core additions: `IoBank0Peripheral.PadsChanged`, `GetPadOutputState`, `ReleaseExternalInput`,
   `SioPeripheral.ReleaseGpioExternal` (a pad driven from outside can now be given back to its
   pull), and `UartPeripheral.TryInjectByte`.
+### Fixed: spec audit findings (F-xx) against the RP2040 datasheet, the SVD and ARMv6-M
+
+Each item names the audit finding it closes. Behaviour the audit listed as open is not changed here.
+
+- **CPU (ARMv6-M).** `BX`, `BLX` and `POP {PC}` to an even address raise a HardFault instead of clearing bit 0 (F-05).
+  `EXC_RETURN` values are honoured only in Handler mode, so `BX LR` in Thread mode no longer unstacks (F-20).
+  Unaligned LDR/STR/LDRH/STRH/LDM/STM/PUSH/POP raise a HardFault (F-06). A synchronous fault (UNDEFINED, BKPT)
+  stacks the address of the faulting instruction, not the next one (F-08). An SVC that cannot be taken escalates
+  to HardFault (F-09).
+- **Decoder.** `YIELD` (`BF10`) is a hint, not `CBNZ` (F-03). `CBZ`, `CBNZ`, `CLZ` and `UDF.W` are undefined, as
+  they are in ARMv6-M (F-04). Barriers reject second halfwords other than DSB/DMB/ISB (not an audit finding).
+- **Bus.** Reads and writes to unmapped addresses raise a bus error (HardFault) instead of reading 0 and dropping
+  the write (F-07). Narrow writes to IO registers are replicated across the bus, as the datasheet describes (F-19).
+- **Bootrom.** With bootrom B2, the flash erase and program hooks sit at the B2 table entries, so the stack is no
+  longer unbalanced after a call (F-16).
+- **SysTick and SCB.** Reading `SYST_CSR` clears COUNTFLAG (F-02). CLKSOURCE selects the 1 us reference tick or the
+  core clock (F-23). Writing CVR clears the counter and COUNTFLAG, and RVR is used as written, including 0 (F-24).
+  `AIRCR.SYSRESETREQ` resets the core that wrote it, and ICSR reports VECTPENDING and ISRPENDING (F-25). SCR, CCR,
+  SHCSR and the MPU registers are stored (F-17, partial: the MPU does not check accesses).
+- **Timer and RTC.** TIMELW is applied when TIMEHW is written, so the 64-bit time can be set (F-10, partial: `PAUSE`
+  is still missing). The RTC uses the SVD register layout for the date, the alarm and the interrupt registers (F-14).
+- **PIO.** `DBG_CFGINFO` reports the SVD layout (F-15). The state machine reset values are CLKDIV 1.0, a right shift
+  for IN and OUT, and SET_COUNT 5 (F-37).
+- **GPIO and SIO.** The IO_BANK0 overrides (OUTOVER, OEOVER, INOVER, IRQOVER) take effect (F-38). Edge IRQs fire on
+  pads driven by SIO (F-18). PROC1 has its own INTE/INTF/INTS and drives core 1's IRQ (F-39). Pads reset to 0x56,
+  and IE and OD take effect (F-40). GPIO_OUT and GPIO_OE are 30 bits wide (F-41).
+- **Deferred.** The DMA findings F-11, F-12, F-13, F-33, F-34, F-35 and F-36 are not in this change. Applying
+  them made arduino-pico I2S and ADC streaming produce less output, and one I2S example hard-faulted, so they are
+  tracked in the README roadmap until that regression is understood.
+
+### Fixed: bugs found by running arduino-pico 6.3.0 firmware (examples, API sketches and ~3,400 randomised runs)
+
+Each fix has a regression test under `tests/RP2040Sharp.Tests/Regression/` that fails without it (R08 is covered by the
+watchdog sketch only).
+
+- **NVIC lines 26-31 (R01).** The SDK's user IRQs never fired; arduino-pico runs its USB task on one, so the tail of USB
+  output stalled.
+- **SIO divider and interpolators are per core (R10)**, as on silicon: two cores dividing at once got each other's results.
+- **DMA.** A write into a PIO TX FIFO no longer re-enters the same channel mid-transfer (R02: duplicated words, lost first RX
+  word); DMA paced by UART, SPI, I2C or ADC DREQs resumes when the FIFO refills, and the I2C DREQs 32-35 are registered (R03).
+- **ADC (R04).** The ADC is ticked, so `adc_run`, the FIFO and DMA produce data, and the sample period is `1 + DIV` ADC clocks
+  instead of 96x that.
+- **Watchdog.** A watchdog reset or `watchdog_reboot` now resets the chip (R07) and the USB CDC host re-enumerates after it
+  (R08); the counter runs at the rate the SDK expects for erratum RP2040-E1 (R09: timeouts took twice as long).
+- **PIO.** Changing FJOIN_TX/FJOIN_RX flushes both FIFOs (R05); side-set applies on the instruction's first cycle even when it
+  stalls (R06: the `uart_tx` idle line was low); `SM_RESTART` clears the delay counter (R11).
+
+
+### Fixed: high-register `ADD` read PC as the instruction address + 2 instead of + 4
+
+ARMv6-M §A6.7.3 defines the value read from R15 by a high-register data-processing instruction as
+the instruction address plus 4 (no alignment — that is the ADR form). The `ADD` high-register forms
+(`ADD Rdn, PC`, `ADD SP, PC`, `ADD PC, PC`) read `Registers[15]` raw, which during dispatch holds
+`insn + 2`, so every GCC/binutils PIC idiom (`ldr rN, [pc, #off]` + `add rN, pc`) and rustc/LLVM's
+halfword jump tables landed 2 bytes short — e.g. MicroPython native modules computed a wrong GOT base
+and branched wild. `MOV`/`CMP` high-register forms already compensated; `ADD` now matches them, and
+tests pin the PC read of all three (including an instruction at a halfword-aligned address).
+
+### Fixed: garbage firmware could crash or corrupt the embedding host instead of faulting the emulated CPU
+
+The core is embedded in third-party apps (iCircuit), so a corrupt, truncated, random or merely buggy
+image must end in a HardFault or a lockup of the *emulated* core — never an exception out of `Run`, and
+never a read or write outside the emulator's native buffers. Fuzzing random images with hostile
+PC/SP/VTOR/registers, plus register pokes at every peripheral window, found these ways to break that:
+
+- **Null fetch pointer.** The fetch loop re-validates its cached window only when the PC's region
+  *changes*. A fetch from a region with no backing store (APB/AHB, SIO, PPB, unmapped) correctly raised
+  HardFault, but left the cache on that same region with a null pointer, so a HardFault handler — or a
+  reset vector — in that region matched the cache and read through null (`NullReferenceException` /
+  `AccessViolationException`). An unfetchable region now poisons the cached region id, so every fetch
+  there faults again and a handler that cannot be fetched ends in lockup. The hot path is unchanged.
+- **Tail spill.** The bus masks an address into a buffer and then reads or writes a whole
+  halfword/word, so an unaligned access at the last 1-3 bytes of SRAM, flash or boot ROM touched bytes
+  past the allocation. Every backing store now carries a 16-byte tail pad (`RandomAccessMemory.TailPad`).
+- **Burst overrun.** The Thumb `PUSH`/`POP`/`STMIA`/`LDMIA` SRAM fast paths masked only the start
+  address and advanced a raw pointer, so SP or a base near the top of SRAM overran the buffer by up to
+  36 bytes (a host heap *write*). A burst that does not fit takes the existing per-word path, which wraps
+  each access like the scalar loads and stores.
+- **Bootrom flash hooks.** `flash_range_erase` / `flash_range_program` checked `offset + count` in
+  `int`, so a count near 2^31 wrapped past the bounds check and filled or copied up to 2 GB from inside
+  the flash buffer. The check is now done in `long`.
+- **SSI erase.** A sector/block erase whose 24-bit address lay beyond the end of the flash made
+  `end - start` wrap to ~4 GB for `InitBlock`. An erase starting past the flash is now ignored.
+- **DMA `CHAIN_TO`.** The field is 4 bits wide but there are 12 channels, so `CHAIN_TO` 12-15 threw
+  `IndexOutOfRangeException` when the transfer completed. Transfers also chain recursively, so two
+  enabled channels chaining to each other overflowed the host stack (uncatchable). Chaining to a
+  nonexistent channel is ignored, and a chain is cut after one lap of the channels.
+- **USB DPRAM.** An endpoint's `BUFFER_ADDRESS` (up to 0xFFC0) plus `LENGTH` (up to 1023) can lie
+  outside the 4 KB DPRAM; the copy threw `ArgumentOutOfRangeException`. It is now clamped to the DPRAM.
+
+A second, line-by-line pass over every peripheral and the CYW43439 model (PIO, DMA, SSI, USB, SIO,
+interpolators, timer/alarms, RTC, watchdog, ADC, PWM, UART/SPI/I2C, clocks, bridges, gSPI/SDPCM/HCI/virtual
+network) found more:
+
+- **PIO `OUT EXEC` / `MOV EXEC` recursion.** The word they execute is data, and that word can itself be a
+  `MOV EXEC` (`X` holding the encoding of `mov exec, x`): the instruction re-ran itself from inside itself
+  until the host stack overflowed (uncatchable). EXEC now nests at most 8 deep; deeper is a no-op.
+- **PIO `WAIT` cleared IRQ flags.** A 1.1.0 edit dropped the braces around `if (WAIT IRQ, polarity 1) {
+  Mutated(); _irq &= ~flag; }`, so *every* `WAIT` (GPIO, PIN, a stalled one, polarity 0) cleared IRQ flag
+  `index & 7`. Only a successful `WAIT 1 IRQ` clears the flag it waited on again.
+- **DMA re-entrancy.** A channel whose `WRITE_ADDR` is its own trigger register (or `MULTI_CHAN_TRIGGER`)
+  re-entered `ExecuteChannel` on every beat and overflowed the host stack. The chain limit is now a single
+  nesting limit (one level per channel) covering chains and beats that trigger channels.
+- **DMA huge transfers.** A transfer runs inside the write that triggers it, and `TRANS_COUNT` is 32 bits:
+  `0xFFFFFFFF` beats was minutes inside one bus access. One call now moves at most 2^20 beats (more than
+  the SRAM holds); the rest stays `BUSY` and the next `Tick` moves the next slice, so the host keeps
+  getting control back and real transfers (never that large) are not split.
+- **Unbounded guest-driven buffers (host memory).** SSI TX/RX buffers and RX frame (a loop writing `DR0`
+  forever), USB IN completions queued between ticks, the CYW43439 chip-to-host packet queue, backplane
+  storage (sparse writes), the gSPI host-byte buffer (CS held, CLK toggling), and the virtual network's
+  MAC / connection / lease tables and per-connection buffers all grew with guest traffic. Each now has a
+  ceiling far above any legitimate use (e.g. 1024 queued packets, 1M backplane bytes, 1024 learned MACs).
+- **Virtual network parsing.** A DHCP option 53 in the last two bytes of a frame, and a TCP segment whose
+  IP total-length field exceeded the frame, indexed past the frame (`IndexOutOfRangeException` out of the
+  guest's own bus write). Lengths are now clamped to the bytes actually received.
+
+Adds `GarbageFirmwareTests`: a reproducer per bug, and deterministic fuzz (200 seeds on a bare core, on
+the full two-core machine, and as raw MMIO pokes; every 16-bit opcode against hostile registers) that
+runs in well under a second. `PioGarbageTests` (random programs, state-machine configuration and FIFO
+traffic) and `WirelessGarbageTests` (SDPCM / Ethernet / DHCP / DNS / TCP / gSPI / HCI noise) do the same
+for the PIO and the radio. `GARBAGE_FUZZ_SEEDS` / `GARBAGE_FUZZ_SCALE`, `PIO_FUZZ_SEEDS` and
+`WIRELESS_FUZZ_SEEDS` widen any of them for a one-off hunt. The raw-MMIO fuzz still leaves the DMA window
+out: a random 32-bit `TRANS_COUNT` is now a slice per `Run`, but each slice is still tens of milliseconds.
 
 ### Renamed: the TestKits are now `SiliconTwin.*`
 

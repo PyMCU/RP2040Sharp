@@ -66,6 +66,9 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
     /// <summary>DREQ source for DMA RX: true when RX FIFO has data to read.</summary>
     public bool RxDataAvailable => _rxFifo.Count > 0;
 
+    /// <summary>Raised when a word lands in the RX FIFO, so a DMA channel stalled on the RX DREQ can re-arm.</summary>
+    public Action? OnRxAvailable;
+
     /// <summary>Read-only snapshot of the SPI (PL022) configuration for external inspection.</summary>
     public readonly record struct SpiConfigSnapshot(
         bool Enabled, uint Cpsdvsr, int Scr, int DataBits, int Format, bool Cpol, bool Cpha, bool Loopback);
@@ -188,6 +191,7 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
         _ris |= 0x4;  // RXRIS — RX not empty
         _ris |= 0x8;  // TXRIS — TX FIFO ≤ half full (always true after immediate transfer)
         CheckInterrupts();
+        OnRxAvailable?.Invoke();
     }
 
     private uint ReadData()
@@ -223,6 +227,9 @@ public sealed class SpiPeripheral : IMemoryMappedDevice
     public void InjectByte(byte value)
     {
         if (_rxFifo.Count < FIFO_DEPTH)
+        {
             _rxFifo.Enqueue(value);
+            OnRxAvailable?.Invoke();
+        }
     }
 }

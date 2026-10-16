@@ -212,6 +212,59 @@ public abstract class ArithmeticOpsTests
             }
 
             [Fact]
+            public void Should_ReadProgramCounterAsInstructionAddressPlusFour_When_RmIsPc()
+            {
+                // Arrange: `add r0, pc` — the base of rustc/LLVM's halfword jump tables
+                // (`lsls r0, #1; add r0, pc; ldrh r0, [r0, #4]; lsls r0, #1; add pc, r0`).
+                var opcode = InstructionEmiter.AddHighRegisters(R0, PC);
+                Bus.WriteHalfWord(0x20000000, opcode);
+
+                Cpu.Registers[R0] = 0x10;
+
+                // Act
+                Cpu.Step();
+
+                // Assert
+                Cpu.Registers[R0].Should().Be(0x20000014);
+            }
+
+            [Fact]
+            public void Should_ReadPcAsInstructionPlus4_When_SourceIsPc()
+            {
+                // ARMv6-M §A6.7.3 ADD (register): a source read of R15 yields the
+                // address of the instruction plus 4 — no alignment, unlike ADR.
+                // Arrange
+                var opcode = InstructionEmiter.AddHighRegisters(R6, PC);
+                Bus.WriteHalfWord(0x20000000, opcode);
+
+                Cpu.Registers[R6] = 0;
+
+                // Act
+                Cpu.Step();
+
+                // Assert
+                Cpu.Registers[R6].Should().Be(0x20000004);
+            }
+
+            [Fact]
+            public void Should_ReadPcAsInstructionPlus4_When_SourceIsPc_AtHalfwordAlignedAddress()
+            {
+                // Same read at an address that is 2 mod 4: still insn + 4, never aligned down.
+                // Arrange
+                var opcode = InstructionEmiter.AddHighRegisters(R6, PC);
+                Bus.WriteHalfWord(0x20000002, opcode);
+
+                Cpu.Registers.PC = 0x20000002;
+                Cpu.Registers[R6] = 0;
+
+                // Act
+                Cpu.Step();
+
+                // Assert
+                Cpu.Registers[R6].Should().Be(0x20000006);
+            }
+
+            [Fact]
             public void Should_PreserveFlags_When_UsingEncodingT2_WithLowRegisters()
             {
                 // Arrange
@@ -604,6 +657,39 @@ public abstract class ArithmeticOpsTests
                 Cpu.Registers.Z.Should().BeFalse();
                 Cpu.Registers.C.Should().BeFalse();
                 Cpu.Registers.V.Should().BeTrue();
+            }
+
+            [Fact]
+            public void Should_ReadPcAsInstructionPlus4_When_ComparingAgainstPc()
+            {
+                // Arrange
+                var opcode = InstructionEmiter.CmpHighRegister(R6, PC);
+                Bus.WriteHalfWord(0x20000000, opcode);
+
+                Cpu.Registers[R6] = 0x20000004;
+
+                // Act
+                Cpu.Step();
+
+                // Assert
+                Cpu.Registers.Z.Should().BeTrue();
+            }
+
+            [Fact]
+            public void Should_ReadPcAsInstructionPlus4_When_ComparingAgainstPc_AtHalfwordAlignedAddress()
+            {
+                // Arrange
+                var opcode = InstructionEmiter.CmpHighRegister(R6, PC);
+                Bus.WriteHalfWord(0x20000002, opcode);
+
+                Cpu.Registers.PC = 0x20000002;
+                Cpu.Registers[R6] = 0x20000006;
+
+                // Act
+                Cpu.Step();
+
+                // Assert
+                Cpu.Registers.Z.Should().BeTrue();
             }
         }
     }

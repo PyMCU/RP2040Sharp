@@ -50,8 +50,8 @@ public struct Registers
 
     // --- Interrupt / Exception State ---
     public uint VTOR;                 // Vector Table Offset Register
-    public uint PendingInterrupts;    // Bitmap of 26 hardware IRQs pending
-    public uint EnabledInterrupts;    // Bitmap of 26 hardware IRQs enabled
+    public uint PendingInterrupts;    // Bitmap of the 32 NVIC lines pending (0-25 peripherals, 26-31 software/user IRQs)
+    public uint EnabledInterrupts;    // Bitmap of the 32 NVIC lines enabled
     public uint InterruptPriorities0; // Priority bucket 0 (highest)
     public uint InterruptPriorities1;
     public uint InterruptPriorities2;
@@ -65,6 +65,7 @@ public struct Registers
     public bool InterruptsUpdated;    // Signal Run() to call CheckForInterrupts
     public bool EventRegistered;      // SEV/WFE event flag
     public bool Waiting;              // WFI/WFE sleep state
+    public uint SCR;                  // SCB.SCR: SLEEPONEXIT (bit 1), SLEEPDEEP (bit 2), SEVONPEND (bit 4)
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public byte GetC() => Unsafe.As<bool, byte>(ref C);

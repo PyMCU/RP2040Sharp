@@ -37,7 +37,10 @@ public sealed class VirtualSwitch
     private void Forward(Port from, byte[] frame)
     {
         if (frame.Length < 14) return;
-        _macToPort[MacKey(frame, 6)] = from;                 // learn source MAC → port
+        var srcKey = MacKey(frame, 6);
+        // The source MAC is the guest's to choose: stop learning past a switch-sized table.
+        if (_macToPort.Count < 1024 || _macToPort.ContainsKey(srcKey))
+            _macToPort[srcKey] = from;                       // learn source MAC → port
         OnFrame?.Invoke(from.Itf, (ushort)(frame[12] << 8 | frame[13]), frame.Length);
 
         var broadcastOrMulticast = (frame[0] & 1) != 0;

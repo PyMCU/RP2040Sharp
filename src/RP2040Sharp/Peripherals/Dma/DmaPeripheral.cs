@@ -8,7 +8,7 @@ namespace RP2040.Peripherals.Dma;
 /// 12 DMA channels. Transfers execute synchronously when CTRL_TRIG is written
 /// with EN=1, making simulation deterministic.
 /// </summary>
-public sealed class DmaPeripheral : IMemoryMappedDevice
+public sealed class DmaPeripheral : IMemoryMappedDevice, ITickable
 {
     private const int CHANNEL_COUNT = 12;
     private const uint CHANNEL_SIZE  = 0x40;  // 64 bytes per channel
@@ -322,8 +322,48 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
         }
     }
 
+    // Nesting of ExecuteChannel: a chain completing into the next channel, or a beat that writes another
+    // channel's trigger register (the classic control-block reload). A channel whose WRITE_ADDR points at
+    // its own trigger re-enters on every beat — host stack overflow — so cap it at one level per channel.
+    private int _execDepth;
+
+    // True while a channel is inside its beat loop. Writing a PIO FIFO during that loop can synchronously
+    // wake a stalled state machine, which fires ResumeDreq -> ExecuteChannel for the SAME channel again,
+    // mid-run, while TRANS_COUNT / READ_ADDR / WRITE_ADDR still hold their pre-beat values: the nested run
+    // repeats the beat (duplicate words), and the outer run then overwrites the nested run's progress with
+    // its stale locals. The in-flight run owns the transfer and re-evaluates DREQ on every beat, so the
+    // restart is simply refused. (Chain triggers happen after the loop, when this is already clear.)
+    private readonly bool[] _executing = new bool[CHANNEL_COUNT];
+
+    // A transfer runs synchronously inside the write that triggers it, and TRANS_COUNT is 32 bits wide: a
+    // garbage count (0xFFFFFFFF) was minutes of host time inside one bus write. One call moves at most
+    // this many beats (more than SRAM holds, so no real transfer is split); the rest stays BUSY and is
+    // finished by the next <see cref="Tick"/>, a slice per Run, so the host keeps getting control back.
+    private const uint MaxBeatsPerRun = 1u << 20;
+    private uint _budgetPaused;   // bit N = channel N stopped on the beat budget, not on its DREQ
+
+    public void Tick(long deltaCycles)
+    {
+        if (_budgetPaused == 0) return;
+        var paused = _budgetPaused;
+        _budgetPaused = 0;
+        for (var ch = 0; ch < CHANNEL_COUNT; ch++)
+            if ((paused & (1u << ch)) != 0 && (_ctrl[ch] & CTRL_BUSY) != 0 && _transCount[ch] != 0)
+                ExecuteChannel(ch);
+    }
+
     private void ExecuteChannel(int ch)
     {
+        if (_execDepth >= CHANNEL_COUNT) return;
+        if (_executing[ch]) return;
+        _execDepth++;
+        try { RunChannel(ch); }
+        finally { _execDepth--; }
+    }
+
+    private void RunChannel(int ch)
+    {
+        _budgetPaused &= ~(1u << ch);
         _ctrl[ch] |= CTRL_BUSY;
 
         var dataSize  = (int)((_ctrl[ch] & CTRL_DATA_SIZE) >> 2);  // 0=byte, 1=half, 2=word
@@ -345,11 +385,14 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
         var ringMask = ringSize > 0 ? (1u << ringSize) - 1 : 0u;
 
         var beatsExecuted = 0u;
+        _executing[ch] = true;
+        try {
         for (var i = 0u; i < count; i++)
         {
             // Check DREQ: if source is registered and says not ready, stop
             if (dreqSource != null && !dreqSource())
                 break;
+            if (i == MaxBeatsPerRun) { _budgetPaused |= 1u << ch; break; }
 
             uint data = dataSize switch
             {
@@ -390,6 +433,7 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
             }
             beatsExecuted++;
         }
+        } finally { _executing[ch] = false; }
 
         _readAddr[ch]   = rAddr;
         _writeAddr[ch]  = wAddr;
@@ -411,8 +455,12 @@ public sealed class DmaPeripheral : IMemoryMappedDevice
                 _cpu.SetInterrupt(12, true);
 
             // Chain to another channel if configured
+            // CHAIN_TO is 4 bits wide but only 12 channels exist: 12-15 chain to nothing (indexing the
+            // arrays with them threw out of Run). Transfers are synchronous, so a ring of enabled channels
+            // (A -> B -> A, each completing with nothing to move) would recurse until the host stack
+            // overflowed; no legitimate chain is longer than the channel count, so stop there.
             var chainTo = (int)((_ctrl[ch] & CTRL_CHAIN_TO) >> 11);
-            if (chainTo != ch && (_ctrl[chainTo] & CTRL_EN) != 0)
+            if (chainTo != ch && chainTo < CHANNEL_COUNT && (_ctrl[chainTo] & CTRL_EN) != 0)
                 ExecuteChannel(chainTo);
         }
     }
