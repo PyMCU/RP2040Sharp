@@ -188,4 +188,29 @@ public abstract class I2cTests
             i2c.ReadWord(IC_TX_ABRT_SOURCE).Should().Be(0);
         }
     }
+
+    /// <summary>
+    /// Regression for the sub-word write path: IC_DATA_CMD is a FIFO whose read pops the RX side, so a
+    /// read-modify-write would swallow a received byte on every 16-bit DMA beat.
+    /// </summary>
+    public class SubWordDataCmdWrites
+    {
+        private const uint IC_RXFLR = 0x078;
+        private const uint CMD_READ = 1u << 8;
+
+        [Fact]
+        public void Half_word_write_to_IC_DATA_CMD_does_not_consume_a_received_byte()
+        {
+            var i2c = new I2cPeripheral { OnRead = _ => 0x5A };   // a device answers at the target address
+            i2c.WriteWord(IC_ENABLE, 1);
+            i2c.InjectByte(0xA5);
+
+            // A DMA-driven master read issues 16-bit beats, because the CMD/RESTART/STOP bits live
+            // above bit 7.
+            i2c.WriteHalfWord(IC_DATA_CMD, (ushort)CMD_READ);
+
+            i2c.ReadWord(IC_RXFLR).Should().Be(2, "the injected byte is still queued behind the one the read command fetched");
+            i2c.ReadWord(IC_DATA_CMD).Should().Be(0xA5, "the injected byte survives the sub-word write");
+        }
+    }
 }
