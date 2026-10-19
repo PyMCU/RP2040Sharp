@@ -49,8 +49,17 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
     private int _flashLength;
     private Func<int, double>? _readChannelVolts;
 
-    /// <summary>Creates an adapter over a new <see cref="RP2040Machine"/> that it disposes with itself.</summary>
-    public RP2040Mcu() : this(new RP2040Machine(), ownsMachine: true) { }
+    /// <summary>
+    /// Creates an adapter over a new <see cref="RP2040Machine"/> that it disposes with itself, with deferred peripheral
+    /// ticks on (<see cref="RP2040Machine.DeferPeripheralTicks"/>: the same results as ticking every peripheral after
+    /// every slice, faster).
+    /// </summary>
+    public RP2040Mcu() : this(new RP2040McuOptions()) { }
+
+    /// <summary>Creates an adapter over a new machine built from <paramref name="options"/>, disposed with the adapter.</summary>
+    public RP2040Mcu(RP2040McuOptions options)
+        : this(new RP2040Machine(options.FlashSizeBytes, options.Bootrom, options.PinLevelBuses)
+               { DeferPeripheralTicks = options.DeferPeripheralTicks }, ownsMachine: true) { }
 
     /// <summary>Creates an adapter over an existing machine, which the caller keeps owning.</summary>
     /// <param name="machine">The machine to drive.</param>
@@ -101,7 +110,13 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
     /// Returns the wall-clock cycles that elapsed. With Core 1 running that is the longer of the two cores,
     /// while <see cref="Cycles"/> follows Core 0 alone, so the two can differ by the cores' skew.
     /// </remarks>
-    public long Run(long cycleBudget) => _machine.RunCycles(cycleBudget, MaxSliceInstructions);
+    public long Run(long cycleBudget)
+    {
+        var used = _machine.RunCycles(cycleBudget, MaxSliceInstructions);
+        // Leave nothing owed: whatever the host reads or drives next sees the peripherals at the end of the run.
+        if (used > 0 && _machine.DeferPeripheralTicks) _machine.SyncPeripherals();
+        return used;
+    }
 
     /// <inheritdoc />
     public long RunUntil(long absoluteCycle)
@@ -327,6 +342,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             get
             {
+                if (_m.DeferPeripheralTicks) _m.SyncPeripherals();
                 _m.IoBank0.GetPadOutputState(out var oe, out _);
                 return oe;
             }
@@ -336,6 +352,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             get
             {
+                if (_m.DeferPeripheralTicks) _m.SyncPeripherals();
                 _m.IoBank0.GetPadOutputState(out var oe, out var levels);
                 return levels & oe;
             }
@@ -347,16 +364,29 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
 
         public void SetInputs(ulong mask, ulong levels)
         {
+            var io = _m.IoBank0;
             var bits = (uint)mask & AllPins;
+            // A circuit solver re-applies the same levels many times per step: pads already held at them change nothing.
+            bits &= ~io.ExternalHeldMask | (io.ExternalLevels ^ (uint)levels);
+            if (bits == 0) return;
+            // The cycles already run belong to the old level (see RP2040Machine.SyncForHostInput).
+            _m.SyncForHostInput();
             while (bits != 0)
             {
                 var pin = System.Numerics.BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
-                _m.IoBank0.SetExternalInput(pin, ((levels >> pin) & 1UL) != 0);
+                io.SetExternalInput(pin, ((levels >> pin) & 1UL) != 0);
             }
         }
 
-        public void ReleaseInputs(ulong mask) => _m.IoBank0.ReleaseExternalInput((uint)mask & AllPins);
+        public void ReleaseInputs(ulong mask)
+        {
+            var io = _m.IoBank0;
+            var bits = (uint)mask & AllPins & io.ExternalHeldMask;
+            if (bits == 0) return;
+            _m.SyncForHostInput();
+            io.ReleaseExternalInput(bits);
+        }
 
         public event PinChangeHandler PinChanged
         {
@@ -388,6 +418,8 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             if (_armed) return;
             _armed = true;
+            // PWM pads follow the counter: have their edges reported, at the cycle of the step that made each.
+            _m.ExactPwmPadEdges = true;
             Snapshot();
             _m.IoBank0.PadsChanged += _padsHook;
             // SIO writes do not reach IO_BANK0 on their own; the hook forwards just the watched pads
@@ -399,6 +431,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             if (!_armed) return;
             _armed = false;
+            _m.ExactPwmPadEdges = false;
             _m.IoBank0.PadsChanged -= _padsHook;
             _m.Sio.OnGpioChanged -= _sioHook;
         }
@@ -432,7 +465,11 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
             moved &= (uint)_watchMask;
             if (moved == 0) return;
 
-            var change = new PinChange(moved, oe, levels, _owner.Cycles);
+            // The cycle of the change itself: a pin-level engine's or a PWM counter step's own edge cycle, else the
+            // instruction in flight (core 1's mapped onto core 0's clock) or, from a sweep, the end of the slice.
+            var io = _m.IoBank0;
+            var cycle = io.FunctionDriving ? io.LastPadEdgeCycle : _m.EngineClock();
+            var change = new PinChange(moved, oe, levels, _owner._cycleBase + cycle);
             handler(in change);
         }
     }
@@ -609,4 +646,21 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
 
         public void MasterStop() => i2c.SimulateStop();
     }
+}
+
+/// <summary>How <see cref="RP2040Mcu(RP2040McuOptions)"/> builds its machine.</summary>
+public sealed record RP2040McuOptions
+{
+    /// <summary>Flash size in bytes (2 MiB, as on a Pico).</summary>
+    public uint FlashSizeBytes { get; init; } = 2 * 1024 * 1024;
+
+    /// <summary>Bootrom revision.</summary>
+    public RP2040BootromRevision Bootrom { get; init; } = RP2040BootromRevision.B1;
+
+    /// <summary>Serial blocks that drive and sample the pads themselves (docs/pin-level-buses.md). None by default.</summary>
+    public PinLevel.PinLevelBus PinLevelBuses { get; init; } = PinLevel.PinLevelBus.None;
+
+    /// <summary>Deferred peripheral ticks (<see cref="RP2040Machine.DeferPeripheralTicks"/>): on by default; off ticks every
+    /// peripheral after every slice, the reference the deferred machine is checked against.</summary>
+    public bool DeferPeripheralTicks { get; init; } = true;
 }

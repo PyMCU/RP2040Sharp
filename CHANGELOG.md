@@ -35,6 +35,21 @@ SRAM, peripheral registers, call returns). See [docs/peripheral-deadlines.md](do
 - Fixed: `RoscPeripheral.RANDOMBIT` was a process-wide counter, so pico_rand's seed (and with it
   the Pico W WLAN bring-up) depended on every other machine in the process.
 
+### Changed: `RP2040Mcu` (the SiliconTwin.Abstractions adapter) for fixed-step hosts
+
+- `new RP2040Mcu()` turns deferred peripheral ticks on; `RP2040McuOptions` (flash size, bootrom,
+  pin-level buses, `DeferPeripheralTicks`) builds the machine. Same results as the eager machine
+  (`RP2040McuLockstepTests`: `Run(750)` per step, PWM, SPI loopback, MicroPython).
+- `IPinBank.SetInputs` / `ReleaseInputs` sync the deferred peripherals first
+  (`RP2040Machine.SyncForHostInput`) and skip pads already held at the level; `Run` ends with
+  nothing owed; output reads sync first.
+- `PinChanged` cycles are those of the change itself (instruction, core 1 mapped onto core 0's
+  clock, pin-level engine edge) instead of core 0's clock at the report, and PWM pads are reported
+  (`RP2040Machine.ExactPwmPadEdges`, `PwmPeripheral.OutputStep`, `ClockTimeline`): counter edges
+  at the cycle of their step, register writes at the instruction.
+- New public members: `IoBank0Peripheral.NotifyPadOutputsAt`, `ReportPadOutputs`,
+  `ExternalHeldMask`, `ExternalLevels`.
+
 ### New: pin-level UART, SPI and I2C
 
 The hardware UART0/1, SPI0/1 (master) and I2C0/1 (master) can drive and sample the GPIO pads

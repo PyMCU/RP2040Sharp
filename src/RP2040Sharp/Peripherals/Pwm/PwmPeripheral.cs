@@ -74,6 +74,7 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, IDeferrableTickable
 
     public void Tick(long deltaCycles)
     {
+        if (OutputStep is not null) { TickObserved(deltaCycles); return; }
         for (var s = 0; s < SLICE_COUNT; s++)
         {
             if ((_csr[s] & CSR_EN) == 0) continue;  // slice not enabled
@@ -97,23 +98,142 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, IDeferrableTickable
         if ((_csr[slice] & CSR_EN) == 0) return;
         var divMode = (_csr[slice] & CSR_DIVMODE) >> 4;
         if ((divMode == 2 && level) || (divMode == 3 && !level))
+        {
             Advance(slice, 16);
+            OutputsWritten?.Invoke();
+        }
     }
 
     private void Advance(int s, long events16)
     {
-        // DIV = integer (bits 11:4) + fraction (bits 3:0) in 8.4 format
-        var divInt  = (int)((_div[s] >> 4) & 0xFF);
-        var divFrac = (int)(_div[s] & 0xF);
-        if (divInt == 0) divInt = 1;
-
-        // Fixed-point divisor in 1/16 units
-        var divisor = divInt * 16 + divFrac;
-
+        var divisor = Divisor(s);
         _fracAccum[s] += events16;
         var steps = _fracAccum[s] / divisor;
         _fracAccum[s] %= divisor;
+        AdvanceSteps(s, steps);
+    }
 
+    /// <summary>The slice's 8.4 divider in 1/16 units (an integer part of 0 counts as 1).</summary>
+    private long Divisor(int s)
+    {
+        var divInt = (int)((_div[s] >> 4) & 0xFF);
+        if (divInt == 0) divInt = 1;
+        return divInt * 16 + (int)(_div[s] & 0xF);
+    }
+
+    // ── Observed ticks (exact output edges) ──────────────────────────
+
+    /// <summary>
+    /// Raised from inside a tick for every counter step that changes a channel output: (slice, cycles from the start of
+    /// the tick's window to the step, the window's length). A step falls at the first cycle at which the divider's
+    /// fractional phase reaches it, so the offset is the same however the cycles were split into ticks. Null (the
+    /// default) keeps the plain tick, which takes the steps that only count at once.
+    /// </summary>
+    public Action<int, long, long>? OutputStep;
+
+    /// <summary>Raised after a register write, or a B-pin edge in an edge-counting DIVMODE, that may have changed a
+    /// channel output or a slice enable at once.</summary>
+    public Action? OutputsWritten;
+
+    private readonly long[] _obsAcc0 = new long[SLICE_COUNT], _obsTotal = new long[SLICE_COUNT],
+                            _obsDone = new long[SLICE_COUNT], _obsNextK = new long[SLICE_COUNT],
+                            _obsNextT = new long[SLICE_COUNT];
+
+    /// <summary>
+    /// The tick with <see cref="OutputStep"/> set: the end state of <see cref="Tick"/>, with the steps that change an
+    /// output taken one by one and every slice's in step-time order (ties by slice number), so a report sees the
+    /// other slices' outputs as they are at that step.
+    /// </summary>
+    private void TickObserved(long deltaCycles)
+    {
+        uint active = 0;
+        for (var s = 0; s < SLICE_COUNT; s++)
+        {
+            if ((_csr[s] & CSR_EN) == 0) continue;
+            var divMode = (_csr[s] & CSR_DIVMODE) >> 4;
+            if (divMode >= 2) continue;
+            if (divMode == 1 && !_bInput[s]) continue;
+            active |= 1u << s;
+            _obsAcc0[s] = _fracAccum[s];
+            _obsTotal[s] = (_fracAccum[s] + deltaCycles * 16) / Divisor(s);
+            _obsDone[s] = 0;
+            PlanObserved(s);
+        }
+        while (true)
+        {
+            int best = -1;
+            var bestT = long.MaxValue;
+            for (var m = active; m != 0; m &= m - 1)
+            {
+                var s = System.Numerics.BitOperations.TrailingZeroCount(m);
+                if (_obsNextT[s] < bestT) { bestT = _obsNextT[s]; best = s; }
+            }
+            if (best < 0) break;
+            var k = _obsNextK[best];
+            bool a0 = Output(best, false), b0 = Output(best, true);
+            AdvanceSteps(best, k - 1);   // steps that only count
+            AdvanceSteps(best, 1);       // the event step
+            _obsDone[best] += k;
+            if (Output(best, false) != a0 || Output(best, true) != b0) OutputStep!(best, bestT, deltaCycles);
+            PlanObserved(best);
+        }
+        for (var m = active; m != 0; m &= m - 1)
+        {
+            var s = System.Numerics.BitOperations.TrailingZeroCount(m);
+            AdvanceSteps(s, _obsTotal[s] - _obsDone[s]);
+            _fracAccum[s] = _obsAcc0[s] + deltaCycles * 16 - _obsTotal[s] * Divisor(s);
+        }
+    }
+
+    /// <summary>The next event step of an observed slice inside the window, and the cycle offset it falls at.</summary>
+    private void PlanObserved(int s)
+    {
+        var k = StepsToEvent(s);
+        var j = _obsDone[s] + k;
+        _obsNextK[s] = k;
+        _obsNextT[s] = j > _obsTotal[s] ? long.MaxValue : (j * Divisor(s) - _obsAcc0[s] + 15) / 16;
+    }
+
+    private bool Output(int s, bool channelB)
+    {
+        var level = channelB ? (_cc[s] >> 16) & 0xFFFF : _cc[s] & 0xFFFF;
+        var high = _ctr[s] < level;
+        return (_csr[s] & (channelB ? CSR_B_INV : CSR_A_INV)) != 0 ? !high : high;
+    }
+
+    /// <summary>Counter steps until the first one that does more than count: a wrap, a turn at TOP, or a step that
+    /// changes a channel output. At least 1.</summary>
+    private long StepsToEvent(int s)
+    {
+        long c = _ctr[s], top = _top[s];
+        long la = _cc[s] & 0xFFFF, lb = (_cc[s] >> 16) & 0xFFFF;
+        long k;
+        if ((_csr[s] & CSR_PH_CORRECT) == 0)
+        {
+            k = c >= top ? 1 : top - c + 1;                       // the wrap
+            // an output falls at the step that makes CTR = level
+            if (la > c && la <= top) k = Math.Min(k, la - c);
+            if (lb > c && lb <= top) k = Math.Min(k, lb - c);
+        }
+        else if (_phaseDir[s])
+        {
+            k = c < top ? top - c : 1;                            // the turn at TOP
+            if (la > c && la < top) k = Math.Min(k, la - c);
+            if (lb > c && lb < top) k = Math.Min(k, lb - c);
+        }
+        else
+        {
+            k = c + 1;                                            // the wrap at 0
+            // an output rises at the step that makes CTR = level - 1
+            if (la >= 1 && la <= c) k = Math.Min(k, c - la + 1);
+            if (lb >= 1 && lb <= c) k = Math.Min(k, c - lb + 1);
+        }
+        return k;
+    }
+
+    /// <summary>Take <paramref name="steps"/> counter steps of slice <paramref name="s"/>.</summary>
+    private void AdvanceSteps(int s, long steps)
+    {
         var phCorrect = (_csr[s] & CSR_PH_CORRECT) != 0;
 
         // Counter steps that only count are taken at once; the loop goes round once per wrap or turn at TOP, which
@@ -176,34 +296,8 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, IDeferrableTickable
             if (divMode >= 2) continue;
             if (divMode == 1 && !_bInput[s]) continue;
 
-            long c = _ctr[s], top = _top[s];
-            long la = _cc[s] & 0xFFFF, lb = (_cc[s] >> 16) & 0xFFFF;
-            long k;   // counter steps until the event
-            var phCorrect = (_csr[s] & CSR_PH_CORRECT) != 0;
-            if (!phCorrect)
-            {
-                k = c >= top ? 1 : top - c + 1;                       // the wrap
-                // an output falls at the step that makes CTR = level
-                if (la > c && la <= top) k = Math.Min(k, la - c);
-                if (lb > c && lb <= top) k = Math.Min(k, lb - c);
-            }
-            else if (_phaseDir[s])
-            {
-                k = c < top ? top - c : 1;                            // the turn at TOP
-                if (la > c && la < top) k = Math.Min(k, la - c);
-                if (lb > c && lb < top) k = Math.Min(k, lb - c);
-            }
-            else
-            {
-                k = c + 1;                                            // the wrap at 0
-                // an output rises at the step that makes CTR = level - 1
-                if (la >= 1 && la <= c) k = Math.Min(k, c - la + 1);
-                if (lb >= 1 && lb <= c) k = Math.Min(k, c - lb + 1);
-            }
-
-            var divInt = (int)((_div[s] >> 4) & 0xFF);
-            if (divInt == 0) divInt = 1;
-            long divisor = divInt * 16 + (int)(_div[s] & 0xF);
+            var k = StepsToEvent(s);   // counter steps until the event
+            var divisor = Divisor(s);
             // smallest d with (_fracAccum + 16 d) / divisor >= k
             var need = (k * divisor - _fracAccum[s] + 15) / 16;
             if (need < best) best = need;
@@ -273,6 +367,7 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, IDeferrableTickable
                 case OFF_CC:  _cc[s]  = value; break;
                 case OFF_TOP: _top[s] = value & 0xFFFF; break;
             }
+            OutputsWritten?.Invoke();
             return;
         }
 
@@ -291,6 +386,7 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, IDeferrableTickable
             case REG_INTE: _inte = value & 0xFF;     break;
             case REG_INTF: _intf = value & 0xFF;     break;
         }
+        OutputsWritten?.Invoke();
     }
 
     public void WriteHalfWord(uint address, ushort value)

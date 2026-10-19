@@ -263,6 +263,29 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         // Edge latching and peripheral inputs happen whoever is listening; only the output-change
         // notification below is skippable when nobody subscribes.
         EvaluatePads(mask);
+        ReportPadOutputs(mask);
+    }
+
+    /// <summary>
+    /// Raise <see cref="PadChanged"/> / <see cref="PadsChanged"/> for the pads in <paramref name="mask"/> whose effective
+    /// output moved, stamped with <paramref name="cycle"/> (<see cref="LastPadEdgeCycle"/>, with
+    /// <see cref="FunctionDriving"/> set): a peripheral that knows the cycle of its own edge (a PWM counter step) reports
+    /// it here. Only the output side: input edges and interrupt latching are left to <see cref="NotifyPads"/>.
+    /// </summary>
+    public void NotifyPadOutputsAt(uint mask, long cycle)
+    {
+        if (PadChanged is null && PadsChanged is null) return;
+        var outer = FunctionDriving;
+        var outerCycle = LastPadEdgeCycle;
+        LastPadEdgeCycle = cycle;
+        FunctionDriving = true;
+        try { ReportPadOutputs(mask); }
+        finally { FunctionDriving = outer; LastPadEdgeCycle = outer ? outerCycle : cycle; }
+    }
+
+    /// <summary>Raise the output-change events for the pads in <paramref name="mask"/>, without re-evaluating inputs.</summary>
+    public void ReportPadOutputs(uint mask)
+    {
         if (PadChanged is null && PadsChanged is null) return;
         uint changed = 0;
         while (mask != 0)
@@ -466,6 +489,12 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
 
     /// <summary>Pads an off-chip device currently drives through <see cref="SetExternalInput"/>.</summary>
     private uint _externalHeld;
+
+    /// <summary>Pads an off-chip device currently drives (<see cref="SetExternalInput"/>, not yet released).</summary>
+    public uint ExternalHeldMask => _externalHeld;
+
+    /// <summary>The levels SIO holds for the pads in <see cref="ExternalHeldMask"/> (meaningful only there).</summary>
+    public uint ExternalLevels => _sio.HeldInputLevels & _externalHeld;
 
     /// <summary>
     /// Stops driving the pads in <paramref name="mask"/> from outside, as <see cref="SetExternalInput"/>

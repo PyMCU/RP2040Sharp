@@ -218,6 +218,7 @@ internal sealed class ThumbAsm
     public ThumbAsm Eors(int rdn, int rm) => Op(0x4040 | rm << 3 | rdn);
     public ThumbAsm Orrs(int rdn, int rm) => Op(0x4300 | rm << 3 | rdn);
     public ThumbAsm Lsrs(int rd, int rm, int imm) => Op(0x0800 | imm << 6 | rm << 3 | rd);
+    public ThumbAsm Lsls(int rd, int rm, int imm) => Op(0x0000 | imm << 6 | rm << 3 | rd);
     public ThumbAsm Ldr(int rt, int rn, int imm) => Op(0x6800 | Imm5(imm, 4) << 6 | rn << 3 | rt);
     public ThumbAsm Str(int rt, int rn, int imm) => Op(0x6000 | Imm5(imm, 4) << 6 | rn << 3 | rt);
 

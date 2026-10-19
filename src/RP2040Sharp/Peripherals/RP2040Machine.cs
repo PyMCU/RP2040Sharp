@@ -1066,7 +1066,7 @@ public sealed class RP2040Machine : IDisposable
         }
 
         LastElapsedCycles = delta;
-        Sweep(delta);
+        Sweep(delta, core0Delta);
     }
 
     // ── Peripheral sweeps and deferred ticks (docs/peripheral-deadlines.md) ──
@@ -1114,12 +1114,66 @@ public sealed class RP2040Machine : IDisposable
         ScheduleEpoch++;
     }
 
-    /// <summary>Tick the time-aware peripherals for a slice of <paramref name="delta"/> cycles.</summary>
-    private void Sweep(long delta)
+    /// <summary>
+    /// Before a host drives or releases a pad input: the cycles already run belong to the old level, so every deferred
+    /// peripheral (and pin-level engine) is brought to where a tick per sweep would have it, or a later tick would
+    /// sample the new level retroactively. Outside a run that is the end of the last slice; inside one (an event
+    /// handler answering a pad change), the sweeps so far, which is what the eager machine has ticked by then: during
+    /// a sweep the peripherals whose turn has not come stand at the previous sweep (<see cref="SweptFor"/>), and a
+    /// peripheral advancing in its own tick does not re-enter it.
+    /// </summary>
+    public void SyncForHostInput() => SyncPeripherals();
+
+    /// <summary>Maps the peripherals' swept cycles to core 0's clock (see <see cref="ClockTimeline"/>).</summary>
+    public ClockTimeline Timeline { get; } = new();
+
+    private bool _exactPwmPadEdges;
+
+    /// <summary>
+    /// Report the edges of pads muxed to PWM through <see cref="IoBank0Peripheral.PadsChanged"/>, each stamped with the
+    /// core-0 cycle of the counter step that made it (<see cref="IoBank0Peripheral.LastPadEdgeCycle"/>), and the output
+    /// changes of PWM register writes at the write. Off (the default), PWM pads move silently and a host polls them.
+    /// The PWM tick then takes its output-changing steps one by one; deferred ticks still end at them, so the result is
+    /// the same either way: only the reports differ.
+    /// </summary>
+    public bool ExactPwmPadEdges
+    {
+        get => _exactPwmPadEdges;
+        set
+        {
+            if (value == _exactPwmPadEdges) return;
+            SyncPeripherals();
+            _exactPwmPadEdges = value;
+            Pwm.OutputStep = value ? OnPwmStep : null;
+            Pwm.OutputsWritten = value ? OnPwmWritten : null;
+        }
+    }
+
+    // GPIO n is PWM slice (n >> 1) & 7: pads 2s, 2s+1, 2s+16, 2s+17.
+    private static uint PwmSlicePads(int slice) => (3u << (2 * slice) | 3u << (2 * slice + 16)) & ((1u << 30) - 1);
+
+    private void OnPwmStep(int slice, long offset, long window)
+    {
+        var pads = PwmSlicePads(slice) & IoBank0.PwmMuxedPins;
+        if (pads == 0) return;
+        var swept = _schedule[2].Applied - window + offset;
+        IoBank0.NotifyPadOutputsAt(pads, Timeline.CycleAt(swept));
+    }
+
+    private void OnPwmWritten()
+    {
+        var pads = IoBank0.PwmMuxedPins;
+        if (pads != 0) IoBank0.ReportPadOutputs(pads);
+    }
+
+    /// <summary>Tick the time-aware peripherals for a slice of <paramref name="delta"/> cycles, in which core 0 ran
+    /// <paramref name="core0Delta"/>.</summary>
+    private void Sweep(long delta, long core0Delta)
     {
         _lastSweepCpu0 = Cpu.Cycles;
         _swept += delta;
         _sweepDelta = delta;
+        Timeline.Mark(_swept, delta, _lastSweepCpu0, core0Delta);
         try
         {
             var schedule = _schedule;
@@ -1343,7 +1397,7 @@ public sealed class RP2040Machine : IDisposable
                 // Both cores are stopped (locked up): time still passes, so burn the rest of the budget
                 // instead of spinning on a clock that never moves.
                 Cpu.Cycles += remaining;
-                Sweep(remaining);
+                Sweep(remaining, remaining);
                 spent = remaining;
             }
             else
@@ -1380,6 +1434,7 @@ public sealed class RP2040Machine : IDisposable
         var before0 = Cpu.Cycles;
         Cpu.RunProfiled(instructions, observer);
         var delta = Cpu.Cycles - before0;
+        var core0Delta = delta;
         if (_core1Launched)
         {
             var before1 = Cpu1.Cycles;
@@ -1391,7 +1446,7 @@ public sealed class RP2040Machine : IDisposable
             delta = Math.Max(delta, (int)(Cpu1.Cycles - before1));
         }
         LastElapsedCycles = delta;
-        Sweep(delta);
+        Sweep(delta, core0Delta);
     }
 
     /// <summary>Number of system resets (watchdog reboots) performed.</summary>

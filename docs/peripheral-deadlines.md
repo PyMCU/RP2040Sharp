@@ -13,6 +13,7 @@ this changes what a slice does, only how many are run one by one.
 | Switch | Where | Default |
 |---|---|---|
 | `RP2040Machine.DeferPeripheralTicks` | library | off (every peripheral every sweep) |
+| `RP2040McuOptions.DeferPeripheralTicks` | `RP2040Mcu` (SiliconTwin.Abstractions adapter) | on |
 | `Chip.DeferPeripheralTicks` | native chip | on |
 | `Chip.SleepingStretches` | native chip | on (needs deferred ticks) |
 | `Chip.AwakeBoundedRuns` | native chip | on (needs deferred ticks) |
@@ -47,6 +48,25 @@ have it (`Sync`, then `Touch` asks for its next event again):
 | DMA, SPI | the next sweep while a transfer is paused on the beat budget / the TX FIFO holds words |
 | Pin-level SPI, UART, I2C | the engine's next step ([pin-level-buses.md](pin-level-buses.md)): a timed wait inside a frame, a queued word / byte / command to take, a stretched SCL seen high, an RX start bit. The engines run on core 0's clock and are brought up to the cycle of every access, DREQ query and pad input, so a tick only catches them up; the UART and I2C blocks are in the sweep only with their bus enabled |
 | SysTick (PPB) | stays eager (it counts from the cores' own cycle counters); its next exception bounds stretches and bounded runs |
+
+## The managed adapter (`RP2040Mcu`)
+
+`RP2040Mcu` (the `IMcu` / `IPinBank` adapter a fixed-step host such as iCircuit drives with `Run(750)` per step) builds
+its machine with deferred ticks on (`new RP2040Mcu()`, `RP2040McuOptions`; `RP2040Mcu(machine)` keeps the machine's
+own setting). The results are those of the eager machine (`RP2040McuLockstepTests`):
+
+- `IPinBank.SetInputs` / `ReleaseInputs` bring every deferred peripheral up first (`RP2040Machine.SyncForHostInput`),
+  so the cycles already run see the old level; inside a run (a `PinChanged` handler answering an edge) that is the
+  sweeps so far, which is what the eager machine has ticked by then. Pads already held at the requested level are
+  skipped without a sync (a circuit solver re-applies its inputs many times per step).
+- `Run` ends with nothing owed, and `OutputLevels` / `OutputEnableMask` sync before they read.
+- `PinChanged` stamps each change with its own cycle: the instruction for a SIO / IO_BANK0 / PADS write (core 1's
+  mapped onto core 0's clock, `RP2040Machine.EngineClock`), the edge cycle for the pin-level UART / SPI / I2C engines,
+  the end of the slice for other peripherals (PIO, DMA into SIO). PWM pads are reported too
+  (`RP2040Machine.ExactPwmPadEdges`, on while a handler is attached): a counter edge at the cycle of the step that made
+  it (the divider's fractional phase included; `ClockTimeline` maps the sweep's cycles onto core 0's), a PWM register
+  write at the instruction. The counter advances at the sweeps, as before, so a write and the counter edges of the same
+  slice can be delivered out of cycle order (the native chip sorts its events; a handler sees them as they happen).
 
 ## Sleeping stretches
 
@@ -101,9 +121,9 @@ See the tables in [native-abi.md](native-abi.md#throughput).
 
 ## Not done
 
-- **Exact cycles of peripheral-driven pad edges** (PIO, PWM, DMA into SIO): still the end of the
-  slice in which they happened, as in phase 1; the deferred PWM tick knows the step, which is where
-  this would start. (The pin-level UART / SPI / I2C engines report their own edge cycles.)
+- **Exact cycles of peripheral-driven pad edges** (PIO, DMA into SIO): still the end of the
+  slice in which they happened, as in phase 1. PWM counter edges carry their step's cycle when
+  `RP2040Machine.ExactPwmPadEdges` is on (the managed adapter turns it on). (The pin-level UART / SPI / I2C engines report their own edge cycles.)
 - **Pin-level UART/SPI/I2C**: done ([pin-level-buses.md](pin-level-buses.md)), with exact edge cycles and the
   event-bounded guard; `PinLevelDifferentialTests` (75 cases) compares them in the three modes.
 - Core 1 awake: plain slices (bounded runs need core 1 unlaunched or asleep). Core 0 asleep with
