@@ -1,4 +1,7 @@
-namespace RP2040.Peripherals.Tests;
+using RP2040.CoSim;
+using RP2040.Peripherals;
+
+namespace RP2040.CoSim.Tests;
 
 /// <summary>
 /// <see cref="RP2040CoSim"/> with a target cycle: a run stops at the first instruction boundary at or past it (a

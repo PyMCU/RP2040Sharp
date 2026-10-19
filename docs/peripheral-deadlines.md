@@ -64,7 +64,7 @@ own setting). The results are those of the eager machine (`RP2040McuLockstepTest
   mapped onto core 0's clock, `RP2040Machine.EngineClock`), the edge cycle for the pin-level UART / SPI / I2C engines,
   the end of the slice for other peripherals (PIO, DMA into SIO). PWM pads are reported too
   (`RP2040Machine.ExactPwmPadEdges`, on while a handler is attached): a counter edge at the cycle of the step that made
-  it (the divider's fractional phase included; `ClockTimeline` maps the sweep's cycles onto core 0's), a PWM register
+  it (the divider's fractional phase included; `SweepTimeline` maps the sweep's cycles onto core 0's), a PWM register
   write at the instruction. The counter advances at the sweeps, as before, so a write and the counter edges of the same
   slice can be delivered out of cycle order (the native chip sorts its events; a handler sees them as they happen).
 

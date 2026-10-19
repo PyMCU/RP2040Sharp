@@ -1,3 +1,4 @@
+using RP2040.CoSim;
 using RP2040.Peripherals.I2c;
 using RP2040.Peripherals.Spi;
 using RP2040.Peripherals.Uart;
@@ -330,8 +331,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
             // answer at once; a SIO output register that moves under a pin nobody drives is no change.
             _recorder = new PadEventRecorder(_m)
             {
-                Delivery = PadDelivery.Immediate,
-                LevelsOnlyWhenDriven = true,
+                Mode = PadReportMode.Immediate,
                 Immediate = OnPadsChanged,
             };
         }
@@ -438,14 +438,13 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
             if (hit != 0) _m.IoBank0.NotifyPads(hit);
         }
 
-        private void OnPadsChanged(uint changed, ulong cycle)
+        private void OnPadsChanged(ulong changed, ulong outputEnable, ulong levels, ulong cycle)
         {
             var handler = _changed;
             if (handler is null) return;
-            var moved = changed & (uint)_watchMask;
+            var moved = changed & _watchMask;
             if (moved == 0) return;
-            _m.IoBank0.GetPadOutputState(out var oe, out var levels);
-            var change = new PinChange(moved, oe, levels & oe, _owner._cycleBase + (long)cycle);
+            var change = new PinChange(moved, outputEnable, levels, _owner._cycleBase + (long)cycle);
             handler(in change);
         }
     }

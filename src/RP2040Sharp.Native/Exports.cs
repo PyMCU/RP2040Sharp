@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using RP2040.CoSim;
 using RP2040.Peripherals;
 using RP2040.Peripherals.PinLevel;
 using RP2040.Peripherals.Usb;
@@ -84,7 +85,7 @@ internal sealed unsafe class Chip
     public delegate* unmanaged[Cdecl]<nint, int, byte*, nuint, void> SerialCb;
     public nint SerialUser;
 
-    private readonly Action<PadEvent> _report;
+    private readonly Action<int, bool, bool, ulong> _report;
 
     public Chip(uint flashBytes, bool cyw43, PinLevelBus buses = PinLevelBus.None)
     {
@@ -115,14 +116,7 @@ internal sealed unsafe class Chip
     // ---- time ------------------------------------------------------------------------------------
     // The core runs clk_sys at a fixed 125 MHz (it does not model clock reconfiguration), so time is cycles * 8 ns.
 
-    public static ulong CycleToPs(ulong cycle)
-    {
-        const uint hz = RP2040Machine.CLK_HZ;
-        // exact to the picosecond without 128-bit math: split into whole seconds, then two 1e6 stages
-        ulong sec = cycle / hz, rem = cycle % hz;
-        ulong a = rem * 1_000_000UL, us = a / hz;
-        return sec * 1_000_000_000_000UL + us * 1_000_000UL + (a % hz) * 1_000_000UL / hz;
-    }
+    public static ulong CycleToPs(ulong cycle) => ClockTimeline.PsIn(cycle, RP2040Machine.CLK_HZ);
 
     public ulong Cycles => (ulong)Machine.Cpu.Cycles;
 
@@ -230,12 +224,12 @@ internal sealed unsafe class Chip
         Pads.Drain(_report);
     }
 
-    private void Report(PadEvent e)
+    private void Report(int gpio, bool level, bool oe, ulong cycle)
     {
-        PinObserver?.Invoke(e.Gpio, e.Level, e.OutputEnable, e.Cycle);
+        PinObserver?.Invoke(gpio, level, oe, cycle);
         var cb = PinCb; // the host may clear the callback from inside it
         if (cb == null) return;
-        cb(PinUser, e.Gpio, e.Level ? 1 : 0, e.OutputEnable ? 1 : 0, e.Cycle);
+        cb(PinUser, gpio, level ? 1 : 0, oe ? 1 : 0, cycle);
     }
 
     public void SetAdc(int channel, double volts)

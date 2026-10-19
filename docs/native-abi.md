@@ -70,7 +70,7 @@ The chip is a thin C face over `RP2040CoSim` (in the core library, [cosim.md](co
 managed adapter `RP2040Mcu` runs too: `st_rp2040_run(n)` is `Run(n)` (slices of the 512-instruction quantum from
 the call's start), `st_rp2040_run_until_edge` is `RunUntilEdge` with the guard, the watch and
 `CoSimFlags.Default` (event guard, sleeping stretches, bounded runs, stop on a watched edge, twice the guard
-asleep); pad events come from its `PadEventRecorder` in drain mode, `st_rp2040_pin_set_input` goes through
+asleep); pad events come from its `PadEventRecorder` in deferred mode, `st_rp2040_pin_set_input` goes through
 `RP2040CoSim.SetInputs` / `ReleaseInputs`.
 
 ## Missing compared with RP2350

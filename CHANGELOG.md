@@ -43,7 +43,8 @@ guard, retired counts) moves from the native chip into the core library as `RP20
 cycle (`RP2040Machine.CutLimit`: runs stop at the first instruction boundary at or past it),
 `SetInputs` / `ReleaseInputs` (skip unchanged pads, sync the rest) and `SyncToNow`. Pad events go
 through `PadEventRecorder` (drain: stable cycle order, clamped to core 0's clock; immediate) and
-`PadEvent` moves to the core. The native chip is a thin wrapper over it; it turns
+the chip-free types live in the `RP2040.CoSim` namespace with RP2350Sharp's names (`PadReportMode`,
+`PadChangeHandler`, `ClockTimeline`; `SweepTimeline` maps swept cycles to core 0's). The native chip is a thin wrapper over it; it turns
 `RP2040Machine.ExactPwmPadEdges` on, so PWM edges reach the pin callback at the cycle of their
 counter step at every guard. See [docs/cosim.md](docs/cosim.md).
 
@@ -57,7 +58,7 @@ counter step at every guard. See [docs/cosim.md](docs/cosim.md).
   nothing owed; output reads sync first.
 - `PinChanged` cycles are those of the change itself (instruction, core 1 mapped onto core 0's
   clock, pin-level engine edge) instead of core 0's clock at the report, and PWM pads are reported
-  (`RP2040Machine.ExactPwmPadEdges`, `PwmPeripheral.OutputStep`, `ClockTimeline`): counter edges
+  (`RP2040Machine.ExactPwmPadEdges`, `PwmPeripheral.OutputStep`, `SweepTimeline`): counter edges
   at the cycle of their step, register writes at the instruction.
 - New public members: `IoBank0Peripheral.NotifyPadOutputsAt`, `ReportPadOutputs`,
   `ExternalHeldMask`, `ExternalLevels`.

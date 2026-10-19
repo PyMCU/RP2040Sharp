@@ -1,7 +1,8 @@
 using System.Runtime.CompilerServices;
+using RP2040.Peripherals;
 using RP2040.Peripherals.PinLevel;
 
-namespace RP2040.Peripherals;
+namespace RP2040.CoSim;
 
 /// <summary>The speed-ups and stops of a co-simulation run (<see cref="RunRequest.Flags"/>).</summary>
 [Flags]
@@ -74,8 +75,11 @@ public sealed class RP2040CoSim
 
     public RP2040Machine Machine { get; }
 
-    /// <summary>Every pad change with its own cycle (Drain delivery unless the owner changes it).</summary>
+    /// <summary>Every pad change with its own cycle (deferred reporting unless the owner changes it).</summary>
     public PadEventRecorder Pads { get; }
+
+    /// <summary>Core-0 cycles to simulated picoseconds (one segment: the RP2040 clock is fixed).</summary>
+    public ClockTimeline Clock { get; } = new(RP2040Machine.CLK_HZ);
 
     /// <summary>
     /// Most instructions a slice runs before the peripherals advance (they tick once per slice). USB enumeration and

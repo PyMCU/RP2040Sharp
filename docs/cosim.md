@@ -10,7 +10,7 @@ silicon; timing is modelled, not cycle-exact.
 ## The run
 
 ```csharp
-var cosim = new RP2040CoSim(machine);                 // its PadEventRecorder: Drain delivery
+var cosim = new RP2040CoSim(machine);                 // using RP2040.CoSim; its PadEventRecorder reports deferred
 cosim.Pads.Attach();
 var r = cosim.RunUntilEdge(new RunRequest
 {
@@ -20,7 +20,7 @@ var r = cosim.RunUntilEdge(new RunRequest
     Flags = CoSimFlags.Default,
 });
 // r.Slots, r.Cycles (wall-clock cycles elapsed: the longer core per slice), r.Reason
-cosim.Pads.Drain(e => Console.WriteLine($"GP{e.Gpio}={e.Level} oe {e.OutputEnable} @{e.Cycle}"));
+cosim.Pads.Drain((gpio, level, oe, cycle) => Console.WriteLine($"GP{gpio}={level} oe {oe} @{cycle}"));
 ```
 
 A run is a sequence of slices, each of the guard while a pad is watched and the guard is nonzero (twice it while
@@ -70,14 +70,16 @@ Every change that goes through IO_BANK0 is recorded while it happens, with its o
 |---|---|
 | a CPU write (SIO, IO_BANK0, PADS) | the instruction's; core 1's mapped onto core 0's clock from the start of its turn (`RP2040Machine.ExecCycle`) |
 | a pin-level UART / SPI / I2C engine | the edge's (`IoBank0Peripheral.LastPadEdgeCycle`) |
-| a PWM counter step (`RP2040Machine.ExactPwmPadEdges`) | the step's, the divider's fractional phase included; `ClockTimeline` maps the sweep's swept cycles onto core 0's |
+| a PWM counter step (`RP2040Machine.ExactPwmPadEdges`) | the step's, the divider's fractional phase included; `SweepTimeline` maps the sweep's swept cycles onto core 0's |
 | a PWM register write | the instruction's |
 | anything else in a sweep (PIO, DMA into SIO), `Poll` | core 0's clock: the end of the slice |
 
-Nothing is reported past core 0's own clock (core 1 may run more cycles in a slice): a stamp is clamped to it on
-delivery. `Drain` hands the events over sorted by cycle (stable: they are in order but for core 1's, which follow
-core 0's of the same slice); `Immediate` delivery hands each batch over while it happens, so a handler can answer
-at once (the managed adapter). The counter of a PWM slice still advances at the sweeps, so in immediate mode a
+Nothing is reported past core 0's own clock (core 1 may run more cycles in a slice) nor before the previous report
+(`ReportedTo`): a stamp is clamped into that window on delivery. `PadReportMode.Deferred` keeps every change and
+`Drain` hands them over sorted by cycle (stable: they are in order but for core 1's, which follow core 0's of the
+same slice); `PadReportMode.Immediate` raises each batch through `Immediate` (a `PadChangeHandler`: the pads that
+moved, output enable and driven levels of the `ImmediateWatch` pads, the cycle) while it happens, so a handler can
+answer at once (the managed adapter). The counter of a PWM slice still advances at the sweeps, so in immediate mode a
 register write and the counter edges of the same slice can arrive out of cycle order. `LevelsOnlyWhenDriven`
 gives the SiliconTwin.Abstractions rule (an output register moving under an undriven pad is no change); the C ABI
 counts every level and output-enable change.
@@ -100,4 +102,12 @@ iOS no-JIT constraints.
 - `SyncForHostInput` syncs inside a sweep as well (the RP2040 sweep cannot tick a cycle twice: a peripheral is
   marked applied before its tick runs), where RP2350 returns; inside a CPU run it syncs to the sweeps so far and
   does not cut the run.
-- `ClockTimeline` maps swept cycles to core 0's (the RP2040 clock is fixed); RP2350 also follows clock changes.
+- Namespace `RP2040.CoSim`, as RP2350's `RP2350.CoSim`. `ClockTimeline` is RP2350's (segments of constant clk_sys,
+  `CycleToPs`, `PsIn`, `NoteWrite`, `Track`); on the RP2040 it keeps one segment (`RP2040CoSim.Clock`). The mapping of
+  the peripherals' swept cycles onto core 0's clock is `SweepTimeline`, which RP2350 does not need (its peripherals
+  run on core 0's clock).
+- `PadEventRecorder` deferred mode keeps every change of a pad (the RP2040 C ABI reports each one); RP2350's keeps
+  each pad's last change per report. RP2350's also hooks SIO, CTRL and PWM itself and stamps PIO by lockstep round
+  (`PioRounds`); here IO_BANK0's `PadsChanged` carries all of them (PWM through `ExactPwmPadEdges`), and PIO edges
+  carry the end of the slice. The extra members here: `Watch` / `WatchedChanged` / `WatchedEdge` (the run loop's),
+  `LevelsOnlyWhenDriven`, `Poll`, `Record`, `Stamp`, `Pending`, `Baseline`.

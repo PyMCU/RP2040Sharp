@@ -1,16 +1,17 @@
-namespace RP2040.Peripherals;
+namespace RP2040.CoSim;
 
 /// <summary>
-/// Maps the peripherals' time base (the machine's swept cycles, <see cref="RP2040Machine.SweptCycles"/>) to core 0's
-/// cycle counter, the clock every pad event is stamped with. The peripherals sweep at the end of each slice with the
-/// longer of the two cores' cycles; the slice's window of swept cycles lines up with core 0's from its start, and a
-/// position past core 0's end (core 1 ran longer) maps to that end, as nothing is reported past core 0's clock.
+/// Maps the peripherals' time base (the machine's swept cycles, <see cref="Peripherals.RP2040Machine.SweptCycles"/>) to
+/// core 0's cycle counter, the clock every pad event is stamped with. The peripherals sweep at the end of each slice
+/// with the longer of the two cores' cycles; the slice's window of swept cycles lines up with core 0's from its start,
+/// and a position past core 0's end (core 1 ran longer) maps to that end, as nothing is reported past core 0's clock.
 /// A tick that reaches an event always falls in the last sweep's window (a sweep ticks a deferred peripheral when it
-/// reaches the peripheral's next event), so the last window is all a peripheral needs to stamp its own edges.
+/// reaches the peripheral's next event), so the last window is all a peripheral needs to stamp its own edges (the PWM
+/// counter steps of <see cref="Peripherals.RP2040Machine.ExactPwmPadEdges"/>).
 /// </summary>
-/// <remarks>Chip-free on purpose (no machine reference): the RP2350 side keeps the same type for its clock changes.
-/// The RP2040 core runs a fixed 125 MHz, so swept cycles and core-0 cycles only differ by where a window starts.</remarks>
-public sealed class ClockTimeline
+/// <remarks>RP2350Sharp has no counterpart: its peripherals run on core 0's own clock (the sweep window's start and end,
+/// RP2350Machine.SweepStart / SweepEnd). Chip-free.</remarks>
+public sealed class SweepTimeline
 {
     private long _sweptEnd, _sweptDelta, _cycleEnd, _cycleDelta;
 

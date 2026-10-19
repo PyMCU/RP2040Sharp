@@ -1160,8 +1160,8 @@ public sealed class RP2040Machine : IDisposable
         SyncPeripherals();
     }
 
-    /// <summary>Maps the peripherals' swept cycles to core 0's clock (see <see cref="ClockTimeline"/>).</summary>
-    public ClockTimeline Timeline { get; } = new();
+    /// <summary>Maps the peripherals' swept cycles to core 0's clock (see <see cref="CoSim.SweepTimeline"/>).</summary>
+    public CoSim.SweepTimeline SweepTimeline { get; } = new();
 
     private bool _exactPwmPadEdges;
 
@@ -1193,7 +1193,7 @@ public sealed class RP2040Machine : IDisposable
         var pads = PwmSlicePads(slice) & IoBank0.PwmMuxedPins;
         if (pads == 0) return;
         var swept = _schedule[2].Applied - window + offset;
-        IoBank0.NotifyPadOutputsAt(pads, Timeline.CycleAt(swept));
+        IoBank0.NotifyPadOutputsAt(pads, SweepTimeline.CycleAt(swept));
     }
 
     private void OnPwmWritten()
@@ -1209,7 +1209,7 @@ public sealed class RP2040Machine : IDisposable
         _lastSweepCpu0 = Cpu.Cycles;
         _swept += delta;
         _sweepDelta = delta;
-        Timeline.Mark(_swept, delta, _lastSweepCpu0, core0Delta);
+        SweepTimeline.Mark(_swept, delta, _lastSweepCpu0, core0Delta);
         try
         {
             var schedule = _schedule;
