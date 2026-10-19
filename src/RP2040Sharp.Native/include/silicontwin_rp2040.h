@@ -5,7 +5,8 @@
  * the host owns time, advances the chip by a number of instructions, reads the pads, and drives
  * inputs and analog voltages back in. Both Cortex-M0+ cores run; core 1 once firmware launches it.
  * With ST_RP2040_CYW43 the CYW43439 Wi-Fi/BT chip of the Pico W is attached to its pads, which
- * MicroPython and CircuitPython for the Pico W need to boot.
+ * MicroPython and CircuitPython for the Pico W need to boot. With the pin-level buses (ST_RP2040_BUS_*,
+ * the default of st_rp2040_create) the hardware UART, SPI and I2C blocks drive and sample the pads.
  *
  * Same conventions as silicontwin_rp2350.h (see docs/native-abi.md for the differences).
  *
@@ -47,18 +48,31 @@ typedef enum {
     ST_RP2040_SERIAL_USB_CDC = 2  /* an emulated USB host enumerates the device's CDC ACM port (the MicroPython REPL) */
 } st_rp2040_serial_channel;
 
-/* Board flags of st_rp2040_create_ex. */
+/* Flags of st_rp2040_create_ex, OR-ed. The values are those of silicontwin_rp2350.h (ST_BUS_*, ST_RP2350_CYW43), so a
+ * host passes the same bits to both chips.
+ *
+ * Pin-level buses: with a block listed, once firmware routes its function to pads (IO_BANK0 FUNCSEL SPI / UART / I2C)
+ * the block generates the real waveform on those pads and reads them back, so a host that only sees pads gets
+ * machine.SPI / machine.I2C / machine.UART working, not only SoftI2C / SoftSPI and PIO. SPI and I2C are masters; I2C
+ * lines are open-drain (they need a pull-up, external or the pad's). A block whose pads firmware never routes keeps
+ * its internal behaviour (UART TX bytes still reach the serial callback, routed or not). */
 enum {
-    ST_RP2040_NONE  = 0,
+    ST_RP2040_NONE     = 0,
+    ST_RP2040_BUS_I2C  = 1,
+    ST_RP2040_BUS_SPI  = 2,
+    ST_RP2040_BUS_UART = 4,
+    ST_RP2040_BUS_ALL  = 7,
     /* Pico W: attach the CYW43439 to GPIO23 (WL_ON), 24 (DATA / IRQ), 25 (CS) and 29 (CLK), driven by
-     * the firmware's PIO gSPI. Without it a Pico W image waits for the chip forever. */
-    ST_RP2040_CYW43 = 1
+     * the firmware's PIO gSPI. Without it a Pico W image waits for the chip forever. (0x100 since the
+     * pin-level buses; it was 1.) */
+    ST_RP2040_CYW43    = 0x100
 };
 
 /* A pad's effective output changed. level/oe are 0 or 1; cycle is the core-0 cycle of the change
  * (convert with st_rp2040_cycle_to_ps). A change made by a CPU instruction (SIO, IO_BANK0 or PADS
  * register write, on either core) carries the cycle of that instruction, whatever the slice size; one
- * made by a peripheral (PIO, PWM counter, DMA) carries the end of the slice in which it happened. */
+ * made by a pin-level UART / SPI / I2C engine the cycle of its edge; one made by another peripheral (PIO,
+ * PWM counter, DMA) the end of the slice in which it happened. */
 typedef void (*st_rp2040_pin_cb)(void *user, int gpio, int level, int output_enable, uint64_t cycle);
 
 /* Bytes the chip transmitted on a serial channel. */
@@ -76,7 +90,9 @@ uint32_t    st_rp2040_clock_hz(void); /* clk_sys: 125 MHz (the core does not mod
 
 /* Returns NULL on failure (flash_bytes not 0 and not a power of two in 4096..16 MiB, unknown flags,
  * out of memory...); st_rp2040_last_error(NULL) then describes why. flash_bytes = 0 selects 2 MiB
- * (Pico, Pico W). st_rp2040_create(f) is st_rp2040_create_ex(f, ST_RP2040_NONE). */
+ * (Pico, Pico W). st_rp2040_create(f) is st_rp2040_create_ex(f, ST_RP2040_BUS_ALL): this ABI only
+ * exposes pads, so a block that never reaches a pad would be unreachable for the host. Pass
+ * ST_RP2040_NONE for transaction-level blocks (no pad moves; UART TX bytes reach the serial callback). */
 st_rp2040 *st_rp2040_create(uint32_t flash_bytes);
 st_rp2040 *st_rp2040_create_ex(uint32_t flash_bytes, uint32_t flags);
 /* Releases the chip. NULL, unknown or already destroyed handles are ignored. Destroying a chip from
@@ -111,14 +127,22 @@ uint64_t st_rp2040_cycles(st_rp2040 *chip);
  * nonzero, including before firmware routes the watched pads, and stops after the slice in which a
  * watched pad's level or OE changed. While both cores sleep (WFI/WFE) a slice is twice the guard.
  * Slices never exceed 512 instructions (the peripheral quantum). Peripherals advance at the end of
- * every slice, before the pads are checked. Pad changes are reported through the pin callback, in
- * cycle order, before returning. watch = 0 or guard_instructions = 0 makes it identical to
- * st_rp2040_run. Returns core-0 cycles. */
+ * every slice, before the pads are checked. With pin-level buses and a guard above 1 a slice of core 0
+ * also ends before the first instruction at or past the next edge a pin-level engine makes on a watched
+ * pad (st_rp2040_cycles_until_edge), and right after an instruction that moved a watched pad: the call
+ * returns where guard 1 would have after each such edge (event-bounded guard), so a circuit's answer
+ * (an SPI MISO bit, an I2C ACK) is in place before the engine samples it. Pad changes are reported
+ * through the pin callback, in cycle order, before returning. watch = 0 or guard_instructions = 0 makes
+ * it identical to st_rp2040_run. Returns core-0 cycles. */
 uint64_t st_rp2040_run_until_edge(st_rp2040 *chip, uint32_t max_instructions,
                                   uint32_t guard_instructions, uint32_t watch);
 
-/* Core-0 cycles until the next edge a pin-level engine will make on a pad in `watch`. This core has
- * no pin-level engines yet (UART / SPI / I2C move bytes, not pads), so it is always UINT64_MAX. */
+/* Core-0 cycles from now until the next edge a pin-level engine (SPI master, UART transmitter, I2C
+ * master) will make on a pad in `watch`, if no input changes first; UINT64_MAX when none has one coming
+ * (idle engines, unwatched pads, edges only firmware or an input can start, no pin-level buses) or for
+ * an invalid or faulted handle. A host that waits for the circuit after an edge can wait this long at
+ * most: the chip's next sample of an engine input comes with that edge. Convert with
+ * st_rp2040_cycle_to_ps. */
 uint64_t st_rp2040_cycles_until_edge(st_rp2040 *chip, uint32_t watch);
 
 /* Time. The cycle counter counts core-0 clk_sys cycles at a fixed 125 MHz.
@@ -139,7 +163,8 @@ uint64_t st_rp2040_instructions(st_rp2040 *chip, int core);
 int  st_rp2040_pin_get(st_rp2040 *chip, int gpio, int *output_enable);
 /* level 0 / 1 drives the pad from outside. level -1 releases it (nobody drives the pad): it reads
  * high if the firmware enabled its pull-up, low with the pull-down, and follows later pull changes by
- * itself. gpio outside 0..29 or a level other than -1 / 0 / 1 is rejected. */
+ * itself. gpio outside 0..29 or a level other than -1 / 0 / 1 is rejected. The cycles already run see
+ * the old level: peripheral time still pending is applied first. */
 void st_rp2040_pin_set_input(st_rp2040 *chip, int gpio, int level);
 
 /* Pad pull configuration (PADS_BANK0): bit 0 = pull-up enabled (PUE), bit 1 = pull-down enabled

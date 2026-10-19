@@ -106,6 +106,14 @@ int main(int argc, char **argv) {
     printf("[create]\n");
     CHECK(st_rp2040_create(1234) == NULL && strstr(st_rp2040_last_error(NULL), "flash_bytes"), "bad flash size rejected");
     CHECK(st_rp2040_create_ex(0, 0x80) == NULL && strstr(st_rp2040_last_error(NULL), "unknown flags"), "unknown flag rejected");
+    CHECK(ST_RP2040_BUS_I2C == 1 && ST_RP2040_BUS_SPI == 2 && ST_RP2040_BUS_UART == 4 && ST_RP2040_BUS_ALL == 7 &&
+          ST_RP2040_CYW43 == 0x100, "flag values are those of silicontwin_rp2350.h");
+    {
+        st_rp2040 *b = st_rp2040_create_ex(0, ST_RP2040_BUS_ALL | ST_RP2040_CYW43);
+        CHECK(b != NULL && st_rp2040_cycles_until_edge(b, 0xFFFFFFFFu) == UINT64_MAX,
+              "pin-level buses with the CYW43: created, nothing routed, no engine edge coming");
+        st_rp2040_destroy(b);
+    }
     st_rp2040 *c = st_rp2040_create_ex(0, ST_RP2040_NONE);
     CHECK(c != NULL && st_rp2040_status(c) == ST_RP2040_STATUS_OK, "create");
 

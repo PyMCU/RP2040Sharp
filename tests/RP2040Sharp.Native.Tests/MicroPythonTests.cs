@@ -76,7 +76,7 @@ public class MicroPythonTests(ITestOutputHelper output)
         var uf2 = Firmware.MicroPythonPicoW();
         Skip.If(uf2 is null, "MicroPython RPI_PICO_W v1.28.0 UF2 not found (set RP2040_MICROPYTHON_PICOW_UF2)");
         var sw = Stopwatch.StartNew();
-        var (h, host) = BootToRepl(uf2!, 1);
+        var (h, host) = BootToRepl(uf2!, Abi.Cyw43);
         try
         {
             output.WriteLine($"REPL after {Abi.Cycles(h) / 125_000.0:F0} ms simulated, {sw.ElapsedMilliseconds} ms wall");

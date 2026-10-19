@@ -11,6 +11,9 @@ namespace RP2040Sharp.Native.Tests;
 /// </summary>
 internal static unsafe class Abi
 {
+    /// <summary>st_rp2040_create_ex flags: ST_RP2040_BUS_I2C / SPI / UART / ALL and ST_RP2040_CYW43.</summary>
+    public const uint BusI2c = 1, BusSpi = 2, BusUart = 4, BusAll = 7, Cyw43 = 0x100;
+
     public static string Version() => Marshal.PtrToStringAnsi((nint)((delegate* unmanaged[Cdecl]<byte*>)&Exports.Version)())!;
     public static uint ClockHz() => ((delegate* unmanaged[Cdecl]<uint>)&Exports.ClockHz)();
     public static nint Create(uint flash) => ((delegate* unmanaged[Cdecl]<uint, nint>)&Exports.Create)(flash);

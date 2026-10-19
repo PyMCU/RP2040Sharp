@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using RP2040.Peripherals;
+using RP2040.Peripherals.PinLevel;
 using RP2040.Peripherals.Usb;
 using RP2040Sharp.Wireless.Cyw43;
 
@@ -91,17 +92,18 @@ internal sealed unsafe class Chip
     public delegate* unmanaged[Cdecl]<nint, int, byte*, nuint, void> SerialCb;
     public nint SerialUser;
 
-    public Chip(uint flashBytes, bool cyw43)
+    public Chip(uint flashBytes, bool cyw43, PinLevelBus buses = PinLevelBus.None)
     {
-        Machine = new RP2040Machine(flashBytes) { DeferPeripheralTicks = true };
+        Machine = new RP2040Machine(flashBytes, pinLevelBuses: buses) { DeferPeripheralTicks = true };
         Machine.Adc.ReadChannel = ch => (uint)ch < (uint)_adc.Length ? _adc[ch] : ch == 4 ? TempSensor27C : (ushort)0;
         Machine.Uart0.OnByteTransmit = b => EmitSerial(0, b);
         Machine.Uart1.OnByteTransmit = b => EmitSerial(1, b);
         Cdc = new UsbCdcHost(Machine.Usb);
         Cdc.OnSerialData = data => EmitSerial(2, data);
         // Every pad change that goes through IO_BANK0 (SIO writes of either core, PIO, FUNCSEL / override / PADS
-        // writes, DMA into SIO) arrives here while it happens, so it is stamped with its own cycle. PWM-muxed pads
-        // follow the counter instead and are polled (see PollPads).
+        // writes, DMA into SIO, the pin-level UART / SPI / I2C engines) arrives here while it happens, so it is
+        // stamped with its own cycle (an engine's: the cycle of its edge). PWM-muxed pads follow the counter instead
+        // and are polled (see PollPads).
         Machine.IoBank0.PadsChanged += OnPadsChanged;
         // A bounded run books slice ends without coming back here: poll the watched PWM pads at each of them.
         Machine.BoundaryCheck = () =>
@@ -169,7 +171,7 @@ internal sealed unsafe class Chip
     /// only if that core was neither asleep (WFI/WFE), locked up nor (core 1) unlaunched at its start and at its end:
     /// a lower bound, exact for CPU-bound code, low by up to one slice per sleep/wake transition.
     /// </summary>
-    private void RunSlice(int n)
+    private int RunSlice(int n, bool cut = false)
     {
         bool p0 = Parked(0), p1 = Parked(1);
 #if ST_ENABLE_TEST_HOOKS
@@ -179,10 +181,17 @@ internal sealed unsafe class Chip
         _slice0Start = Machine.Cpu.Cycles;
         _slice1Start = Machine.Cpu1.Cycles;
         _inSlice = true;
-        try { Machine.Run(n); }
+        int k = n;
+        try
+        {
+            if (cut) k = Machine.RunCut(n, _watch);
+            else Machine.Run(n);
+        }
         finally { _inSlice = false; }
-        if (!p0 && !Parked(0)) Retired[0] += (ulong)n;
-        if (!p1 && !Parked(1)) Retired[1] += (ulong)n;
+        if (k < n) CutSlices++;
+        if (!p0 && !Parked(0)) Retired[0] += (ulong)k;
+        if (!p1 && !Parked(1)) Retired[1] += (ulong)k;
+        return k;
     }
 
     /// <summary>Run <paramref name="max"/> instructions per core in peripheral-quantum slices (st_rp2040_run).</summary>
@@ -212,6 +221,19 @@ internal sealed unsafe class Chip
     internal long StretchedSlices, BoundedSlices, PlainSlices;
 
     /// <summary>
+    /// Event-bounded guard (docs/pin-level-buses.md). The host answers a pad edge only after the call returns, so a
+    /// slice must not run from a watched pad's edge into the sample of an input the circuit may be answering on (an
+    /// SPI MISO edge, an I2C ACK, a UART echo). With pin-level buses and a guard above 1, every slice of core 0 also
+    /// ends before the first instruction at or past the next edge a pin-level engine makes on a watched pad, and
+    /// right after an instruction that moved a watched pad: the call returns where guard 1 would have after each such
+    /// edge, whatever the guard. Core 1's turn, interrupt latency and the sweeps are still bounded by the guard.
+    /// </summary>
+    internal bool EventGuard = true;
+
+    /// <summary>Test probe: slices that a cut ended early.</summary>
+    internal long CutSlices;
+
+    /// <summary>
     /// Run up to <paramref name="max"/> instructions in slices of <paramref name="guard"/> whenever a pad is watched
     /// and the guard is nonzero (twice that while both cores sleep), stopping after the slice in which a watched pad
     /// changed. A slice never exceeds <see cref="PeripheralQuantum"/>. Peripherals tick at the end of every slice,
@@ -225,6 +247,8 @@ internal sealed unsafe class Chip
         _watch = armed ? watch & AllPads : 0;
         _watchedChanged = false;
         var m = Machine;
+        // The event-bounded guard: guard 1 already ends every slice after one instruction.
+        bool events = armed && EventGuard && guard > 1 && m.PinLevelBuses != PinLevelBus.None && _watch != 0;
         try
         {
             int quantum = Math.Max(1, PeripheralQuantum);
@@ -257,7 +281,7 @@ internal sealed unsafe class Chip
                     }
                     else if (!Parked(0) && AwakeBoundedRuns && m.Core1Inert)
                     {
-                        RunBounded(slice, whole);
+                        RunBounded(slice, whole, events);
                         done += _boundedDone;
                         if (armed)
                         {
@@ -269,8 +293,7 @@ internal sealed unsafe class Chip
                     }
                 }
                 PlainSlices++;
-                RunSlice(n);
-                done += n;
+                done += RunSlice(n, events);
                 if (!armed) continue;
                 // PWM-muxed pads move with the counter, which IO_BANK0 never reports: compare the watched ones.
                 uint pwm = m.IoBank0.PwmMuxedPins & _watch;
@@ -289,26 +312,28 @@ internal sealed unsafe class Chip
     /// bounded run: the slices whose ends change nothing are booked (core 0 credited <paramref name="n"/> retired
     /// instructions each, as <see cref="RunSlice"/> would), the last one is finished as a plain slice.
     /// </summary>
-    private void RunBounded(int n, int maxSlices)
+    private void RunBounded(int n, int maxSlices, bool cut)
     {
         var m = Machine;
         bool p1 = Parked(1);
 #if ST_ENABLE_TEST_HOOKS
-        if (InjectOnRun != 0) { _boundedDone = 0; RunSlice(n); _boundedDone = n; return; }
+        if (InjectOnRun != 0) { _boundedDone = RunSlice(n, cut); return; }
 #endif
-        int booked = m.RunAwakeBounded(n, maxSlices);
+        int booked = m.RunAwakeBounded(n, maxSlices, cut ? _watch : 0);
+        int k = m.BoundedSliceSlots;
         BoundedSlices += booked;
         PlainSlices++;
+        if (k < n) CutSlices++;
         Retired[0] += (ulong)booked * (ulong)n;
         // The last slice: core 0's part ran in the bounded loop; core 1's turn and the sweep run as in a plain slice.
         _slice0Start = m.BoundedSliceStart;
         _slice1Start = m.Cpu1.Cycles;
         _inSlice = true;
-        try { m.FinishSlice(n, m.BoundedSliceDelta); }
+        try { m.FinishSlice(k, m.BoundedSliceDelta); }
         finally { _inSlice = false; }
-        if (!Parked(0)) Retired[0] += (ulong)n;
-        if (!p1 && !Parked(1)) Retired[1] += (ulong)n;
-        _boundedDone = (booked + 1) * n;
+        if (!Parked(0)) Retired[0] += (ulong)k;
+        if (!p1 && !Parked(1)) Retired[1] += (ulong)k;
+        _boundedDone = booked * n + k;
     }
 
     // ---- pads ------------------------------------------------------------------------------------
@@ -320,7 +345,9 @@ internal sealed unsafe class Chip
 
     private void OnPadsChanged(uint mask)
     {
-        ulong cycle = NowCycle();
+        var io = Machine.IoBank0;
+        // A pin-level engine's edge carries its own cycle (the engines run on core 0's clock).
+        ulong cycle = io.FunctionDriving ? (ulong)io.LastPadEdgeCycle : NowCycle();
         Record(mask & AllPads, cycle);
     }
 
@@ -336,7 +363,7 @@ internal sealed unsafe class Chip
             if (oe == _lastOe[g] && lvl == _lastLevel[g]) continue;
             _lastOe[g] = oe; _lastLevel[g] = lvl;
             _pending.Add(new PadEvent(g, lvl, oe, cycle));
-            if ((_watch >> g & 1) != 0) { _watchedChanged = true; Machine.EndBoundedRun = true; }
+            if ((_watch >> g & 1) != 0) { _watchedChanged = true; Machine.EndBoundedRun = true; Machine.RequestCut(); }
         }
     }
 
@@ -402,8 +429,19 @@ internal sealed unsafe class Chip
     /// pulls say, tracking later PADS_BANK0 changes by itself.</summary>
     public void SetInput(int gpio, int level)
     {
+        // The cycles already run belong to the old level: bring every deferred peripheral (and pin-level engine) up
+        // to now first, or a later tick would sample the new level retroactively.
+        Machine.SyncPeripherals();
         if (level < 0) Machine.IoBank0.ReleaseExternalInput(1u << gpio);
         else Machine.IoBank0.SetExternalInput(gpio, level != 0);
+    }
+
+    /// <summary>Core-0 cycles until the next edge a pin-level engine makes on a pad in <paramref name="watch"/>
+    /// (<see cref="RP2040Machine.CyclesUntilPadEdge"/>), ulong.MaxValue when none has one coming.</summary>
+    public ulong CyclesUntilEdge(uint watch)
+    {
+        var c = Machine.CyclesUntilPadEdge(watch & AllPads);
+        return c == long.MaxValue ? ulong.MaxValue : (ulong)c;
     }
 
     private void EmitSerial(int channel, byte b)
@@ -504,8 +542,11 @@ internal static unsafe class Exports
     private const uint DefaultFlashBytes = 2 * 1024 * 1024; // Pico, Pico W
     private const nuint MaxUf2Bytes = 256u * 1024 * 1024;
     private const nuint MaxSerialBytes = 64u * 1024 * 1024;
-    private const uint FlagCyw43 = 1;
-    private const uint KnownFlags = FlagCyw43;
+    // Pin-level bus flags (ST_RP2040_BUS_*, the bit values of RP2350's ST_BUS_* and of PinLevelBus) and the board flag
+    // (ST_RP2040_CYW43, RP2350's ST_RP2350_CYW43 value).
+    private const uint BusFlagsMask = (uint)PinLevelBus.All;
+    private const uint FlagCyw43 = 0x100;
+    private const uint KnownFlags = BusFlagsMask | FlagCyw43;
 
     private static readonly byte[] s_version = "silicontwin-rp2040 0.1.0\0"u8.ToArray();
     private static readonly GCHandle s_versionPin = GCHandle.Alloc(s_version, GCHandleType.Pinned);
@@ -589,7 +630,7 @@ internal static unsafe class Exports
     public static ulong CycleToPs(nint h, ulong cycle) => Lookup(h) == null ? 0 : Chip.CycleToPs(cycle); // pure arithmetic
 
     [UnmanagedCallersOnly(EntryPoint = "st_rp2040_create", CallConvs = [typeof(CallConvCdecl)])]
-    public static nint Create(uint flashBytes) => CreateCore("st_rp2040_create", flashBytes, 0);
+    public static nint Create(uint flashBytes) => CreateCore("st_rp2040_create", flashBytes, BusFlagsMask);
 
     [UnmanagedCallersOnly(EntryPoint = "st_rp2040_create_ex", CallConvs = [typeof(CallConvCdecl)])]
     public static nint CreateEx(uint flashBytes, uint flags) => CreateCore("st_rp2040_create_ex", flashBytes, flags);
@@ -601,8 +642,9 @@ internal static unsafe class Exports
             if (flashBytes != 0 && (flashBytes < MinFlashBytes || flashBytes > MaxFlashBytes || !BitOperations.IsPow2(flashBytes)))
             { SetGlobalError(fn + ": flash_bytes " + flashBytes + " is not 0 or a power of two in 4096..16777216"); return 0; }
             if ((flags & ~KnownFlags) != 0)
-            { SetGlobalError(fn + ": unknown flags 0x" + flags.ToString("X") + " (valid: 1 ST_RP2040_CYW43)"); return 0; }
-            var chip = new Chip(flashBytes == 0 ? DefaultFlashBytes : flashBytes, (flags & FlagCyw43) != 0);
+            { SetGlobalError(fn + ": unknown flags 0x" + flags.ToString("X") + " (valid: 0x7 ST_RP2040_BUS_*, 0x100 ST_RP2040_CYW43)"); return 0; }
+            var chip = new Chip(flashBytes == 0 ? DefaultFlashBytes : flashBytes, (flags & FlagCyw43) != 0,
+                                (PinLevelBus)(flags & BusFlagsMask));
             return NewHandle(chip);
         }
         catch (Exception e)
@@ -676,9 +718,14 @@ internal static unsafe class Exports
         finally { EndRun(chip); }
     }
 
-    // No pin-level engines in this core: no engine edge is ever coming.
     [UnmanagedCallersOnly(EntryPoint = "st_rp2040_cycles_until_edge", CallConvs = [typeof(CallConvCdecl)])]
-    public static ulong CyclesUntilEdge(nint h, uint watch) => ulong.MaxValue;
+    public static ulong CyclesUntilEdge(nint h, uint watch)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return ulong.MaxValue;
+        try { return chip.CyclesUntilEdge(watch); }
+        catch (Exception e) { chip.Fault("st_rp2040_cycles_until_edge", e); return ulong.MaxValue; }
+    }
 
     private static void EndRun(Chip chip)
     {

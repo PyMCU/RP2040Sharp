@@ -16,7 +16,9 @@ public class ExportTests
     [InlineData(1234u, 0u, "flash_bytes")]
     [InlineData(3u * 1024 * 1024, 0u, "flash_bytes")]
     [InlineData(32u * 1024 * 1024, 0u, "flash_bytes")]
-    [InlineData(0u, 2u, "unknown flags")]
+    [InlineData(0u, 8u, "unknown flags")]
+    [InlineData(0u, 0x80u, "unknown flags")]
+    [InlineData(0u, 0x200u, "unknown flags")]
     public void Create_rejects_bad_arguments(uint flash, uint flags, string why)
     {
         Assert.Equal(0, Abi.CreateEx(flash, flags));

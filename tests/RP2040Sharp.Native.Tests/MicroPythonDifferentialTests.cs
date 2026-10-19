@@ -93,7 +93,7 @@ public class MicroPythonDifferentialTests(ITestOutputHelper output)
                 run.RunUntilEdge(1_000_000, 75);
             cdc = run.Host.Cdc;
             calls = run.Calls.Count;
-        }, flags: 1);
+        }, flags: Abi.Cyw43);
         output.WriteLine($"stretched {probe.Stretched}, bounded {probe.Bounded}, plain {probe.Plain}, {calls} calls");
         Assert.Contains("wlan True 6", cdc);
     }
