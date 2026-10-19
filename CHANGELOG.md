@@ -51,7 +51,11 @@ counter step at every guard. See [docs/cosim.md](docs/cosim.md).
 ### Changed: `RP2040Mcu` (the SiliconTwin.Abstractions adapter) for fixed-step hosts
 
 - `new RP2040Mcu()` turns deferred peripheral ticks on; `RP2040McuOptions` (flash size, bootrom,
-  pin-level buses, `DeferPeripheralTicks`) builds the machine. Same results as the eager machine
+  pin-level buses, `DeferPeripheralTicks`, `CoSim`) builds the machine.
+- `Run(budget)` goes through `RP2040CoSim` with `TargetCycle = now + budget` (sleeping stretches,
+  bounded runs; a step ends at the first instruction boundary at or past the target);
+  `RP2040Mcu.CoSim = false` keeps `RP2040Machine.RunCycles`. MicroPython idle at `Run(125000)`
+  steps: 0.032 -> 0.0011 host s per simulated s. Same results as the eager machine
   (`RP2040McuLockstepTests`: `Run(750)` per step, PWM, SPI loopback, MicroPython).
 - `IPinBank.SetInputs` / `ReleaseInputs` sync the deferred peripherals first
   (`RP2040Machine.SyncForHostInput`) and skip pads already held at the level; `Run` ends with

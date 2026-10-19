@@ -19,9 +19,9 @@ public class RP2040McuLockstepTests(ITestOutputHelper output)
     private const int Step = 750;
     private const uint PwmBase = 0x40050000, IoBank0 = 0x40014000, Data = 0x20010000;
 
-    private static RP2040Mcu Boot(bool defer, byte[] image, PinLevelBus buses = PinLevelBus.None)
+    private static RP2040Mcu Boot(bool defer, byte[] image, PinLevelBus buses = PinLevelBus.None, bool coSim = true)
     {
-        var mcu = new RP2040Mcu(new RP2040McuOptions { DeferPeripheralTicks = defer, PinLevelBuses = buses });
+        var mcu = new RP2040Mcu(new RP2040McuOptions { DeferPeripheralTicks = defer, PinLevelBuses = buses, CoSim = coSim });
         mcu.Load(FirmwareImage.FromBin(image));
         mcu.Reset();
         return mcu;
@@ -54,12 +54,15 @@ public class RP2040McuLockstepTests(ITestOutputHelper output)
         return new Trace(events, pwm, mcu.Cycles, text?.Invoke() ?? "");
     }
 
-    [Fact]
-    public void Pwm_firmware_in_lockstep_matches_the_eager_machine()
+    // Both run paths: the co-simulation loop (the default) and RunCycles (RP2040Mcu.CoSim = false).
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Pwm_firmware_in_lockstep_matches_the_eager_machine(bool coSim)
     {
         Trace Go(bool defer)
         {
-            using var mcu = Boot(defer, PwmProgram());
+            using var mcu = Boot(defer, PwmProgram(), coSim: coSim);
             return LockStep(mcu, 4000, 0);
         }
         var eager = Go(false);
@@ -143,8 +146,8 @@ public class RP2040McuLockstepTests(ITestOutputHelper output)
     private const ulong Miso = 1UL << 16, Mosi = 1UL << 19;
     private const int Bursts = 200;
 
-    private static RP2040Mcu SpiMcu(bool defer, int cpsdvsr) =>
-        Boot(defer, PinLevelFirmware.SpiBursts(0, 8, cpsdvsr, PinLevelFirmware.SpiVariant.Poll, gap: 60, bursts: Bursts), PinLevelBus.Spi);
+    private static RP2040Mcu SpiMcu(bool defer, int cpsdvsr, bool coSim = true) =>
+        Boot(defer, PinLevelFirmware.SpiBursts(0, 8, cpsdvsr, PinLevelFirmware.SpiVariant.Poll, gap: 60, bursts: Bursts), PinLevelBus.Spi, coSim);
 
     private static (int Words, int Bad, int Bursts) CheckBursts(RP2040Mcu mcu)
     {
@@ -158,14 +161,16 @@ public class RP2040McuLockstepTests(ITestOutputHelper output)
     // The wire answers inside the PinChanged event of the edge, as a bit-level device model does: MISO follows MOSI at
     // once, whatever the step.
     [Theory]
-    [InlineData(126)]   // ~1 MHz
-    [InlineData(32)]    // ~3.9 MHz
-    public void Spi_loopback_answered_from_the_pin_event_is_correct_at_750_cycle_steps(int cpsdvsr)
+    [InlineData(126, true)]   // ~1 MHz
+    [InlineData(32, true)]    // ~3.9 MHz
+    [InlineData(126, false)]
+    [InlineData(32, false)]
+    public void Spi_loopback_answered_from_the_pin_event_is_correct_at_750_cycle_steps(int cpsdvsr, bool coSim)
     {
         var traces = new List<List<(long, ulong, ulong, ulong)>>();
         foreach (var defer in new[] { false, true })
         {
-            using var mcu = SpiMcu(defer, cpsdvsr);
+            using var mcu = SpiMcu(defer, cpsdvsr, coSim);
             var bank = mcu.Banks[0];
             var events = new List<(long, ulong, ulong, ulong)>();
             bank.PinChanged += (in PinChange e) =>
@@ -175,7 +180,7 @@ public class RP2040McuLockstepTests(ITestOutputHelper output)
             };
             for (int i = 0; i < 400; i++) mcu.Run(Step);
             var (words, bad, bursts) = CheckBursts(mcu);
-            output.WriteLine($"cpsdvsr {cpsdvsr} defer={defer}: {bursts} bursts, {words} words, {bad} bad, {events.Count} events");
+            output.WriteLine($"cpsdvsr {cpsdvsr} coSim={coSim} defer={defer}: {bursts} bursts, {words} words, {bad} bad, {events.Count} events");
             Assert.True(bursts > 10);
             Assert.Equal(0, bad);
             traces.Add(events);

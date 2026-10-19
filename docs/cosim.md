@@ -89,6 +89,25 @@ counts every level and output-enable change.
 - The C ABI chip (`src/RP2040Sharp.Native/Exports.cs`, [native-abi.md](native-abi.md)) is a thin wrapper: its
   run calls, pin input and `cycles_until_edge` go to the co-simulation; the pin callback is its recorder drained
   after each call.
+- `RP2040Mcu.Run(budget)` (the SiliconTwin.Abstractions adapter) is `RunUntilEdge` with
+  `TargetCycle = now + budget`, `SleepingStretches | BoundedRuns`, no watch, and `MaxSliceInstructions` as the
+  quantum; the pin bank's recorder in immediate mode raises `PinChanged`. The step ends at the first instruction
+  boundary at or past the target (it used to be sized from the cycles per instruction seen so far, narrowing to
+  single instructions at the tail), with nothing owed. `RP2040McuOptions.CoSim = false` (or `RP2040Mcu.CoSim`)
+  keeps the old `RP2040Machine.RunCycles` path. `RP2040McuLockstepTests` checks both paths, eager against
+  deferred.
+
+| `RP2040Mcu` (warm JIT, Windows x64, host s per simulated s; parent tree -> this one, default options) | before | after |
+|---|---:|---:|
+| busy loop, `Run(750)` | 0.55 | 0.45 |
+| MicroPython idle REPL, `Run(750)` | 0.11 | 0.063 |
+| MicroPython idle REPL, `Run(125000)` | 0.032 | 0.0011 |
+| busy loop, `Run(125000)` | 0.45 | 0.45 |
+
+With one slice per step (`Run(750)`), the deferred machine is a little slower than the eager one through the new
+path (idle 0.063 against 0.050): it ticks the same peripherals at the end of the step (`Run` leaves nothing owed)
+after deciding per sweep which ones are due. Whole stretches are where deferral pays (`Run(125000)` idle: 0.0011
+against 0.033 eager).
 
 ## AOT
 

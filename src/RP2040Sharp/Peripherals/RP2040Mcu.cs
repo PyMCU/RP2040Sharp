@@ -60,7 +60,10 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
     /// <summary>Creates an adapter over a new machine built from <paramref name="options"/>, disposed with the adapter.</summary>
     public RP2040Mcu(RP2040McuOptions options)
         : this(new RP2040Machine(options.FlashSizeBytes, options.Bootrom, options.PinLevelBuses)
-               { DeferPeripheralTicks = options.DeferPeripheralTicks }, ownsMachine: true) { }
+               { DeferPeripheralTicks = options.DeferPeripheralTicks }, ownsMachine: true)
+    {
+        CoSim = options.CoSim;
+    }
 
     /// <summary>Creates an adapter over an existing machine, which the caller keeps owning.</summary>
     /// <param name="machine">The machine to drive.</param>
@@ -73,6 +76,8 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         _ownsMachine = ownsMachine;
         _bank = new PinBank(this);
         _banks = [_bank];
+        // The co-simulation loop of the C ABI chip, reporting through the pin bank's recorder.
+        _cosim = new RP2040CoSim(machine, _bank.Recorder);
         _uarts = [new UartPort(0, machine.Uart0), new UartPort(1, machine.Uart1)];
         _spis = [new SpiPort(0, machine.Spi0), new SpiPort(1, machine.Spi1)];
         _i2cs = [new I2cPort(0, machine.I2c0), new I2cPort(1, machine.I2c1)];
@@ -80,6 +85,16 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
 
     /// <summary>The wrapped machine, for everything the shared contracts do not cover.</summary>
     public RP2040Machine Machine => _machine;
+
+    private readonly RP2040CoSim _cosim;
+
+    /// <summary>
+    /// Run through the co-simulation loop (<see cref="RP2040CoSim"/>, docs/cosim.md), on by default: a step ends at the
+    /// first instruction boundary at or past the requested cycle (a sleeping core exactly on it), with sleeping
+    /// stretches and bounded awake runs when deferred ticks are on. Off, <see cref="Run"/> is
+    /// <see cref="RP2040Machine.RunCycles"/> (slices sized from the cycles per instruction seen so far).
+    /// </summary>
+    public bool CoSim { get; set; } = true;
 
     /// <summary>
     /// Upper bound, in instructions, on one slice of <see cref="Run"/>. Peripherals that advance on a tick
@@ -113,7 +128,18 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
     /// </remarks>
     public long Run(long cycleBudget)
     {
-        var used = _machine.RunCycles(cycleBudget, MaxSliceInstructions);
+        long used;
+        if (CoSim)
+        {
+            if (cycleBudget <= 0) return 0;
+            _cosim.Quantum = Math.Max(1, MaxSliceInstructions);
+            used = _cosim.RunUntilEdge(new RunRequest
+            {
+                TargetCycle = _machine.Cpu.Cycles + cycleBudget,
+                Flags = CoSimFlags.SleepingStretches | CoSimFlags.BoundedRuns,
+            }).Cycles;
+        }
+        else used = _machine.RunCycles(cycleBudget, MaxSliceInstructions);
         // Leave nothing owed: whatever the host reads or drives next sees the peripherals at the end of the run.
         if (used > 0 && _machine.DeferPeripheralTicks) _machine.SyncPeripherals();
         return used;
@@ -317,6 +343,9 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         private readonly RP2040Machine _m;
         private readonly Action<uint> _sioHook;
         private readonly PadEventRecorder _recorder;
+
+        /// <summary>The recorder the pin bank reports from (immediate mode), shared with the co-simulation loop.</summary>
+        public PadEventRecorder Recorder => _recorder;
 
         private PinChangeHandler? _changed;
         private ulong _watchMask = AllPins;
@@ -638,4 +667,7 @@ public sealed record RP2040McuOptions
     /// <summary>Deferred peripheral ticks (<see cref="RP2040Machine.DeferPeripheralTicks"/>): on by default; off ticks every
     /// peripheral after every slice, the reference the deferred machine is checked against.</summary>
     public bool DeferPeripheralTicks { get; init; } = true;
+
+    /// <summary>Run through the co-simulation loop (<see cref="RP2040Mcu.CoSim"/>): on by default.</summary>
+    public bool CoSim { get; init; } = true;
 }

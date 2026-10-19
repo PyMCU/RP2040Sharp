@@ -158,7 +158,7 @@ public sealed class RP2040CoSim
         bool stretches = (flags & CoSimFlags.SleepingStretches) != 0, bounded = (flags & CoSimFlags.BoundedRuns) != 0;
         bool adaptive = (flags & CoSimFlags.AdaptiveSleep) != 0;
         bool pollPwm = armed && !m.ExactPwmPadEdges;
-        long swept0 = m.SweptCycles, done = 0;
+        long swept0 = m.SweptCycles, done = 0, startCycle = m.Cpu.Cycles;
         var reason = RunStopReason.Slots;
         if (hasTarget) m.CutLimit = target;
         try
@@ -169,7 +169,8 @@ public sealed class RP2040CoSim
                 if (hasTarget)
                 {
                     long now = m.Cpu.Cycles;
-                    if (now >= target) { reason = RunStopReason.TargetCycle; break; }
+                    // A watchdog reboot restarts core 0's counter: the run ends there rather than run it all again.
+                    if (now >= target || now < startCycle) { reason = RunStopReason.TargetCycle; break; }
                     // Both cores stopped (locked up): time still passes, so burn the rest of the way.
                     if (m.Cpu.IsLockedUp && (!m.Core1Launched || m.Cpu1.IsLockedUp))
                     {
@@ -188,6 +189,9 @@ public sealed class RP2040CoSim
                 long left = max - done;
                 int n = (int)Math.Min(slice, left);
                 long whole = left / slice;   // full slices left in the call
+                // A slice takes at least its slots in cycles: with the target less than two slices away there is
+                // nothing to take at once, and the bookkeeping would cost more than the slice (fixed-step hosts).
+                if (hasTarget && target - m.Cpu.Cycles < 2L * slice) whole = 0;
                 if (whole >= 2 && m.DeferPeripheralTicks)
                 {
                     if (sleeping && stretches && m.CanSkipSleepingSlices())

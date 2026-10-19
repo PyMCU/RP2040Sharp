@@ -59,7 +59,9 @@ own setting). The results are those of the eager machine (`RP2040McuLockstepTest
   so the cycles already run see the old level; inside a run (a `PinChanged` handler answering an edge) that is the
   sweeps so far, which is what the eager machine has ticked by then. Pads already held at the requested level are
   skipped without a sync (a circuit solver re-applies its inputs many times per step).
-- `Run` ends with nothing owed, and `OutputLevels` / `OutputEnableMask` sync before they read.
+- `Run` goes through the co-simulation loop (`RP2040CoSim`, [cosim.md](cosim.md)) with a target cycle, so a step ends
+  at the first instruction boundary at or past it, with sleeping stretches and bounded awake runs; it ends with
+  nothing owed, and `OutputLevels` / `OutputEnableMask` sync before they read (`RP2040Machine.SyncForHostRead`).
 - `PinChanged` stamps each change with its own cycle: the instruction for a SIO / IO_BANK0 / PADS write (core 1's
   mapped onto core 0's clock, `RP2040Machine.EngineClock`), the edge cycle for the pin-level UART / SPI / I2C engines,
   the end of the slice for other peripherals (PIO, DMA into SIO). PWM pads are reported too
