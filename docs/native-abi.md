@@ -40,7 +40,7 @@ dotnet publish src/RP2040Sharp.Native -c Release -r win-x64 -p:StNativeLib=true 
 | `st_rp2040_cycles_until_edge` | Cycles until the next step of a pin-level engine with work on a watched pad, `UINT64_MAX` when none has one coming (as on RP2350: the Proteus host's EdgeWait) |
 | `st_rp2040_cycles`, `st_rp2040_time_ps`, `st_rp2040_cycle_to_ps`, `st_rp2040_clk_sys_hz` | Core-0 cycles at a fixed 125 MHz (the core does not model clock changes): 8000 ps per cycle |
 | `st_rp2040_instructions(core)` | Conservative retired count, as on RP2350 |
-| `st_rp2040_pin_get`, `st_rp2040_pin_get_pull`, `st_rp2040_pin_set_input` | `-1` releases a pad: it reads its pull and follows later pull changes. `pin_set_input` first applies the peripheral time still pending, so no tick samples the new level retroactively |
+| `st_rp2040_pin_get`, `st_rp2040_pin_get_pull`, `st_rp2040_pin_set_input` | `-1` releases a pad: it reads its pull and follows later pull changes. `pin_set_input` first applies the peripheral time still pending, so no tick samples the new level retroactively; a pad already held at the level (or already released) is left alone, without that sync, as on RP2350 |
 | `st_rp2040_adc_set_voltage` | Channels 0..3 (GP26..29); the temperature sensor reads 27 °C |
 | `st_rp2040_set_pin_callback`, `st_rp2040_set_serial_callback`, `st_rp2040_serial_write` | Channels UART0, UART1 and USB CDC: an emulated USB host (`UsbCdcHost`) enumerates the device and asserts DTR, so the MicroPython REPL works over CDC |
 
@@ -54,14 +54,29 @@ the end of the slice. A change made by a CPU instruction (a SIO, IO_BANK0 or PAD
 core) carries the cycle of that instruction, so the cycles a host sees, and pulse widths, are the
 same at every guard: the tests check a timer-timed 37 µs pulse and a square wave at guards 1, 75
 and 300. Changes made by the pin-level UART / SPI / I2C engines carry the cycle of the edge (the
-engines run on core 0's clock). Changes made by other peripherals (PIO, the PWM counter, DMA into SIO)
-carry the end of the slice in which they happened. Pads muxed to PWM are polled after every slice while
-watched. Changes are reported in cycle order; core 1's never past core 0's clock.
+engines run on core 0's clock). A PWM counter edge carries the cycle of the counter step that made it
+(the divider's fractional phase included; `RP2040Machine.ExactPwmPadEdges`, on in the chip), a PWM register
+write the cycle of the instruction. Changes made by other peripherals (PIO, DMA into SIO) carry the end of
+the slice in which they happened. Changes are reported in cycle order (`PadEventRecorder`, stable), core 1's
+never past core 0's clock.
+
+The PWM counter itself still advances at the end of each slice (as every peripheral does), so it starts
+counting from the start of the slice in which firmware enabled it: the period and every later edge are
+exact, the phase of the first one follows where that slice began.
+
+## Inside: the co-simulation core
+
+The chip is a thin C face over `RP2040CoSim` (in the core library, [cosim.md](cosim.md)), the loop that the
+managed adapter `RP2040Mcu` runs too: `st_rp2040_run(n)` is `Run(n)` (slices of the 512-instruction quantum from
+the call's start), `st_rp2040_run_until_edge` is `RunUntilEdge` with the guard, the watch and
+`CoSimFlags.Default` (event guard, sleeping stretches, bounded runs, stop on a watched edge, twice the guard
+asleep); pad events come from its `PadEventRecorder` in drain mode, `st_rp2040_pin_set_input` goes through
+`RP2040CoSim.SetInputs` / `ReleaseInputs`.
 
 ## Missing compared with RP2350
 
-- **Exact peripheral-driven edges** for PIO, PWM and DMA: their pad changes carry the end of their
-  slice (the pin-level UART / SPI / I2C engines' carry their own cycle).
+- **Exact peripheral-driven edges** for PIO and DMA: their pad changes carry the end of their slice (the
+  pin-level UART / SPI / I2C engines' and the PWM counter's carry their own cycle).
 - **Pin-level slaves and flow control**: SPI and I2C slave modes stay at transaction level; UART CTS /
   RTS are not modelled; the UART RX interrupt is raised per byte (no RX trigger level or receive
   timeout), as for bytes from the serial channel.

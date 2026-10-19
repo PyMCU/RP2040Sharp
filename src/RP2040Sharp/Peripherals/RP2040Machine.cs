@@ -575,7 +575,24 @@ public sealed class RP2040Machine : IDisposable
         ScheduleEpoch++;
         if (!_cutArmed || _activeCoreId != 0) return;
         var e = CyclesUntilPadEdge(_cutWatch);
-        Cpu.CutCycle = e == long.MaxValue ? long.MaxValue : Cpu.Cycles + e;
+        Cpu.CutCycle = Math.Min(CutLimit, e == long.MaxValue ? long.MaxValue : Cpu.Cycles + e);
+    }
+
+    /// <summary>
+    /// A core-0 cycle no cut run of core 0 (<see cref="RunCut"/>, <see cref="RunAwakeBounded"/>) runs past: it stops
+    /// before the first instruction that would start at or after it, and sleeps only up to it. long.MaxValue (the
+    /// default) for none. The co-simulation loop sets it for a run with a target cycle (<see cref="RP2040CoSim"/>).
+    /// </summary>
+    public long CutLimit { get; set; } = long.MaxValue;
+
+    /// <summary>Both cores stopped (locked up): <paramref name="cycles"/> of time still pass, core 0's clock and the
+    /// peripherals' with it.</summary>
+    public void ChargeStopped(long cycles)
+    {
+        if (cycles <= 0) return;
+        Cpu.Cycles += cycles;
+        LastElapsedCycles = cycles;
+        Sweep(cycles, cycles);
     }
 
     /// <summary>Inside a cut run of core 0, stop it right after the instruction in flight (a host that watches a pad that
@@ -589,7 +606,7 @@ public sealed class RP2040Machine : IDisposable
     {
         var e = CyclesUntilPadEdge(watch);
         Cpu.CutRequest = false;
-        Cpu.CutCycle = e == long.MaxValue ? long.MaxValue : Cpu.Cycles + Math.Max(1, e);
+        Cpu.CutCycle = Math.Min(CutLimit, e == long.MaxValue ? long.MaxValue : Cpu.Cycles + Math.Max(1, e));
         _cutWatch = watch;
         _cutArmed = true;
     }
@@ -1298,7 +1315,7 @@ public sealed class RP2040Machine : IDisposable
     /// </summary>
     /// <returns>The number of slices booked before the last one.</returns>
     /// <param name="cutWatch">Nonzero: the run is also cut as <see cref="RunCut"/> cuts a slice, on these pads, and the
-    /// slice it ends in may then be shorter (<see cref="BoundedSliceSlots"/>).</param>
+    /// slice it ends in may then be shorter (<see cref="BoundedSliceSlots"/>). A <see cref="CutLimit"/> cuts it too.</param>
     public int RunAwakeBounded(int instructions, int maxSlices, uint cutWatch = 0)
     {
         var g = _gate;
@@ -1310,7 +1327,7 @@ public sealed class RP2040Machine : IDisposable
         g.Plan();
         EndBoundedRun = false;
         _activeCoreId = 0;
-        if (cutWatch == 0)
+        if (cutWatch == 0 && CutLimit == long.MaxValue)
         {
             Cpu.RunGated(g, instructions);
             BoundedSliceSlots = instructions;

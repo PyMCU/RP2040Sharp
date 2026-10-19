@@ -130,6 +130,7 @@ compat/index
 
 reference/index
 native-abi
+cosim
 peripheral-deadlines
 pin-level-buses
 ```

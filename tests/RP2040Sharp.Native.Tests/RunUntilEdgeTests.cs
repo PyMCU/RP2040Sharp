@@ -144,4 +144,34 @@ public class RunUntilEdgeTests
         }
         finally { Abi.Destroy(h); }
     }
+
+    // PWM slice 7 on GP14 (DIV 3, TOP 1499, CC 500 + 7 per wrap, Firmware.PwmIsr): each edge carries the cycle of the
+    // counter step that made it (RP2040Machine.ExactPwmPadEdges), not the end of the slice it was found in: the period
+    // is 1500 x 3 cycles exactly at every guard. (The counter starts counting with the slice the enable write is in, so
+    // the phase follows where that slice starts: a coarse guard's edges are the fine guard's moved by a constant.)
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(75u)]
+    [InlineData(300u)]
+    public void Pwm_edges_carry_their_counter_step_at_every_guard(uint guard)
+    {
+        List<long> Rises(uint g)
+        {
+            var h = Abi.Create(0);
+            using var host = new Host();
+            try
+            {
+                Assert.Equal(1, Abi.LoadUf2(h, Firmware.Uf2(Firmware.PwmIsr())));
+                Abi.Attach(h, host);
+                while (Abi.Cycles(h) < 200_000) Abi.RunUntilEdge(h, 1_000_000, g, 1u << 14);
+                return host.Pins.Where(p => p.Gpio == 14 && p.Level == 1 && p.Oe == 1).Skip(1).Select(p => (long)p.Cycle).ToList();
+            }
+            finally { Abi.Destroy(h); }
+        }
+        var rises = Rises(guard);
+        Assert.True(rises.Count > 20);
+        Assert.Equal([4500L], rises.Zip(rises.Skip(1), (a, b) => b - a).Distinct());
+        var fine = Rises(1);
+        Assert.Single(fine.Zip(rises, (a, b) => b - a).Distinct());
+    }
 }

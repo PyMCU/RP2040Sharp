@@ -15,12 +15,6 @@ internal sealed unsafe class Chip
     public const int GpioCount = 30;
     private const uint AllPads = (1u << GpioCount) - 1;
 
-    /// <summary>
-    /// Most instructions a slice runs before the peripherals advance (they tick once per slice). USB enumeration and
-    /// the MicroPython REPL need them at least this often; the TestKit and the CYW43 tests use the same order.
-    /// </summary>
-    internal int PeripheralQuantum = 512;
-
     // ADC code of the temperature sensor at 27 degrees C (0.706 V, RP2040 datasheet 4.9.5), as the core reads it
     // without a host: setting AdcPeripheral.ReadChannel replaces that default for every channel.
     private const ushort TempSensor27C = 876;
@@ -30,8 +24,8 @@ internal sealed unsafe class Chip
     public readonly Cyw43439Device? Cyw43;
     private readonly ushort[] _adc = new ushort[4];
 
-    /// <summary>Every pad change with its own cycle, reported in cycle order after each call (PadEventRecorder).</summary>
-    public readonly PadEventRecorder Pads;
+    /// <summary>Every pad change with its own cycle, reported in cycle order after each call (RP2040CoSim.Pads).</summary>
+    public PadEventRecorder Pads => CoSim.Pads;
 
     // ---- fault isolation -------------------------------------------------------------------------
     // Any managed exception inside an export lands in Fault(): the chip becomes inert ("faulted", sticky)
@@ -43,7 +37,7 @@ internal sealed unsafe class Chip
     public bool Running, DestroyPending, Freed;
     public ulong LastCycles, LastPs;
 #if ST_ENABLE_TEST_HOOKS
-    public int InjectOnRun, InjectOnScan;
+    public int InjectOnScan;
 #endif
 
     public byte* ErrorPtr => _err;
@@ -104,20 +98,10 @@ internal sealed unsafe class Chip
         // Every pad change that goes through IO_BANK0 (SIO writes of either core, PIO, FUNCSEL / override / PADS
         // writes, DMA into SIO, the pin-level UART / SPI / I2C engines) is recorded while it happens, so it is
         // stamped with its own cycle (an engine's: the cycle of its edge). PWM-muxed pads follow the counter instead
-        // and are polled (Pads.Poll). A watched pad's change ends a bounded run and cuts a cut slice after the
-        // instruction that made it.
-        Pads = new PadEventRecorder(Machine)
-        {
-            WatchedEdge = () => { Machine.EndBoundedRun = true; Machine.RequestCut(); },
-        };
+        // and are polled. The host is told after each call, starting from every pad undriven and low.
+        CoSim = new RP2040CoSim(Machine);
         Pads.Attach(baseline: false);
-        // A bounded run books slice ends without coming back here: poll the watched PWM pads at each of them.
-        Machine.BoundaryCheck = () =>
-        {
-            uint pwm = Machine.IoBank0.PwmMuxedPins & Pads.Watch;
-            if (pwm != 0) Pads.Poll(pwm);
-            return Pads.WatchedChanged;
-        };
+        Machine.ExactPwmPadEdges = true;
         if (cyw43)
         {
             // Pico W wiring, as RP2040Sharp.Wireless' tests and the Silicon Twin demo do it: IO_BANK0 hears SIO only
@@ -145,42 +129,41 @@ internal sealed unsafe class Chip
     public ulong TimePs => CycleToPs(Cycles);
 
     // ---- running ---------------------------------------------------------------------------------
+    // The loop lives in the core (RP2040CoSim, docs/cosim.md), shared with the managed adapter: the chip is its C face.
 
-    /// <summary>Conservative per-core retired-instruction count (see <see cref="RunSlice"/>).</summary>
-    public readonly ulong[] Retired = new ulong[2];
+    /// <summary>The co-simulation loop: slices, sleeping stretches, bounded runs, the event-bounded guard, pad events.</summary>
+    public readonly RP2040CoSim CoSim;
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool Parked(int core) => core == 0
-        ? Machine.Cpu.Registers.Waiting || Machine.Cpu.IsLockedUp
-        : !Machine.Core1Launched || Machine.Cpu1.Registers.Waiting || Machine.Cpu1.IsLockedUp;
-
-    /// <summary>
-    /// One machine slice of <paramref name="n"/> instructions per core, then the peripheral ticks. The core has no
-    /// retired-instruction counter and credits a sleeping core's slots as cycles, so a slice is credited to a core
-    /// only if that core was neither asleep (WFI/WFE), locked up nor (core 1) unlaunched at its start and at its end:
-    /// a lower bound, exact for CPU-bound code, low by up to one slice per sleep/wake transition.
-    /// </summary>
-    private int RunSlice(int n, bool cut = false)
-    {
-        bool p0 = Parked(0), p1 = Parked(1);
-#if ST_ENABLE_TEST_HOOKS
-        if (InjectOnRun == 1) { InjectOnRun = 0; throw new InvalidOperationException("injected fault inside Run"); }
-        if (InjectOnRun == 2) { InjectOnRun = 0; Chip? none = null; _ = none!.Machine; }
-#endif
-        int k = n;
-        if (cut) k = Machine.RunCut(n, Pads.Watch);
-        else Machine.Run(n);
-        if (k < n) CutSlices++;
-        if (!p0 && !Parked(0)) Retired[0] += (ulong)k;
-        if (!p1 && !Parked(1)) Retired[1] += (ulong)k;
-        return k;
-    }
+    /// <summary>Conservative per-core retired-instruction count (RP2040CoSim.Retired).</summary>
+    public ulong[] Retired => CoSim.Retired;
 
     /// <summary>Run <paramref name="max"/> instructions per core in peripheral-quantum slices (st_rp2040_run).</summary>
     public void Run(int max) => RunUntilEdge(max, 0, 0);
 
+    /// <summary>
+    /// Run up to <paramref name="max"/> instructions in slices of <paramref name="guard"/> whenever a pad is watched
+    /// and the guard is nonzero (twice that while both cores sleep), stopping after the slice in which a watched pad
+    /// changed (RP2040CoSim.RunUntilEdge). Pad changes are reported at the end, in cycle order.
+    /// </summary>
+    public void RunUntilEdge(int max, int guard, uint watch)
+    {
+        var flags = CoSimFlags.StopOnWatchedEdge | CoSimFlags.AdaptiveSleep;
+        if (EventGuard) flags |= CoSimFlags.EventGuard;
+        if (SleepingStretches) flags |= CoSimFlags.SleepingStretches;
+        if (AwakeBoundedRuns) flags |= CoSimFlags.BoundedRuns;
+        CoSim.RunUntilEdge(new RunRequest { MaxSlots = max, Guard = guard, Watch = watch, Flags = flags });
+        ScanPads();
+    }
+
     // ---- co-simulation speed-ups (docs/peripheral-deadlines.md) -----------------------------------------------------
     // Each gives exactly the result of the plain slices; turning them off is the reference the tests compare against.
+
+    /// <summary>Most instructions a slice runs before the peripherals advance (RP2040CoSim.Quantum, 512).</summary>
+    internal int PeripheralQuantum
+    {
+        get => CoSim.Quantum;
+        set => CoSim.Quantum = value;
+    }
 
     /// <summary>Peripheral ticks put off until their next event or access (RP2040Machine.DeferPeripheralTicks).</summary>
     internal bool DeferPeripheralTicks
@@ -195,9 +178,6 @@ internal sealed unsafe class Chip
     /// <summary>While core 0 is awake and core 1 is not running, its slices run in one bounded interpreter loop.</summary>
     internal bool AwakeBoundedRuns = true;
 
-    /// <summary>Test probe: slices booked by stretches and by bounded runs, and slices run plainly.</summary>
-    internal long StretchedSlices, BoundedSlices, PlainSlices;
-
     /// <summary>
     /// Event-bounded guard (docs/pin-level-buses.md). The host answers a pad edge only after the call returns, so a
     /// slice must not run from a watched pad's edge into the sample of an input the circuit may be answering on (an
@@ -208,108 +188,30 @@ internal sealed unsafe class Chip
     /// </summary>
     internal bool EventGuard = true;
 
-    /// <summary>Test probe: slices that a cut ended early.</summary>
-    internal long CutSlices;
+    /// <summary>Test probes (RP2040CoSim): slices booked by stretches and by bounded runs, run plainly, cut early.</summary>
+    internal long StretchedSlices => CoSim.StretchedSlices;
+    internal long BoundedSlices => CoSim.BoundedSlices;
+    internal long PlainSlices => CoSim.PlainSlices;
+    internal long CutSlices => CoSim.CutSlices;
 
-    /// <summary>
-    /// Run up to <paramref name="max"/> instructions in slices of <paramref name="guard"/> whenever a pad is watched
-    /// and the guard is nonzero (twice that while both cores sleep), stopping after the slice in which a watched pad
-    /// changed. A slice never exceeds <see cref="PeripheralQuantum"/>. Peripherals tick at the end of every slice,
-    /// before the pads are looked at, so there is nothing pending when the call returns. Pad changes are reported at
-    /// the end, in cycle order. Sleeping stretches and bounded runs take several of those slices at once, with the
-    /// same result.
-    /// </summary>
-    public void RunUntilEdge(int max, int guard, uint watch)
-    {
-        bool armed = watch != 0 && guard > 0;
-        Pads.Watch = armed ? watch & AllPads : 0;
-        Pads.WatchedChanged = false;
-        uint watched = Pads.Watch;
-        var m = Machine;
-        // The event-bounded guard: guard 1 already ends every slice after one instruction.
-        bool events = armed && EventGuard && guard > 1 && m.PinLevelBuses != PinLevelBus.None && watched != 0;
-        try
-        {
-            int quantum = Math.Max(1, PeripheralQuantum);
-            for (int done = 0; done < max;)
-            {
-                bool sleeping = Parked(0) && Parked(1);
-                int slice = quantum;
-                if (armed)
-                {
-                    slice = sleeping ? (int)Math.Min(2L * guard, int.MaxValue) : guard;
-                    slice = Math.Min(slice, quantum);
-                }
-                int n = Math.Min(slice, max - done);
-                int whole = (max - done) / slice;   // full slices left in the call
-                if (whole >= 2 && m.DeferPeripheralTicks)
-                {
-                    if (sleeping && SleepingStretches && m.CanSkipSleepingSlices())
-                    {
-                        // The first sweep with something due is the j-th slice from here; the ones before it only count.
-                        long until = m.SweptCyclesUntilEvent();
-                        long j = until == long.MaxValue ? long.MaxValue : Math.Max(1, (until + slice - 1) / slice);
-                        long skip = Math.Min(j - 1, whole - 1);
-                        if (skip > 0)
-                        {
-                            m.SkipSleepingSlices(skip, slice);
-                            StretchedSlices += skip;
-                            done += (int)(skip * slice);
-                            continue;
-                        }
-                    }
-                    else if (!Parked(0) && AwakeBoundedRuns && m.Core1Inert)
-                    {
-                        RunBounded(slice, whole, events);
-                        done += _boundedDone;
-                        if (armed)
-                        {
-                            uint pwmB = m.IoBank0.PwmMuxedPins & watched;
-                            if (pwmB != 0) Pads.Poll(pwmB);
-                            if (Pads.WatchedChanged) break;
-                        }
-                        continue;
-                    }
-                }
-                PlainSlices++;
-                done += RunSlice(n, events);
-                if (!armed) continue;
-                // PWM-muxed pads move with the counter, which IO_BANK0 never reports: compare the watched ones.
-                uint pwm = m.IoBank0.PwmMuxedPins & watched;
-                if (pwm != 0) Pads.Poll(pwm);
-                if (Pads.WatchedChanged) break;
-            }
-        }
-        finally { Pads.Watch = 0; }
-        ScanPads();
-    }
-
-    private int _boundedDone;
-
-    /// <summary>
-    /// Up to <paramref name="maxSlices"/> slices of <paramref name="n"/> with core 0 awake and core 1 inert, in one
-    /// bounded run: the slices whose ends change nothing are booked (core 0 credited <paramref name="n"/> retired
-    /// instructions each, as <see cref="RunSlice"/> would), the last one is finished as a plain slice.
-    /// </summary>
-    private void RunBounded(int n, int maxSlices, bool cut)
-    {
-        var m = Machine;
-        bool p1 = Parked(1);
 #if ST_ENABLE_TEST_HOOKS
-        if (InjectOnRun != 0) { _boundedDone = RunSlice(n, cut); return; }
-#endif
-        int booked = m.RunAwakeBounded(n, maxSlices, cut ? Pads.Watch : 0);
-        int k = m.BoundedSliceSlots;
-        BoundedSlices += booked;
-        PlainSlices++;
-        if (k < n) CutSlices++;
-        Retired[0] += (ulong)booked * (ulong)n;
-        // The last slice: core 0's part ran in the bounded loop; core 1's turn and the sweep run as in a plain slice.
-        m.FinishSlice(k, m.BoundedSliceDelta);
-        if (!Parked(0)) Retired[0] += (ulong)k;
-        if (!p1 && !Parked(1)) Retired[1] += (ulong)k;
-        _boundedDone = booked * n + k;
+    private int _injectOnRun;
+
+    /// <summary>1: an InvalidOperationException, 2: a NullReferenceException inside the next slice.</summary>
+    public int InjectOnRun
+    {
+        get => _injectOnRun;
+        set { _injectOnRun = value; CoSim.BeforeSlice = value != 0 ? InjectFault : null; }
     }
+
+    private void InjectFault()
+    {
+        int mode = _injectOnRun;
+        InjectOnRun = 0;
+        if (mode == 1) throw new InvalidOperationException("injected fault inside Run");
+        if (mode == 2) { Chip? none = null; _ = none!.Machine; }
+    }
+#endif
 
     // ---- pads ------------------------------------------------------------------------------------
 
@@ -353,18 +255,18 @@ internal sealed unsafe class Chip
     /// pulls say, tracking later PADS_BANK0 changes by itself.</summary>
     public void SetInput(int gpio, int level)
     {
-        // The cycles already run belong to the old level: bring every deferred peripheral (and pin-level engine) up
-        // to now first, or a later tick would sample the new level retroactively.
-        Machine.SyncPeripherals();
-        if (level < 0) Machine.IoBank0.ReleaseExternalInput(1u << gpio);
-        else Machine.IoBank0.SetExternalInput(gpio, level != 0);
+        // The cycles already run belong to the old level: the deferred peripherals (and pin-level engines) are brought
+        // up to now first, or a later tick would sample the new level retroactively. A pad already held at the level
+        // (or already released) changes nothing and syncs nothing.
+        if (level < 0) CoSim.ReleaseInputs(1u << gpio);
+        else CoSim.SetInputs(1u << gpio, level != 0 ? 1u << gpio : 0);
     }
 
     /// <summary>Core-0 cycles until the next edge a pin-level engine makes on a pad in <paramref name="watch"/>
     /// (<see cref="RP2040Machine.CyclesUntilPadEdge"/>), ulong.MaxValue when none has one coming.</summary>
     public ulong CyclesUntilEdge(uint watch)
     {
-        var c = Machine.CyclesUntilPadEdge(watch & AllPads);
+        var c = CoSim.CyclesUntilPadEdge(watch);
         return c == long.MaxValue ? ulong.MaxValue : (ulong)c;
     }
 

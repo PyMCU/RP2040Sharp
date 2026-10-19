@@ -35,6 +35,18 @@ SRAM, peripheral registers, call returns). See [docs/peripheral-deadlines.md](do
 - Fixed: `RoscPeripheral.RANDOMBIT` was a process-wide counter, so pico_rand's seed (and with it
   the Pico W WLAN bring-up) depended on every other machine in the process.
 
+### New: the co-simulation core (`RP2040CoSim`)
+
+The loop of `st_rp2040_run_until_edge` (slices, sleeping stretches, bounded runs, the event-bounded
+guard, retired counts) moves from the native chip into the core library as `RP2040CoSim`, with
+`RunRequest` / `RunResult` / `RunStopReason` / `CoSimFlags` (the names of RP2350Sharp's), a target
+cycle (`RP2040Machine.CutLimit`: runs stop at the first instruction boundary at or past it),
+`SetInputs` / `ReleaseInputs` (skip unchanged pads, sync the rest) and `SyncToNow`. Pad events go
+through `PadEventRecorder` (drain: stable cycle order, clamped to core 0's clock; immediate) and
+`PadEvent` moves to the core. The native chip is a thin wrapper over it; it turns
+`RP2040Machine.ExactPwmPadEdges` on, so PWM edges reach the pin callback at the cycle of their
+counter step at every guard. See [docs/cosim.md](docs/cosim.md).
+
 ### Changed: `RP2040Mcu` (the SiliconTwin.Abstractions adapter) for fixed-step hosts
 
 - `new RP2040Mcu()` turns deferred peripheral ticks on; `RP2040McuOptions` (flash size, bootrom,
