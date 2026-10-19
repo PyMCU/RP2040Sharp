@@ -7,8 +7,9 @@ namespace RP2040Sharp.Native.Tests;
 /// <summary>
 /// Co-simulation throughput under st_rp2040_run_until_edge with every pad watched, as Proteus drives it: the idle
 /// MicroPython REPL (RPI_PICO v1.28.0), the same REPL with a 1 kHz PWM on GP14, and a hand-assembled busy loop on
-/// core 0; plus the plain interpreter (Machine.Run) for parity checks. Measurements, not checks: they run only with
-/// RP2040_NATIVE_PERF=1. Best of three, wall time.
+/// core 0; plus the plain interpreter (Machine.Run) for parity checks. Each without pin-level buses (flags 0) and with
+/// all of them (ST_RP2040_BUS_ALL: the event-bounded guard is armed, nothing is routed). Measurements, not checks:
+/// they run only with RP2040_NATIVE_PERF=1. Best of three, wall time.
 /// </summary>
 public class CoSimBench(ITestOutputHelper output)
 {
@@ -18,18 +19,22 @@ public class CoSimBench(ITestOutputHelper output)
         Skip.If(Environment.GetEnvironmentVariable("RP2040_NATIVE_PERF") != "1", "set RP2040_NATIVE_PERF=1 to measure");
 
     [SkippableTheory]
-    [InlineData("idle", 1u)]
-    [InlineData("idle", 75u)]
-    [InlineData("idle", 300u)]
-    [InlineData("pwm", 1u)]
-    [InlineData("pwm", 75u)]
-    [InlineData("pwm", 300u)]
-    public void MicroPython_throughput(string workload, uint guard)
+    [InlineData("idle", 1u, 0u)]
+    [InlineData("idle", 75u, 0u)]
+    [InlineData("idle", 300u, 0u)]
+    [InlineData("pwm", 1u, 0u)]
+    [InlineData("pwm", 75u, 0u)]
+    [InlineData("pwm", 300u, 0u)]
+    [InlineData("idle", 1u, Abi.BusAll)]
+    [InlineData("idle", 75u, Abi.BusAll)]
+    [InlineData("idle", 300u, Abi.BusAll)]
+    [InlineData("pwm", 75u, Abi.BusAll)]
+    public void MicroPython_throughput(string workload, uint guard, uint buses)
     {
         SkipUnlessPerf();
         var uf2 = Firmware.MicroPythonPico();
         Skip.If(uf2 is null, "MicroPython RPI_PICO v1.28.0 UF2 not found (set RP2040_MICROPYTHON_UF2)");
-        var (h, host) = MicroPythonTests.BootToRepl(uf2!, 0);
+        var (h, host) = MicroPythonTests.BootToRepl(uf2!, buses);
         try
         {
             int from = host.Cdc.Length;
@@ -37,23 +42,26 @@ public class CoSimBench(ITestOutputHelper output)
                 ? "from machine import Pin, PWM\rp=PWM(Pin(14), freq=1000, duty_u16=20000)\rprint('rea'+'dy')\r"
                 : "print('rea'+'dy')\r");
             Assert.True(MicroPythonTests.RunUntil(h, host, "ready", 125_000_000, from: from));
-            Measure(h, workload, guard, 125_000_000 / 5, host);
+            Measure(h, $"{workload} buses {buses}", guard, 125_000_000 / 5, host);
         }
         finally { Abi.Destroy(h); host.Dispose(); }
     }
 
     [SkippableTheory]
-    [InlineData(1u)]
-    [InlineData(75u)]
-    [InlineData(300u)]
-    public void Busy_loop_throughput(uint guard)
+    [InlineData(1u, 0u)]
+    [InlineData(75u, 0u)]
+    [InlineData(300u, 0u)]
+    [InlineData(1u, Abi.BusAll)]
+    [InlineData(75u, Abi.BusAll)]
+    [InlineData(300u, Abi.BusAll)]
+    public void Busy_loop_throughput(uint guard, uint buses)
     {
         SkipUnlessPerf();
-        var h = Abi.Create(0);
+        var h = Abi.CreateEx(0, buses);
         try
         {
             Assert.Equal(1, Abi.LoadUf2(h, Firmware.Uf2(Firmware.BusyLoop())));
-            Measure(h, "busy", guard, 125_000_000 / 20, null);
+            Measure(h, $"busy buses {buses}", guard, 125_000_000 / 20, null);
         }
         finally { Abi.Destroy(h); }
     }

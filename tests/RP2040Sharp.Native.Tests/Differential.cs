@@ -127,6 +127,11 @@ internal sealed class DiffRun : IDisposable
         yield return ("dma", [.. Range(0x50000000, 0x500002FC), .. Range(0x50000400, 0x50000448)]);
         foreach (var spi in new uint[] { 0x4003C000, 0x40040000 })
             yield return ($"spi{(spi >> 14) & 1}", [spi, spi + 4, .. Range(spi + 0xC, spi + 0x24)]);
+        // UART and I2C registers that read back without side effects (no UARTDR, IC_DATA_CMD or IC_CLR_* reads).
+        foreach (var (name, uart) in new[] { ("uart0", 0x40034000u), ("uart1", 0x40038000u) })
+            yield return (name, [uart + 0x04, uart + 0x18, .. Range(uart + 0x24, uart + 0x40), uart + 0x48]);
+        foreach (var (name, i2c) in new[] { ("i2c0", 0x40044000u), ("i2c1", 0x40048000u) })
+            yield return (name, [i2c, i2c + 4, i2c + 8, .. Range(i2c + 0x14, i2c + 0x3C), .. Range(i2c + 0x6C, i2c + 0x9C)]);
         yield return ("ppb", [0xE000E014, 0xE000E018, 0xE000E100, 0xE000E200, 0xE000ED04]);
         yield return ("iobank0", Range(0x40014000, 0x400140E8, 8));
         yield return ("sio", [0xD0000004, 0xD0000010, 0xD0000020]);
