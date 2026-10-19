@@ -20,45 +20,43 @@ public enum CoSimFlags
     StopOnWatchedEdge = 8,
     /// <summary>Watched slices are twice the guard while both cores sleep (a wake-up can only follow an event).</summary>
     AdaptiveSleep = 16,
-    /// <summary>Everything the native chip does.</summary>
-    Default = EventGuard | SleepingStretches | BoundedRuns | StopOnWatchedEdge | AdaptiveSleep,
+    /// <summary>Everything: what the native chip runs with.</summary>
+    All = EventGuard | SleepingStretches | BoundedRuns | StopOnWatchedEdge | AdaptiveSleep,
 }
 
-/// <summary>
-/// One call of <see cref="RP2040CoSim.RunUntilEdge"/>: up to <see cref="MaxSlots"/> instruction slots per core, and no
-/// further than core 0's <see cref="TargetCycle"/>, in slices of <see cref="Guard"/> while a pad is <see cref="Watch"/>ed
-/// (else of the co-simulation's quantum).
-/// </summary>
-public struct RunRequest
+/// <summary>Why <see cref="RP2040CoSim.RunUntilEdge"/> returned.</summary>
+public enum StopReason
 {
-    /// <summary>Instruction slots per core (a sleeping core's slots count as cycles); long.MaxValue for no limit.</summary>
-    public long MaxSlots;
-    /// <summary>Core-0 cycle at which the run stops (cut at the first instruction boundary at or after it; a sleeping
-    /// core stops on it); long.MaxValue for none.</summary>
-    public long TargetCycle;
-    /// <summary>Slice length while a pad is watched (0: the quantum, no polling).</summary>
-    public int Guard;
-    /// <summary>Pads whose changes stop the run (<see cref="CoSimFlags.StopOnWatchedEdge"/>) and bound its slices.</summary>
-    public uint Watch;
-    public CoSimFlags Flags;
-
-    public RunRequest() { MaxSlots = long.MaxValue; TargetCycle = long.MaxValue; Flags = CoSimFlags.Default; }
-}
-
-/// <summary>Why a run returned.</summary>
-public enum RunStopReason
-{
-    /// <summary>The slots of <see cref="RunRequest.MaxSlots"/> were run.</summary>
-    Slots,
+    /// <summary><see cref="RunRequest.MaxSlots"/> instruction slots ran.</summary>
+    Budget,
     /// <summary>Core 0 reached <see cref="RunRequest.TargetCycle"/>.</summary>
-    TargetCycle,
+    Target,
     /// <summary>A watched pad changed (<see cref="CoSimFlags.StopOnWatchedEdge"/>).</summary>
     WatchedEdge,
+    /// <summary>A watchdog reboot restarted core 0's counter during a targeted run: the target no longer applies.</summary>
+    Reset,
 }
 
-/// <summary>What a run did: the slots per core it ran, the wall-clock cycles that elapsed (the longer of the two cores
-/// per slice, the peripherals' time base) and why it returned.</summary>
-public readonly record struct RunResult(long Slots, long Cycles, RunStopReason Reason);
+/// <summary>One <see cref="RP2040CoSim.RunUntilEdge"/> call.</summary>
+public struct RunRequest
+{
+    /// <summary>Upper bound of instruction slots per core (a sleeping core's slots count as cycles).</summary>
+    public int MaxSlots;
+    /// <summary>Core-0 cycle to stop at: no slot of core 0 starts at or past it, so the run ends at the first instruction
+    /// boundary at or past it (a sleeping core exactly on it). 0: none.</summary>
+    public long TargetCycle;
+    /// <summary>Slots per slice while a pad is watched (twice that while both cores sleep, with
+    /// <see cref="CoSimFlags.AdaptiveSleep"/>). 0 with no watch: slices of <see cref="RP2040CoSim.Quantum"/>.</summary>
+    public int Guard;
+    /// <summary>Watched pads (bit n = GPIO n).</summary>
+    public ulong Watch;
+    /// <summary>What the call may use (see <see cref="CoSimFlags"/>).</summary>
+    public CoSimFlags Flags;
+}
+
+/// <summary>What a <see cref="RP2040CoSim.RunUntilEdge"/> call did: the instruction slots run per core, the core-0 cycles
+/// they took (across a watchdog reboot: up to the end of the slice it happened in) and why it returned.</summary>
+public readonly record struct RunResult(int Slots, long Cycles, StopReason Reason);
 
 /// <summary>
 /// The co-simulation loop of an <see cref="RP2040Machine"/>, shared by the C ABI chip (st_rp2040_run_until_edge) and the
@@ -130,7 +128,7 @@ public sealed class RP2040CoSim
     /// <paramref name="n"/> instruction slots per core in slices of <see cref="Quantum"/> from the call's start (the last
     /// one shorter): the chunk boundaries depend only on the calls, never on what the firmware does (st_rp2040_run).
     /// </summary>
-    public RunResult Run(long n) => RunUntilEdge(new RunRequest { MaxSlots = n });
+    public void Run(int n) => RunUntilEdge(new RunRequest { MaxSlots = n, Flags = CoSimFlags.All });
 
     /// <summary>
     /// Run up to <see cref="RunRequest.MaxSlots"/> instructions per core and no further than
@@ -145,10 +143,10 @@ public sealed class RP2040CoSim
         var m = Machine;
         var pads = Pads;
         var flags = request.Flags;
-        long max = Math.Max(0, request.MaxSlots), target = request.TargetCycle;
+        long max = Math.Max(0, request.MaxSlots), target = request.TargetCycle > 0 ? request.TargetCycle : long.MaxValue;
         int guard = Math.Max(0, request.Guard);
         bool armed = request.Watch != 0 && guard > 0;
-        uint watched = armed ? request.Watch & AllPads : 0;
+        uint watched = armed ? (uint)(request.Watch & AllPads) : 0;
         pads.Watch = watched;
         pads.WatchedChanged = false;
         _stopOnEdge = armed && (flags & CoSimFlags.StopOnWatchedEdge) != 0;
@@ -158,8 +156,8 @@ public sealed class RP2040CoSim
         bool stretches = (flags & CoSimFlags.SleepingStretches) != 0, bounded = (flags & CoSimFlags.BoundedRuns) != 0;
         bool adaptive = (flags & CoSimFlags.AdaptiveSleep) != 0;
         bool pollPwm = armed && !m.ExactPwmPadEdges;
-        long swept0 = m.SweptCycles, done = 0, startCycle = m.Cpu.Cycles;
-        var reason = RunStopReason.Slots;
+        long done = 0, startCycle = m.Cpu.Cycles, cycles = 0;
+        var reason = StopReason.Budget;
         if (hasTarget) m.CutLimit = target;
         try
         {
@@ -169,13 +167,14 @@ public sealed class RP2040CoSim
                 if (hasTarget)
                 {
                     long now = m.Cpu.Cycles;
+                    if (now >= target) { reason = StopReason.Target; break; }
                     // A watchdog reboot restarts core 0's counter: the run ends there rather than run it all again.
-                    if (now >= target || now < startCycle) { reason = RunStopReason.TargetCycle; break; }
+                    if (now < startCycle) { reason = StopReason.Reset; break; }
                     // Both cores stopped (locked up): time still passes, so burn the rest of the way.
                     if (m.Cpu.IsLockedUp && (!m.Core1Launched || m.Cpu1.IsLockedUp))
                     {
                         m.ChargeStopped(target - now);
-                        reason = RunStopReason.TargetCycle;
+                        reason = StopReason.Target;
                         break;
                     }
                 }
@@ -214,7 +213,7 @@ public sealed class RP2040CoSim
                     {
                         done += RunBounded(slice, (int)Math.Min(whole, int.MaxValue), events);
                         if (pollPwm) PollPwm(watched);
-                        if (_stopOnEdge && pads.WatchedChanged) { reason = RunStopReason.WatchedEdge; break; }
+                        if (_stopOnEdge && pads.WatchedChanged) { reason = StopReason.WatchedEdge; break; }
                         continue;
                     }
                 }
@@ -223,7 +222,7 @@ public sealed class RP2040CoSim
                 if (!armed) continue;
                 // PWM-muxed pads move with the counter, which IO_BANK0 does not report without exact PWM edges.
                 if (pollPwm) PollPwm(watched);
-                if (_stopOnEdge && pads.WatchedChanged) { reason = RunStopReason.WatchedEdge; break; }
+                if (_stopOnEdge && pads.WatchedChanged) { reason = StopReason.WatchedEdge; break; }
             }
         }
         finally
@@ -231,8 +230,10 @@ public sealed class RP2040CoSim
             pads.Watch = 0;
             _stopOnEdge = false;
             m.CutLimit = long.MaxValue;
+            cycles = m.Cpu.Cycles - startCycle;
         }
-        return new RunResult(done, m.SweptCycles - swept0, reason);
+        if (cycles < 0) cycles = m.LastElapsedCycles;   // the reboot's slice
+        return new RunResult((int)Math.Min(done, int.MaxValue), cycles, reason);
     }
 
     private void PollPwm(uint watched)
@@ -283,7 +284,7 @@ public sealed class RP2040CoSim
 
     /// <summary>Core-0 cycles until the next edge a pin-level engine makes on a pad in <paramref name="watch"/>
     /// (<see cref="RP2040Machine.CyclesUntilPadEdge"/>), long.MaxValue when none has one coming.</summary>
-    public long CyclesUntilPadEdge(uint watch) => Machine.CyclesUntilPadEdge(watch & AllPads);
+    public long CyclesUntilPadEdge(ulong watch) => Machine.CyclesUntilPadEdge((uint)(watch & AllPads));
 
     /// <summary>
     /// Drive the pads in <paramref name="mask"/> from outside to <paramref name="levels"/>. Pads already held at their
@@ -291,32 +292,31 @@ public sealed class RP2040CoSim
     /// peripherals are brought up first (<see cref="RP2040Machine.SyncForHostInput"/>), so the cycles already run see
     /// the old level.
     /// </summary>
-    /// <returns>The pads that changed.</returns>
-    public uint SetInputs(uint mask, uint levels)
+    public void SetInputs(ulong mask, ulong levels)
     {
         var io = Machine.IoBank0;
-        var bits = mask & AllPads;
-        bits &= ~io.ExternalHeldMask | (io.ExternalLevels ^ levels);
-        if (bits == 0) return 0;
+        var bits = (uint)(mask & AllPads);
+        bits &= ~io.ExternalHeldMask | (io.ExternalLevels ^ (uint)levels);
+        if (bits == 0) return;
         Machine.SyncForHostInput();
         for (var rest = bits; rest != 0; rest &= rest - 1)
         {
             var pin = System.Numerics.BitOperations.TrailingZeroCount(rest);
             io.SetExternalInput(pin, ((levels >> pin) & 1) != 0);
         }
-        return bits;
     }
 
+    /// <summary>The pads driven from outside and their levels (meaningful only where driven).</summary>
+    public (ulong Mask, ulong Levels) Inputs => (Machine.IoBank0.ExternalHeldMask, Machine.IoBank0.ExternalLevels);
+
     /// <summary>Stop driving the pads in <paramref name="mask"/> (they read their pulls); pads not driven are left alone.</summary>
-    /// <returns>The pads released.</returns>
-    public uint ReleaseInputs(uint mask)
+    public void ReleaseInputs(ulong mask)
     {
         var io = Machine.IoBank0;
-        var bits = mask & AllPads & io.ExternalHeldMask;
-        if (bits == 0) return 0;
+        var bits = (uint)(mask & AllPads) & io.ExternalHeldMask;
+        if (bits == 0) return;
         Machine.SyncForHostInput();
         io.ReleaseExternalInput(bits);
-        return bits;
     }
 
     /// <summary>Bring every deferred peripheral up to the end of the last slice (before a host reads state).</summary>

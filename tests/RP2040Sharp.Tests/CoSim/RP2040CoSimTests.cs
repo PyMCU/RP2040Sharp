@@ -23,6 +23,7 @@ public class RP2040CoSimTests
 
     private static RunRequest To(long target, bool fast) => new()
     {
+        MaxSlots = int.MaxValue,
         TargetCycle = target,
         Flags = fast ? CoSimFlags.SleepingStretches | CoSimFlags.BoundedRuns : CoSimFlags.None,
     };
@@ -41,7 +42,7 @@ public class RP2040CoSimTests
             {
                 long start = m.Cpu.Cycles;
                 var r = cosim.RunUntilEdge(To(start + budget, fast));
-                Assert.Equal(RunStopReason.TargetCycle, r.Reason);
+                Assert.Equal(StopReason.Target, r.Reason);
                 Assert.InRange(m.Cpu.Cycles - start, budget, budget + 2);   // the longest instruction here is the branch
                 Assert.Equal(m.Cpu.Cycles - start, r.Cycles);
             }

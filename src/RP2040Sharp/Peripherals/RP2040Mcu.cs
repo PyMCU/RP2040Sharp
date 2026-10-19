@@ -133,11 +133,16 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             if (cycleBudget <= 0) return 0;
             _cosim.Quantum = Math.Max(1, MaxSliceInstructions);
-            used = _cosim.RunUntilEdge(new RunRequest
+            // Wall-clock cycles: the longer of the two cores per slice, the peripherals' time base.
+            var swept = _machine.SweptCycles;
+            var request = new RunRequest
             {
+                MaxSlots = int.MaxValue,
                 TargetCycle = _machine.Cpu.Cycles + cycleBudget,
                 Flags = CoSimFlags.SleepingStretches | CoSimFlags.BoundedRuns,
-            }).Cycles;
+            };
+            while (_cosim.RunUntilEdge(request).Reason == StopReason.Budget) { }   // more slots than an int holds
+            used = _machine.SweptCycles - swept;
         }
         else used = _machine.RunCycles(cycleBudget, MaxSliceInstructions);
         // Leave nothing owed: whatever the host reads or drives next sees the peripherals at the end of the run.
@@ -393,31 +398,11 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
 
         public ulong PullDownMask => _m.PadsBank0.PullDownMask & AllPins;
 
-        public void SetInputs(ulong mask, ulong levels)
-        {
-            var io = _m.IoBank0;
-            var bits = (uint)mask & AllPins;
-            // A circuit solver re-applies the same levels many times per step: pads already held at them change nothing.
-            bits &= ~io.ExternalHeldMask | (io.ExternalLevels ^ (uint)levels);
-            if (bits == 0) return;
-            // The cycles already run belong to the old level (see RP2040Machine.SyncForHostInput).
-            _m.SyncForHostInput();
-            while (bits != 0)
-            {
-                var pin = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                bits &= bits - 1;
-                io.SetExternalInput(pin, ((levels >> pin) & 1UL) != 0);
-            }
-        }
+        // The co-simulation's: pads already held at the level are skipped (a circuit solver re-applies its inputs many
+        // times per step); the rest sync the deferred peripherals first (RP2040Machine.SyncForHostInput).
+        public void SetInputs(ulong mask, ulong levels) => _owner._cosim.SetInputs(mask & AllPins, levels);
 
-        public void ReleaseInputs(ulong mask)
-        {
-            var io = _m.IoBank0;
-            var bits = (uint)mask & AllPins & io.ExternalHeldMask;
-            if (bits == 0) return;
-            _m.SyncForHostInput();
-            io.ReleaseExternalInput(bits);
-        }
+        public void ReleaseInputs(ulong mask) => _owner._cosim.ReleaseInputs(mask & AllPins);
 
         public event PinChangeHandler PinChanged
         {

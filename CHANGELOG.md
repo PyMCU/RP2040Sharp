@@ -39,7 +39,7 @@ SRAM, peripheral registers, call returns). See [docs/peripheral-deadlines.md](do
 
 The loop of `st_rp2040_run_until_edge` (slices, sleeping stretches, bounded runs, the event-bounded
 guard, retired counts) moves from the native chip into the core library as `RP2040CoSim`, with
-`RunRequest` / `RunResult` / `RunStopReason` / `CoSimFlags` (the names of RP2350Sharp's), a target
+`RunRequest` / `RunResult` / `StopReason` / `CoSimFlags` (the names of RP2350Sharp's), a target
 cycle (`RP2040Machine.CutLimit`: runs stop at the first instruction boundary at or past it),
 `SetInputs` / `ReleaseInputs` (skip unchanged pads, sync the rest) and `SyncToNow`. Pad events go
 through `PadEventRecorder` (drain: stable cycle order, clamped to core 0's clock; immediate) and

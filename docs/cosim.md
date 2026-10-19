@@ -14,12 +14,12 @@ var cosim = new RP2040CoSim(machine);                 // using RP2040.CoSim; its
 cosim.Pads.Attach();
 var r = cosim.RunUntilEdge(new RunRequest
 {
-    MaxSlots = 1_000_000,          // instruction slots per core (long.MaxValue: no limit)
-    TargetCycle = long.MaxValue,   // core-0 cycle to stop at (long.MaxValue: none)
+    MaxSlots = 1_000_000,          // instruction slots per core
+    TargetCycle = 0,               // core-0 cycle to stop at (0: none)
     Guard = 75, Watch = 1u << 15,  // slices of 75 while GP15 is watched
-    Flags = CoSimFlags.Default,
+    Flags = CoSimFlags.All,
 });
-// r.Slots, r.Cycles (wall-clock cycles elapsed: the longer core per slice), r.Reason
+// r.Slots, r.Cycles (core-0 cycles), r.Reason (Budget, Target, WatchedEdge, Reset)
 cosim.Pads.Drain((gpio, level, oe, cycle) => Console.WriteLine($"GP{gpio}={level} oe {oe} @{cycle}"));
 ```
 
@@ -117,7 +117,11 @@ iOS no-JIT constraints.
 
 ## Differences from RP2350Sharp to reconcile
 
-- `RunResult.Cycles` is the wall-clock cycles elapsed (the peripherals' swept cycles), not an absolute count.
+- `RunRequest`, `RunResult`, `StopReason` and `CoSimFlags` have RP2350's shapes (`MaxSlots` an int, `TargetCycle` 0 for
+  none, `Watch` a ulong, `CoSimFlags.All`). The constructors differ (`RP2040CoSim(machine, recorder?)` against
+  `RP2350CoSim(machine, pinCount, attachPads, syncToNow)`), and so do the probes (`StretchedSlices`, `BoundedSlices`,
+  `PlainSlices`, `CutSlices` against `SleepStretches`, `AwakeRuns`, ...). `Run(n)` slices at `Quantum` (512) from the
+  call's start; RP2350's runs `RunChunk` (1024) chunks on absolute boundaries.
 - `SyncForHostInput` syncs inside a sweep as well (the RP2040 sweep cannot tick a cycle twice: a peripheral is
   marked applied before its tick runs), where RP2350 returns; inside a CPU run it syncs to the sweeps so far and
   does not cut the run.
