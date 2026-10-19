@@ -520,10 +520,17 @@ public sealed class RP2040Machine : IDisposable
     /// An engine is brought up to this clock at every access, so what firmware reads and the edges it starts do not
     /// depend on how the run was sliced.
     /// </summary>
-    public long EngineClock()
+    public long EngineClock() => Math.Min(Cpu.Cycles, ExecCycle());
+
+    /// <summary>
+    /// The core-0 cycle of what the machine is doing right now, as <see cref="EngineClock"/> but not clamped to core
+    /// 0's count: during core 1's turn the slice start plus the cycles core 1 has run in it (it may run more than core 0
+    /// did); otherwise core 0's count, which in a sweep is the end of the slice.
+    /// </summary>
+    public long ExecCycle()
     {
         if (_activeCoreId == 1)
-            return Math.Min(Cpu.Cycles, _core1TurnBase0 + (Cpu1.Cycles - _core1TurnBase1));
+            return _core1TurnBase0 + (Cpu1.Cycles - _core1TurnBase1);
         return Cpu.Cycles;
     }
 
@@ -1123,6 +1130,18 @@ public sealed class RP2040Machine : IDisposable
     /// peripheral advancing in its own tick does not re-enter it.
     /// </summary>
     public void SyncForHostInput() => SyncPeripherals();
+
+    /// <summary>
+    /// Before a host reads pad outputs or peripheral state from outside: the peripherals are brought to the end of the
+    /// last slice. From inside a sweep (a handler of a peripheral's own edge) it does nothing: the peripherals already
+    /// stand where that sweep has them. (A catch-up never crosses a peripheral's next event, so a read moves nothing
+    /// the firmware or the host could see.)
+    /// </summary>
+    public void SyncForHostRead()
+    {
+        if (_sweepCursor != int.MaxValue) return;
+        SyncPeripherals();
+    }
 
     /// <summary>Maps the peripherals' swept cycles to core 0's clock (see <see cref="ClockTimeline"/>).</summary>
     public ClockTimeline Timeline { get; } = new();

@@ -315,23 +315,25 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         private readonly RP2040Mcu _owner;
         private readonly RP2040Machine _m;
         private readonly Action<uint> _sioHook;
-        private readonly Action<uint> _padsHook;
+        private readonly PadEventRecorder _recorder;
 
         private PinChangeHandler? _changed;
         private ulong _watchMask = AllPins;
         private bool _armed;
-
-        // What the chip drove when each pin was last reported, so a SIO output register that moves
-        // under a pin nobody drives does not read as a change.
-        private uint _lastOe;
-        private uint _lastLevels;
 
         public PinBank(RP2040Mcu owner)
         {
             _owner = owner;
             _m = owner._machine;
             _sioHook = OnSioChanged;
-            _padsHook = OnPadsChanged;
+            // Every pad change with its own cycle (PadEventRecorder), handed over while it happens so a handler can
+            // answer at once; a SIO output register that moves under a pin nobody drives is no change.
+            _recorder = new PadEventRecorder(_m)
+            {
+                Delivery = PadDelivery.Immediate,
+                LevelsOnlyWhenDriven = true,
+                Immediate = OnPadsChanged,
+            };
         }
 
         public string Name => "GPIO";
@@ -342,7 +344,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             get
             {
-                if (_m.DeferPeripheralTicks) _m.SyncPeripherals();
+                if (_m.DeferPeripheralTicks) _m.SyncForHostRead();
                 _m.IoBank0.GetPadOutputState(out var oe, out _);
                 return oe;
             }
@@ -352,7 +354,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             get
             {
-                if (_m.DeferPeripheralTicks) _m.SyncPeripherals();
+                if (_m.DeferPeripheralTicks) _m.SyncForHostRead();
                 _m.IoBank0.GetPadOutputState(out var oe, out var levels);
                 return levels & oe;
             }
@@ -405,13 +407,8 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         public ulong WatchMask
         {
             get => _watchMask;
-            set
-            {
-                _watchMask = value & AllPins;
-                // Pins that just came into the watch set need a fresh baseline, or the first event
-                // for them would compare against a state from before anyone was looking.
-                if (_armed) Snapshot();
-            }
+            // The recorder follows every pin, so a pin coming into the watch set compares against where it is now.
+            set => _watchMask = value & AllPins;
         }
 
         private void Arm()
@@ -420,8 +417,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
             _armed = true;
             // PWM pads follow the counter: have their edges reported, at the cycle of the step that made each.
             _m.ExactPwmPadEdges = true;
-            Snapshot();
-            _m.IoBank0.PadsChanged += _padsHook;
+            _recorder.Attach();
             // SIO writes do not reach IO_BANK0 on their own; the hook forwards just the watched pads
             // that the write moved, so firmware banging other pins pays nothing here.
             _m.Sio.OnGpioChanged += _sioHook;
@@ -432,15 +428,8 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
             if (!_armed) return;
             _armed = false;
             _m.ExactPwmPadEdges = false;
-            _m.IoBank0.PadsChanged -= _padsHook;
+            _recorder.Detach();
             _m.Sio.OnGpioChanged -= _sioHook;
-        }
-
-        private void Snapshot()
-        {
-            _m.IoBank0.SyncPadBaseline();
-            _m.IoBank0.GetPadOutputState(out _lastOe, out var levels);
-            _lastLevels = levels & _lastOe;
         }
 
         private void OnSioChanged(uint changed)
@@ -449,27 +438,14 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
             if (hit != 0) _m.IoBank0.NotifyPads(hit);
         }
 
-        private void OnPadsChanged(uint pads)
+        private void OnPadsChanged(uint changed, ulong cycle)
         {
             var handler = _changed;
             if (handler is null) return;
-
-            _m.IoBank0.GetPadOutputState(out var oe, out var levels);
-            levels &= oe;
-
-            // Judge only the pads the machine flagged; the rest keep their baseline.
-            var moved = pads & ((oe ^ _lastOe) | ((levels ^ _lastLevels) & oe));
-            _lastOe = (_lastOe & ~pads) | (oe & pads);
-            _lastLevels = (_lastLevels & ~pads) | (levels & pads);
-
-            moved &= (uint)_watchMask;
+            var moved = changed & (uint)_watchMask;
             if (moved == 0) return;
-
-            // The cycle of the change itself: a pin-level engine's or a PWM counter step's own edge cycle, else the
-            // instruction in flight (core 1's mapped onto core 0's clock) or, from a sweep, the end of the slice.
-            var io = _m.IoBank0;
-            var cycle = io.FunctionDriving ? io.LastPadEdgeCycle : _m.EngineClock();
-            var change = new PinChange(moved, oe, levels, _owner._cycleBase + cycle);
+            _m.IoBank0.GetPadOutputState(out var oe, out var levels);
+            var change = new PinChange(moved, oe, levels & oe, _owner._cycleBase + (long)cycle);
             handler(in change);
         }
     }

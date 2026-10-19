@@ -9,9 +9,6 @@ using RP2040Sharp.Wireless.Cyw43;
 
 namespace SiliconTwin.Native;
 
-/// <summary>A pad change: the pad's effective output and the core-0 cycle it changed at.</summary>
-internal readonly record struct PadEvent(int Gpio, bool Level, bool OutputEnable, ulong Cycle);
-
 /// <summary>One emulated RP2040 behind an opaque C handle.</summary>
 internal sealed unsafe class Chip
 {
@@ -32,8 +29,9 @@ internal sealed unsafe class Chip
     public readonly UsbCdcHost Cdc;
     public readonly Cyw43439Device? Cyw43;
     private readonly ushort[] _adc = new ushort[4];
-    private readonly bool[] _lastLevel = new bool[GpioCount];
-    private readonly bool[] _lastOe = new bool[GpioCount];
+
+    /// <summary>Every pad change with its own cycle, reported in cycle order after each call (PadEventRecorder).</summary>
+    public readonly PadEventRecorder Pads;
 
     // ---- fault isolation -------------------------------------------------------------------------
     // Any managed exception inside an export lands in Fault(): the chip becomes inert ("faulted", sticky)
@@ -92,8 +90,11 @@ internal sealed unsafe class Chip
     public delegate* unmanaged[Cdecl]<nint, int, byte*, nuint, void> SerialCb;
     public nint SerialUser;
 
+    private readonly Action<PadEvent> _report;
+
     public Chip(uint flashBytes, bool cyw43, PinLevelBus buses = PinLevelBus.None)
     {
+        _report = Report;
         Machine = new RP2040Machine(flashBytes, pinLevelBuses: buses) { DeferPeripheralTicks = true };
         Machine.Adc.ReadChannel = ch => (uint)ch < (uint)_adc.Length ? _adc[ch] : ch == 4 ? TempSensor27C : (ushort)0;
         Machine.Uart0.OnByteTransmit = b => EmitSerial(0, b);
@@ -101,16 +102,21 @@ internal sealed unsafe class Chip
         Cdc = new UsbCdcHost(Machine.Usb);
         Cdc.OnSerialData = data => EmitSerial(2, data);
         // Every pad change that goes through IO_BANK0 (SIO writes of either core, PIO, FUNCSEL / override / PADS
-        // writes, DMA into SIO, the pin-level UART / SPI / I2C engines) arrives here while it happens, so it is
+        // writes, DMA into SIO, the pin-level UART / SPI / I2C engines) is recorded while it happens, so it is
         // stamped with its own cycle (an engine's: the cycle of its edge). PWM-muxed pads follow the counter instead
-        // and are polled (see PollPads).
-        Machine.IoBank0.PadsChanged += OnPadsChanged;
+        // and are polled (Pads.Poll). A watched pad's change ends a bounded run and cuts a cut slice after the
+        // instruction that made it.
+        Pads = new PadEventRecorder(Machine)
+        {
+            WatchedEdge = () => { Machine.EndBoundedRun = true; Machine.RequestCut(); },
+        };
+        Pads.Attach(baseline: false);
         // A bounded run books slice ends without coming back here: poll the watched PWM pads at each of them.
         Machine.BoundaryCheck = () =>
         {
-            uint pwm = Machine.IoBank0.PwmMuxedPins & _watch;
-            if (pwm != 0) PollPads(pwm);
-            return _watchedChanged;
+            uint pwm = Machine.IoBank0.PwmMuxedPins & Pads.Watch;
+            if (pwm != 0) Pads.Poll(pwm);
+            return Pads.WatchedChanged;
         };
         if (cyw43)
         {
@@ -148,23 +154,6 @@ internal sealed unsafe class Chip
         ? Machine.Cpu.Registers.Waiting || Machine.Cpu.IsLockedUp
         : !Machine.Core1Launched || Machine.Cpu1.Registers.Waiting || Machine.Cpu1.IsLockedUp;
 
-    // Core-0 / core-1 cycle counts at the start of the slice in flight, and whether one is in flight.
-    private long _slice0Start, _slice1Start;
-    private bool _inSlice;
-
-    /// <summary>
-    /// The core-0 cycle of whatever the machine is doing right now. Core 0 runs its whole slice first, then core 1,
-    /// then the peripherals tick: a write by core 0 happens at its own cycle count, one by core 1 at the slice start
-    /// plus the cycles core 1 has run in it, and anything a peripheral does at the end of the slice.
-    /// </summary>
-    private ulong NowCycle()
-    {
-        var m = Machine;
-        if (_inSlice && m.Sio.GetActiveCoreId?.Invoke() == 1)
-            return (ulong)(_slice0Start + (m.Cpu1.Cycles - _slice1Start));
-        return (ulong)m.Cpu.Cycles;
-    }
-
     /// <summary>
     /// One machine slice of <paramref name="n"/> instructions per core, then the peripheral ticks. The core has no
     /// retired-instruction counter and credits a sleeping core's slots as cycles, so a slice is credited to a core
@@ -178,16 +167,9 @@ internal sealed unsafe class Chip
         if (InjectOnRun == 1) { InjectOnRun = 0; throw new InvalidOperationException("injected fault inside Run"); }
         if (InjectOnRun == 2) { InjectOnRun = 0; Chip? none = null; _ = none!.Machine; }
 #endif
-        _slice0Start = Machine.Cpu.Cycles;
-        _slice1Start = Machine.Cpu1.Cycles;
-        _inSlice = true;
         int k = n;
-        try
-        {
-            if (cut) k = Machine.RunCut(n, _watch);
-            else Machine.Run(n);
-        }
-        finally { _inSlice = false; }
+        if (cut) k = Machine.RunCut(n, Pads.Watch);
+        else Machine.Run(n);
         if (k < n) CutSlices++;
         if (!p0 && !Parked(0)) Retired[0] += (ulong)k;
         if (!p1 && !Parked(1)) Retired[1] += (ulong)k;
@@ -196,10 +178,6 @@ internal sealed unsafe class Chip
 
     /// <summary>Run <paramref name="max"/> instructions per core in peripheral-quantum slices (st_rp2040_run).</summary>
     public void Run(int max) => RunUntilEdge(max, 0, 0);
-
-    // Pads RunUntilEdge watches in the call in flight (0 outside one), and whether one of them changed.
-    private uint _watch;
-    private bool _watchedChanged;
 
     // ---- co-simulation speed-ups (docs/peripheral-deadlines.md) -----------------------------------------------------
     // Each gives exactly the result of the plain slices; turning them off is the reference the tests compare against.
@@ -244,11 +222,12 @@ internal sealed unsafe class Chip
     public void RunUntilEdge(int max, int guard, uint watch)
     {
         bool armed = watch != 0 && guard > 0;
-        _watch = armed ? watch & AllPads : 0;
-        _watchedChanged = false;
+        Pads.Watch = armed ? watch & AllPads : 0;
+        Pads.WatchedChanged = false;
+        uint watched = Pads.Watch;
         var m = Machine;
         // The event-bounded guard: guard 1 already ends every slice after one instruction.
-        bool events = armed && EventGuard && guard > 1 && m.PinLevelBuses != PinLevelBus.None && _watch != 0;
+        bool events = armed && EventGuard && guard > 1 && m.PinLevelBuses != PinLevelBus.None && watched != 0;
         try
         {
             int quantum = Math.Max(1, PeripheralQuantum);
@@ -285,9 +264,9 @@ internal sealed unsafe class Chip
                         done += _boundedDone;
                         if (armed)
                         {
-                            uint pwmB = m.IoBank0.PwmMuxedPins & _watch;
-                            if (pwmB != 0) PollPads(pwmB);
-                            if (_watchedChanged) break;
+                            uint pwmB = m.IoBank0.PwmMuxedPins & watched;
+                            if (pwmB != 0) Pads.Poll(pwmB);
+                            if (Pads.WatchedChanged) break;
                         }
                         continue;
                     }
@@ -296,12 +275,12 @@ internal sealed unsafe class Chip
                 done += RunSlice(n, events);
                 if (!armed) continue;
                 // PWM-muxed pads move with the counter, which IO_BANK0 never reports: compare the watched ones.
-                uint pwm = m.IoBank0.PwmMuxedPins & _watch;
-                if (pwm != 0) PollPads(pwm);
-                if (_watchedChanged) break;
+                uint pwm = m.IoBank0.PwmMuxedPins & watched;
+                if (pwm != 0) Pads.Poll(pwm);
+                if (Pads.WatchedChanged) break;
             }
         }
-        finally { _watch = 0; }
+        finally { Pads.Watch = 0; }
         ScanPads();
     }
 
@@ -319,55 +298,20 @@ internal sealed unsafe class Chip
 #if ST_ENABLE_TEST_HOOKS
         if (InjectOnRun != 0) { _boundedDone = RunSlice(n, cut); return; }
 #endif
-        int booked = m.RunAwakeBounded(n, maxSlices, cut ? _watch : 0);
+        int booked = m.RunAwakeBounded(n, maxSlices, cut ? Pads.Watch : 0);
         int k = m.BoundedSliceSlots;
         BoundedSlices += booked;
         PlainSlices++;
         if (k < n) CutSlices++;
         Retired[0] += (ulong)booked * (ulong)n;
         // The last slice: core 0's part ran in the bounded loop; core 1's turn and the sweep run as in a plain slice.
-        _slice0Start = m.BoundedSliceStart;
-        _slice1Start = m.Cpu1.Cycles;
-        _inSlice = true;
-        try { m.FinishSlice(k, m.BoundedSliceDelta); }
-        finally { _inSlice = false; }
+        m.FinishSlice(k, m.BoundedSliceDelta);
         if (!Parked(0)) Retired[0] += (ulong)k;
         if (!p1 && !Parked(1)) Retired[1] += (ulong)k;
         _boundedDone = booked * n + k;
     }
 
     // ---- pads ------------------------------------------------------------------------------------
-
-    // Changes found since the last report, in the order they happened per core (core 0's, then core 1's, then the
-    // peripherals' of each slice): sorted by cycle when reported.
-    private List<PadEvent> _pending = new();
-    private List<PadEvent> _reporting = new();
-
-    private void OnPadsChanged(uint mask)
-    {
-        var io = Machine.IoBank0;
-        // A pin-level engine's edge carries its own cycle (the engines run on core 0's clock).
-        ulong cycle = io.FunctionDriving ? (ulong)io.LastPadEdgeCycle : NowCycle();
-        Record(mask & AllPads, cycle);
-    }
-
-    /// <summary>Compare the pads in <paramref name="mask"/> with what was last recorded and record the changes at
-    /// <paramref name="cycle"/>.</summary>
-    private void Record(uint mask, ulong cycle)
-    {
-        var io = Machine.IoBank0;
-        for (; mask != 0; mask &= mask - 1)
-        {
-            int g = BitOperations.TrailingZeroCount(mask);
-            bool oe = io.GetPadOutputEnable(g), lvl = io.GetPadOutputLevel(g);
-            if (oe == _lastOe[g] && lvl == _lastLevel[g]) continue;
-            _lastOe[g] = oe; _lastLevel[g] = lvl;
-            _pending.Add(new PadEvent(g, lvl, oe, cycle));
-            if ((_watch >> g & 1) != 0) { _watchedChanged = true; Machine.EndBoundedRun = true; Machine.RequestCut(); }
-        }
-    }
-
-    private void PollPads(uint mask) => Record(mask, (ulong)Machine.Cpu.Cycles);
 
     /// <summary>Test oracle: sees every pad change (gpio, level, output enable, core-0 cycle) that
     /// <see cref="ScanPads"/> reports, with or without a host callback.</summary>
@@ -379,37 +323,17 @@ internal sealed unsafe class Chip
 #if ST_ENABLE_TEST_HOOKS
         if (InjectOnScan != 0) { InjectOnScan = 0; throw new InvalidOperationException("injected fault inside ScanPads"); }
 #endif
-        PollPads(AllPads); // anything that changed without IO_BANK0 noticing (PWM counters)
-        if (_pending.Count == 0) return;
-        // Swap first: a callback may run the pads again (pin_set_input) and record into a fresh list.
-        (_reporting, _pending) = (_pending, _reporting);
-        var events = _reporting;
-        ulong now = (ulong)Machine.Cpu.Cycles;
-        SortByCycle(events);
-        for (int i = 0; i < events.Count; i++)
-        {
-            var e = events[i];
-            // Core 1 may run more cycles in a slice than core 0: nothing is reported past core 0's own clock.
-            ulong cycle = Math.Min(e.Cycle, now);
-            PinObserver?.Invoke(e.Gpio, e.Level, e.OutputEnable, cycle);
-            var cb = PinCb; // the host may clear the callback from inside it
-            if (cb == null) continue;
-            cb(PinUser, e.Gpio, e.Level ? 1 : 0, e.OutputEnable ? 1 : 0, cycle);
-        }
-        events.Clear();
+        Pads.Poll(AllPads); // anything that changed without IO_BANK0 noticing (PWM counters)
+        // A callback may run the pads again (pin_set_input): those changes land in the next report.
+        Pads.Drain(_report);
     }
 
-    // Stable insertion sort: the list is already in order but for core 1's changes, which follow core 0's.
-    private static void SortByCycle(List<PadEvent> events)
+    private void Report(PadEvent e)
     {
-        for (int i = 1; i < events.Count; i++)
-        {
-            var e = events[i];
-            int j = i - 1;
-            if (events[j].Cycle <= e.Cycle) continue;
-            while (j >= 0 && events[j].Cycle > e.Cycle) { events[j + 1] = events[j]; j--; }
-            events[j + 1] = e;
-        }
+        PinObserver?.Invoke(e.Gpio, e.Level, e.OutputEnable, e.Cycle);
+        var cb = PinCb; // the host may clear the callback from inside it
+        if (cb == null) return;
+        cb(PinUser, e.Gpio, e.Level ? 1 : 0, e.OutputEnable ? 1 : 0, e.Cycle);
     }
 
     public void SetAdc(int channel, double volts)

@@ -183,6 +183,38 @@ public class RP2040McuLockstepTests(ITestOutputHelper output)
         Assert.Equal(traces[0], traces[1]);
     }
 
+    // A handler that drives an unrelated pad (GP2) on every MOSI edge, from inside the sweep or the access that brought
+    // the engine there: the host-input sync must not move time (no cycles ticked twice), so cycles, swept cycles, the
+    // engine's own time and RAM are those of the run without it.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Host_input_from_inside_a_sweep_does_not_move_time(bool defer)
+    {
+        (long, long, long, int, string) Go(bool extra)
+        {
+            using var mcu = SpiMcu(defer, 32);
+            var bank = mcu.Banks[0];
+            int n = 0;
+            bank.PinChanged += (in PinChange e) =>
+            {
+                if (!e.Affects(Mosi)) return;
+                bank.SetInputs(Miso, (e.Levels & Mosi) != 0 ? Miso : 0);
+                if (extra) bank.SetInputs(1UL << 2, (ulong)(n++ & 1) << 2);
+            };
+            for (int i = 0; i < 200; i++) mcu.Run(Step);
+            var m = mcu.Machine;
+            var ram = new StringBuilder();
+            for (uint i = 0; i < 256; i++) ram.Append(m.Bus.ReadWord(PinLevelFirmware.RxBuffer + 4 * i).ToString("X"));
+            return (mcu.Cycles, m.SweptCycles, m.Spi0.PinEngine!.Cycle, CheckBursts(mcu).Bad, ram.ToString());
+        }
+        var plain = Go(false);
+        var extra = Go(true);
+        output.WriteLine($"defer={defer}: cycles {plain.Item1}, engine {plain.Item3}");
+        Assert.Equal(0, plain.Item4);
+        Assert.Equal(plain, extra);
+    }
+
     // The circuit answers once per step, from the MOSI level it sees at the step boundary, as a fixed-step solver does.
     // The wire is then a step late, so the words are not the ones sent, but they must be the same on both machines.
     [Fact]
