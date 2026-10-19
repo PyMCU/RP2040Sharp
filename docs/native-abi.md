@@ -32,15 +32,15 @@ dotnet publish src/RP2040Sharp.Native -c Release -r win-x64 -p:StNativeLib=true 
 | Function | Notes |
 |---|---|
 | `st_rp2040_version`, `st_rp2040_clock_hz` | `"silicontwin-rp2040 0.1.0"`, 125 MHz |
-| `st_rp2040_create(flash)`, `st_rp2040_create_ex(flash, flags)` | `flash` 0 = 2 MiB, else a power of two in 4 KiB..16 MiB. `ST_RP2040_CYW43` attaches the CYW43439 of the Pico W (WL_ON GP23, DATA GP24, CS GP25, CLK GP29). The Pico W images of MicroPython and CircuitPython need it to boot |
+| `st_rp2040_create(flash)`, `st_rp2040_create_ex(flash, flags)` | `flash` 0 = 2 MiB, else a power of two in 4 KiB..16 MiB. `ST_RP2040_BUS_I2C` (1), `ST_RP2040_BUS_SPI` (2), `ST_RP2040_BUS_UART` (4), `ST_RP2040_BUS_ALL` (7): pin-level buses ([pin-level-buses.md](pin-level-buses.md)); `st_rp2040_create` is `create_ex(flash, ST_RP2040_BUS_ALL)`, as on RP2350. `ST_RP2040_CYW43` (0x100, the value of `ST_RP2350_CYW43`; it was 1) attaches the CYW43439 of the Pico W (WL_ON GP23, DATA GP24, CS GP25, CLK GP29). The Pico W images of MicroPython and CircuitPython need it to boot |
 | `st_rp2040_destroy`, `st_rp2040_status`, `st_rp2040_last_error` | Opaque handles, a sticky FAULTED state, no exception ever crosses an export (same model as RP2350) |
 | `st_rp2040_load_uf2` | RP2040 family `0xE48BFF56` (or no family). Any other family, e.g. an RP2350 image, rejects the whole file with `-1` and a message naming the family. Absolute/data family blocks are skipped. Core 0 starts at `0x10000000` as after the bootrom |
 | `st_rp2040_run(n)` | `n` instructions per core, peripherals ticked every 512 at most |
-| `st_rp2040_run_until_edge(max, guard, watch)` | Same semantics as RP2350: slices of `guard` (twice that while both cores sleep) whenever `watch` and `guard` are nonzero, including before firmware routes the pads; stops after the slice in which a watched pad's level or OE changed. The result is that of peripherals ticked at the end of every slice; deferred ticks, sleeping stretches and bounded awake runs take several slices at once with exactly that result ([peripheral-deadlines.md](peripheral-deadlines.md)) |
-| `st_rp2040_cycles_until_edge` | Always `UINT64_MAX` (no pin-level engines yet) |
+| `st_rp2040_run_until_edge(max, guard, watch)` | Same semantics as RP2350: slices of `guard` (twice that while both cores sleep) whenever `watch` and `guard` are nonzero, including before firmware routes the pads; stops after the slice in which a watched pad's level or OE changed. The result is that of peripherals ticked at the end of every slice; deferred ticks, sleeping stretches and bounded awake runs take several slices at once with exactly that result ([peripheral-deadlines.md](peripheral-deadlines.md)). With pin-level buses and a guard above 1, the event-bounded guard ends a slice of core 0 at the next engine edge on a watched pad and right after an instruction that moved one ([pin-level-buses.md](pin-level-buses.md#pad-events-and-the-event-bounded-guard)) |
+| `st_rp2040_cycles_until_edge` | Cycles until the next step of a pin-level engine with work on a watched pad, `UINT64_MAX` when none has one coming (as on RP2350: the Proteus host's EdgeWait) |
 | `st_rp2040_cycles`, `st_rp2040_time_ps`, `st_rp2040_cycle_to_ps`, `st_rp2040_clk_sys_hz` | Core-0 cycles at a fixed 125 MHz (the core does not model clock changes): 8000 ps per cycle |
 | `st_rp2040_instructions(core)` | Conservative retired count, as on RP2350 |
-| `st_rp2040_pin_get`, `st_rp2040_pin_get_pull`, `st_rp2040_pin_set_input` | `-1` releases a pad: it reads its pull and follows later pull changes |
+| `st_rp2040_pin_get`, `st_rp2040_pin_get_pull`, `st_rp2040_pin_set_input` | `-1` releases a pad: it reads its pull and follows later pull changes. `pin_set_input` first applies the peripheral time still pending, so no tick samples the new level retroactively |
 | `st_rp2040_adc_set_voltage` | Channels 0..3 (GP26..29); the temperature sensor reads 27 °C |
 | `st_rp2040_set_pin_callback`, `st_rp2040_set_serial_callback`, `st_rp2040_serial_write` | Channels UART0, UART1 and USB CDC: an emulated USB host (`UsbCdcHost`) enumerates the device and asserts DTR, so the MicroPython REPL works over CDC |
 
@@ -53,18 +53,20 @@ Every pad change that goes through IO_BANK0 is recorded while it happens, not fo
 the end of the slice. A change made by a CPU instruction (a SIO, IO_BANK0 or PADS write, on either
 core) carries the cycle of that instruction, so the cycles a host sees, and pulse widths, are the
 same at every guard: the tests check a timer-timed 37 µs pulse and a square wave at guards 1, 75
-and 300. Changes made by peripherals (PIO, the PWM counter, DMA into SIO) carry the end of the slice
-in which they happened. Pads muxed to PWM are polled after every slice while watched. Changes are
-reported in cycle order; core 1's never past core 0's clock.
+and 300. Changes made by the pin-level UART / SPI / I2C engines carry the cycle of the edge (the
+engines run on core 0's clock). Changes made by other peripherals (PIO, the PWM counter, DMA into SIO)
+carry the end of the slice in which they happened. Pads muxed to PWM are polled after every slice while
+watched. Changes are reported in cycle order; core 1's never past core 0's clock.
 
 ## Missing compared with RP2350
 
-- **Pin-level UART / SPI / I2C.** IO_BANK0 maps only SIO, PIO and PWM onto pads. The hardware
-  UARTs reach the host as bytes (serial channels 0 and 1); SPI and I2C reach no pad at all, so a
-  circuit that only sees pads gets bit-banged buses (`SoftI2C`, `SoftSPI`) and PIO, not
-  `machine.I2C` / `machine.SPI`. No `bus_flags`, and `cycles_until_edge` has nothing to report.
-- **Exact peripheral-driven edges.** PIO, PWM and DMA pad changes carry the end of their slice.
-- **Clock changes.** clk_sys is fixed at 125 MHz; `machine.freq()` changes nothing.
+- **Exact peripheral-driven edges** for PIO, PWM and DMA: their pad changes carry the end of their
+  slice (the pin-level UART / SPI / I2C engines' carry their own cycle).
+- **Pin-level slaves and flow control**: SPI and I2C slave modes stay at transaction level; UART CTS /
+  RTS are not modelled; the UART RX interrupt is raised per byte (no RX trigger level or receive
+  timeout), as for bytes from the serial channel.
+- **Clock changes.** clk_sys is fixed at 125 MHz; `machine.freq()` changes nothing. (The pin-level
+  engines scale their dividers by the clocks firmware programmed, so buses run at the requested rate.)
 - SRAM-only UF2 images (`no_flash` binaries) are not loaded.
 
 ## Throughput
@@ -89,6 +91,9 @@ guard 1: 15.3 / 0.044, PWM guard 1: 17.6 / 0.14, busy guard 1: 18.9 / 1.65, busy
 load); the plain `RP2040Machine.Run` loop is unchanged (old and new builds alternated: 95-112 and
 92-116 MIPS).
 
+With pin-level buses ([pin-level-buses.md](pin-level-buses.md#cost)) and nothing routed, the fast paths cost 8-20 %
+more; without bus flags the figures above are unchanged.
+
 NativeAOT (`abi_selftest.c`, idle REPL, single runs): guard 1 0.090x real time before, 18.4x after;
 guard 75 5.3x before, 67x after.
 
@@ -104,4 +109,6 @@ guard 75 5.3x before, 67x after.
   skips without it.
 - `SliceDifferentialTests`, `MicroPythonDifferentialTests`: the speed-ups against plain slices (see
   [peripheral-deadlines.md](peripheral-deadlines.md#differential-tests)); `CoSimBench`: the measurements above.
+- `PinLevelDifferentialTests`, `PinLevelLockstepTests`, `MicroPythonBusTests`: the pin-level buses
+  ([pin-level-buses.md](pin-level-buses.md#tests)).
 - `tests/RP2040Sharp.Native.Tests/abi_selftest.c`: the same ABI from C against the NativeAOT library.

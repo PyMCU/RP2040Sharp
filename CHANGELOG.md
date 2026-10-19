@@ -35,6 +35,36 @@ SRAM, peripheral registers, call returns). See [docs/peripheral-deadlines.md](do
 - Fixed: `RoscPeripheral.RANDOMBIT` was a process-wide counter, so pico_rand's seed (and with it
   the Pico W WLAN bring-up) depended on every other machine in the process.
 
+### New: pin-level UART, SPI and I2C
+
+The hardware UART0/1, SPI0/1 (master) and I2C0/1 (master) can drive and sample the GPIO pads
+themselves once firmware routes their function to them, so `machine.SPI`, `machine.I2C` and
+`machine.UART` reach a circuit that only sees pads. The bit-level engines are RP2350Sharp's
+(`Peripherals/PinLevel`): PL011 frames in every LCR_H format with error flags, PL022 in all four
+modes with DSS 4-16 and the hardware CSn, DW_apb_i2c START / repeated START / STOP, ACK / NACK with
+TX_ABRT, open-drain lines and clock stretching. See [docs/pin-level-buses.md](docs/pin-level-buses.md).
+
+- Library: `new RP2040Machine(pinLevelBuses: PinLevelBus.All)`; `None`, the default, leaves the
+  machine as it was. IO_BANK0 gains `RegisterPadFunction`, `FunctionPads`, `IsFunctionRouted`,
+  `LastPadEdgeCycle` / `FunctionDriving`; the blocks gain `EnablePinLevel` and `PinEngine`;
+  `ClocksPeripheral.ClkSysFromAux`.
+- The engines run on core 0's cycle counter and are brought up to the cycle of every access, so what
+  firmware reads does not depend on the slicing; in the sweeps they are deferred like the other
+  peripherals. Their dividers are scaled from the clocks firmware programmed (MicroPython's 48 MHz
+  clk_peri) to the core's fixed 125 MHz.
+- C ABI: `ST_RP2040_BUS_I2C` / `SPI` / `UART` / `ALL` (1, 2, 4, 7, RP2350's values) in
+  `st_rp2040_create_ex`; `st_rp2040_create` is `create_ex(flash, ST_RP2040_BUS_ALL)`, as on RP2350.
+  **Breaking:** `ST_RP2040_CYW43` is now 0x100 (RP2350's `ST_RP2350_CYW43`; it was 1, which is now
+  `ST_RP2040_BUS_I2C`). Hosts that use the name only need a rebuild.
+- Engine edges are reported with their own cycle. `st_rp2040_run_until_edge` arms an event-bounded
+  guard with pin-level buses (slices of core 0 end at the next engine edge on a watched pad and right
+  after an instruction that moved one, `RP2040Machine.RunCut`), so a lock-step host's answers are on
+  time whatever the guard; `st_rp2040_cycles_until_edge` returns the engines' next edge (it was always
+  `UINT64_MAX`). `st_rp2040_pin_set_input` applies pending peripheral time first, so an input is never
+  sampled retroactively.
+- Tests: `PinLevelDifferentialTests` (75), `PinLevelLockstepTests` (53), `MicroPythonBusTests` (6,
+  MicroPython v1.28.0 RPI_PICO through the C ABI).
+
 ### New: the SiliconTwin.Abstractions contract
 
 `RP2040Mcu` implements [`SiliconTwin.Abstractions`](https://github.com/silicon-twin/abstractions)

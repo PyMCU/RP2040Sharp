@@ -45,6 +45,7 @@ have it (`Sync`, then `Touch` asks for its next event again):
 | RTC, watchdog, ADC | the next second, the countdown reaching zero, the next START_MANY conversion |
 | USB | a SETUP to raise or a SOF bit to clear (next sweep), the next SOF, the next endpoint completion |
 | DMA, SPI | the next sweep while a transfer is paused on the beat budget / the TX FIFO holds words |
+| Pin-level SPI, UART, I2C | the engine's next step ([pin-level-buses.md](pin-level-buses.md)): a timed wait inside a frame, a queued word / byte / command to take, a stretched SCL seen high, an RX start bit. The engines run on core 0's clock and are brought up to the cycle of every access, DREQ query and pad input, so a tick only catches them up; the UART and I2C blocks are in the sweep only with their bus enabled |
 | SysTick (PPB) | stays eager (it counts from the cores' own cycle counters); its next exception bounds stretches and bounded runs |
 
 ## Sleeping stretches
@@ -102,8 +103,9 @@ See the tables in [native-abi.md](native-abi.md#throughput).
 
 - **Exact cycles of peripheral-driven pad edges** (PIO, PWM, DMA into SIO): still the end of the
   slice in which they happened, as in phase 1; the deferred PWM tick knows the step, which is where
-  this would start.
-- **Pin-level UART/SPI/I2C**: the next phase.
+  this would start. (The pin-level UART / SPI / I2C engines report their own edge cycles.)
+- **Pin-level UART/SPI/I2C**: done ([pin-level-buses.md](pin-level-buses.md)), with exact edge cycles and the
+  event-bounded guard; `PinLevelDifferentialTests` (75 cases) compares them in the three modes.
 - Core 1 awake: plain slices (bounded runs need core 1 unlaunched or asleep). Core 0 asleep with
   core 1 awake: plain slices.
 - PIO with an enabled state machine at a small divider: its next event is every edge, so it is

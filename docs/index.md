@@ -131,4 +131,5 @@ compat/index
 reference/index
 native-abi
 peripheral-deadlines
+pin-level-buses
 ```
