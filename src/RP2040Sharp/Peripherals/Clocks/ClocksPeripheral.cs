@@ -96,6 +96,9 @@ public sealed class ClocksPeripheral : IMemoryMappedDevice
         return src / divInt;
     }
 
+    /// <summary>CLK_SYS_CTRL.SRC selects the aux source (the PLL after clocks_init) rather than clk_ref.</summary>
+    public bool ClkSysFromAux => (_ctrl[5] & 0x1u) != 0;
+
     /// <summary>Live clk_sys frequency (Hz), derived from CLK_SYS_CTRL and CLK_SYS_DIV.</summary>
     public uint ClkSysHz
     {

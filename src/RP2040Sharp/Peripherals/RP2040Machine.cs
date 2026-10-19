@@ -10,6 +10,7 @@ using RP2040.Peripherals.Gpio;
 using RP2040.Peripherals.I2c;
 using RP2040.Peripherals.IoQspi;
 using RP2040.Peripherals.Pads;
+using RP2040.Peripherals.PinLevel;
 using RP2040.Peripherals.Pio;
 using RP2040.Peripherals.Pll;
 using RP2040.Peripherals.Ppb;
@@ -109,10 +110,20 @@ public sealed class RP2040Machine : IDisposable
 
     private readonly RP2040BootromRevision _bootromRevision;
 
+    /// <summary>The serial blocks that drive and sample the GPIO pads themselves (docs/pin-level-buses.md).</summary>
+    public PinLevelBus PinLevelBuses { get; }
+
+    /// <param name="flashSize">Flash size in bytes.</param>
+    /// <param name="bootrom">Bootrom revision.</param>
+    /// <param name="pinLevelBuses">Serial blocks that drive and sample the pads once firmware routes their function to
+    /// them (I2C / SPI masters, UARTs); a block whose pads are never routed keeps its transaction-level behaviour.
+    /// None (the default) leaves every block transaction-level and the machine exactly as before.</param>
     public RP2040Machine(uint flashSize = 2 * 1024 * 1024,
-                         RP2040BootromRevision bootrom = RP2040BootromRevision.B1)
+                         RP2040BootromRevision bootrom = RP2040BootromRevision.B1,
+                         PinLevelBus pinLevelBuses = PinLevelBus.None)
     {
         _bootromRevision = bootrom;
+        PinLevelBuses = pinLevelBuses & PinLevelBus.All;
         Bus = new BusInterconnect(flashSize);
         Cpu  = new CortexM0Plus(Bus) { CoreId = 0 };
         Cpu1 = new CortexM0Plus(Bus) { CoreId = 1 };
@@ -326,7 +337,11 @@ public sealed class RP2040Machine : IDisposable
         // Spi0/Spi1 tick so their TX FIFO drains over time: the TX DREQ follows real occupancy
         // (see WireSpiDreq), and a FIFO that never drains never frees a beat.
         _ppbRouter = ppbRouter;
-        _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Adc, Usb, Dma, Spi0, Spi1];
+        // Pin-level UARTs and I2C masters count with time (their engines); otherwise they are not ticked at all.
+        List<ITickable> tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Adc, Usb, Dma, Spi0, Spi1];
+        if ((PinLevelBuses & PinLevelBus.Uart) != 0) tickables.AddRange([Uart0, Uart1]);
+        if ((PinLevelBuses & PinLevelBus.I2c) != 0) tickables.AddRange([I2c0, I2c1]);
+        _tickables = [.. tickables];
         _schedule = new DeferredTick[_tickables.Length];
         for (var i = 0; i < _tickables.Length; i++)
             _schedule[i] = new DeferredTick(this, _tickables[i], i);
@@ -350,6 +365,14 @@ public sealed class RP2040Machine : IDisposable
         apb.RegisterSchedule(0x4003C000, _schedule[10], readsMutate: true);
         apb.RegisterSchedule(0x40040000, _schedule[11], readsMutate: true);
         _schedule[9].AlwaysAsk = _schedule[10].AlwaysAsk = _schedule[11].AlwaysAsk = true;
+        for (var i = 12; i < _schedule.Length; i++)
+        {
+            // Pin-level UART / I2C: their next event moves with pad inputs as well as accesses; asking is a compare.
+            _schedule[i].AlwaysAsk = true;
+            var baseAddress = _tickables[i] == Uart0 ? 0x40034000u : _tickables[i] == Uart1 ? 0x40038000u
+                            : _tickables[i] == I2c0 ? 0x40044000u : 0x40048000u;
+            apb.RegisterSchedule(baseAddress, _schedule[i], readsMutate: true);
+        }
         // SysTick counts from the cores' own cycle counters (nothing is owed); a write only changes when it fires.
         ppbRouter.OnWrite = () => ScheduleEpoch++;
         Watchdog.OnReset = SystemReset;
@@ -379,16 +402,21 @@ public sealed class RP2040Machine : IDisposable
         // 8-deep RX FIFO — and both lines re-arm their channel so a stall is never permanent.
         WireSpiDreq(Spi0, 16);
         WireSpiDreq(Spi1, 18);
-        // UART0 TX(20), RX(21), UART1 TX(22), RX(23)
-        Dma.RegisterDreq(20, () => true);              // UART0 TX always ready
+        // UART0 TX(20), RX(21), UART1 TX(22), RX(23). TX is always ready in the transaction model; a pin-level UART has
+        // a real TX FIFO, which re-arms its channel as the engine takes bytes off it.
+        Dma.RegisterDreq(20, () => Uart0.TxFifoNotFull);
         Dma.RegisterDreq(21, () => Uart0.RxDataAvailable);
-        Dma.RegisterDreq(22, () => true);              // UART1 TX always ready
+        Dma.RegisterDreq(22, () => Uart1.TxFifoNotFull);
         Dma.RegisterDreq(23, () => Uart1.RxDataAvailable);
-        // I2C0 TX(32), RX(33), I2C1 TX(34), RX(35)
-        Dma.RegisterDreq(32, () => true);
+        Uart0.OnTxSpace += () => Dma.ResumeDreq(20);
+        Uart1.OnTxSpace += () => Dma.ResumeDreq(22);
+        // I2C0 TX(32), RX(33), I2C1 TX(34), RX(35): the same for the TX FIFO of a pin-level master.
+        Dma.RegisterDreq(32, () => I2c0.TxFifoNotFull);
         Dma.RegisterDreq(33, () => I2c0.RxDataAvailable);
-        Dma.RegisterDreq(34, () => true);
+        Dma.RegisterDreq(34, () => I2c1.TxFifoNotFull);
         Dma.RegisterDreq(35, () => I2c1.RxDataAvailable);
+        I2c0.OnTxSpace += () => Dma.ResumeDreq(32);
+        I2c1.OnTxSpace += () => Dma.ResumeDreq(34);
         // ADC DREQ 36: RX FIFO has data
         Dma.RegisterDreq(36, () => Adc.HasFifoData);
         Dma.RegisterDreq(38, () => true);
@@ -430,6 +458,170 @@ public sealed class RP2040Machine : IDisposable
         Pio1.ReadGpioIn    = ReadGpio;
         Pio1.WriteGpioPins = (value, mask) => ApplyPins(1, value, mask);
         Pio1.WriteGpioDirs = (value, mask) => IoBank0.SetPioDirs(1, value, mask);
+
+        if (PinLevelBuses != PinLevelBus.None) WirePinLevelBuses(PinLevelBuses);
+    }
+
+    // ── Pin-level buses (docs/pin-level-buses.md) ─────────────────────────────
+
+    /// <summary>
+    /// Attach a bit-level engine to each selected serial block and register it with IO_BANK0 as that block's pad
+    /// function, so a GPIO muxed to SPI (FUNCSEL 1), UART (2) or I2C (3) is driven by, and feeds, the block. "Routed"
+    /// is judged live from IO_BANK0, so a block whose pads firmware never configures keeps its transaction behaviour.
+    /// </summary>
+    private void WirePinLevelBuses(PinLevelBus buses)
+    {
+        var io = IoBank0;
+        // The dividers count clk_peri (SPI, UART) or clk_sys (I2C) as firmware programmed them from the PLLs; the core
+        // runs at a fixed 125 MHz, so the engines scale those counts to its cycles. Until firmware switches clk_sys to
+        // its aux source (clocks_init), the core's own 125 MHz is the clock (it never ran from the ROSC).
+        Clocks.PllSys ??= PllSys;
+        Clocks.PllUsb ??= PllUsb;
+        uint PeriHz() => Clocks.ClkSysFromAux ? Clocks.ClkPeriHz() : CLK_HZ;
+        uint SysHz() => Clocks.ClkSysFromAux ? Clocks.ClkSysHz : CLK_HZ;
+        for (var b = 0; b < 2; b++)
+        {
+            var block = b;
+            if ((buses & PinLevelBus.Spi) != 0)
+            {
+                var spi = block == 0 ? Spi0 : Spi1;
+                var engine = spi.EnablePinLevel(
+                    () => io.IsFunctionRouted(PadFunctions.FuncSpi, block, PadFunctions.SpiSck), EngineClock, PeriHz);
+                spi.Changed = EngineChanged;
+                io.RegisterPadFunction(PadFunctions.FuncSpi, block, engine);
+            }
+            if ((buses & PinLevelBus.Uart) != 0)
+            {
+                var uart = block == 0 ? Uart0 : Uart1;
+                var engine = uart.EnablePinLevel(
+                    () => io.IsFunctionRouted(PadFunctions.FuncUart, block, PadFunctions.UartTx), EngineClock, PeriHz);
+                uart.Changed = EngineChanged;
+                io.RegisterPadFunction(PadFunctions.FuncUart, block, engine);
+            }
+            if ((buses & PinLevelBus.I2c) != 0)
+            {
+                var i2c = block == 0 ? I2c0 : I2c1;
+                var engine = i2c.EnablePinLevel(() =>
+                    io.IsFunctionRouted(PadFunctions.FuncI2c, block, PadFunctions.I2cSda) &&
+                    io.IsFunctionRouted(PadFunctions.FuncI2c, block, PadFunctions.I2cScl), EngineClock, SysHz);
+                i2c.Changed = EngineChanged;
+                io.RegisterPadFunction(PadFunctions.FuncI2c, block, engine);
+            }
+        }
+    }
+
+    // Core 0 / core 1 cycle counts at the start of core 1's turn in the slice in flight (see EngineClock).
+    private long _core1TurnBase0, _core1TurnBase1;
+
+    /// <summary>
+    /// The pin-level engines' clock: core 0's cycle counter at the access in flight. Core 0 runs its whole slice first,
+    /// then core 1, then the peripherals sweep: an access by core 0 happens at its own count, one by core 1 at the
+    /// slice start plus the cycles core 1 has run in it (never past core 0's count), anything else at core 0's count.
+    /// An engine is brought up to this clock at every access, so what firmware reads and the edges it starts do not
+    /// depend on how the run was sliced.
+    /// </summary>
+    public long EngineClock()
+    {
+        if (_activeCoreId == 1)
+            return Math.Min(Cpu.Cycles, _core1TurnBase0 + (Cpu1.Cycles - _core1TurnBase1));
+        return Cpu.Cycles;
+    }
+
+    /// <summary>
+    /// Cycles from core 0's clock until the next step of a pin-level engine that has work, on a pad in
+    /// <paramref name="watch"/>: an SPI master shifting or about to take a queued word, a UART transmitter, an I2C
+    /// master on the bus. 0 when an engine will look at its host on the next sweep; long.MaxValue when none has one
+    /// coming (idle engines, unwatched pads, edges only firmware or an input can start). Reads no register and syncs
+    /// nothing.
+    /// </summary>
+    public long CyclesUntilPadEdge(uint watch)
+    {
+        if (PinLevelBuses == PinLevelBus.None || watch == 0) return long.MaxValue;
+        long now = Cpu.Cycles, d = long.MaxValue;
+        var io = IoBank0;
+        if ((PinLevelBuses & PinLevelBus.Spi) != 0)
+        {
+            if ((io.FunctionPads(PadFunctions.FuncSpi, 0) & watch) != 0) d = Math.Min(d, Spi0.CyclesUntilPadEdge(now));
+            if ((io.FunctionPads(PadFunctions.FuncSpi, 1) & watch) != 0) d = Math.Min(d, Spi1.CyclesUntilPadEdge(now));
+        }
+        if ((PinLevelBuses & PinLevelBus.Uart) != 0)
+        {
+            if ((io.FunctionPads(PadFunctions.FuncUart, 0) & watch) != 0) d = Math.Min(d, Uart0.CyclesUntilPadEdge(now));
+            if ((io.FunctionPads(PadFunctions.FuncUart, 1) & watch) != 0) d = Math.Min(d, Uart1.CyclesUntilPadEdge(now));
+        }
+        if ((PinLevelBuses & PinLevelBus.I2c) != 0)
+        {
+            if ((io.FunctionPads(PadFunctions.FuncI2c, 0) & watch) != 0) d = Math.Min(d, I2c0.CyclesUntilPadEdge(now));
+            if ((io.FunctionPads(PadFunctions.FuncI2c, 1) & watch) != 0) d = Math.Min(d, I2c1.CyclesUntilPadEdge(now));
+        }
+        return d == long.MaxValue ? d : Math.Max(0, d);
+    }
+
+    // The cut of the run of core 0 in flight (RunCut, RunAwakeBounded with a watch): armed only while core 0 runs.
+    private bool _cutArmed;
+    private uint _cutWatch;
+
+    /// <summary>A pin-level engine's next event may have moved (an access, a pad input): plan again, and move the cut
+    /// of a cut run of core 0 to the engines' next pad edge.</summary>
+    private void EngineChanged()
+    {
+        ScheduleEpoch++;
+        if (!_cutArmed || _activeCoreId != 0) return;
+        var e = CyclesUntilPadEdge(_cutWatch);
+        Cpu.CutCycle = e == long.MaxValue ? long.MaxValue : Cpu.Cycles + e;
+    }
+
+    /// <summary>Inside a cut run of core 0, stop it right after the instruction in flight (a host that watches a pad that
+    /// instruction moved). Does nothing otherwise.</summary>
+    public void RequestCut()
+    {
+        if (_cutArmed && _activeCoreId == 0) Cpu.CutRequest = true;
+    }
+
+    private void ArmCut(uint watch)
+    {
+        var e = CyclesUntilPadEdge(watch);
+        Cpu.CutRequest = false;
+        Cpu.CutCycle = e == long.MaxValue ? long.MaxValue : Cpu.Cycles + Math.Max(1, e);
+        _cutWatch = watch;
+        _cutArmed = true;
+    }
+
+    private void DisarmCut()
+    {
+        _cutArmed = false;
+        Cpu.CutRequest = false;
+        Cpu.CutCycle = long.MaxValue;
+    }
+
+    /// <summary>
+    /// A <see cref="Run"/> slice that ends early, for a host that answers pad edges between calls: before the first
+    /// instruction of core 0 that would start at or after the next pin-level edge on a pad in <paramref name="watch"/>
+    /// (<see cref="CyclesUntilPadEdge"/>, followed as accesses move it), and right after an instruction a
+    /// <see cref="RequestCut"/> came from. Core 1 then runs as many instructions as core 0 did, and the peripherals
+    /// sweep. With nothing to cut it is exactly <see cref="Run"/>.
+    /// </summary>
+    /// <returns>The instructions core 0 ran (at least 1).</returns>
+    public int RunCut(int instructions, uint watch)
+    {
+        _activeCoreId = 0;
+        var before0 = Cpu.Cycles;
+        ArmCut(watch);
+        try { Cpu.RunCut(instructions); }
+        finally { DisarmCut(); }
+        int k = instructions - Cpu.CutLeft;
+        FinishSlice(k, Cpu.Cycles - before0);
+        return k;
+    }
+
+    /// <summary>The machine's clock went back (watchdog reboot resets the core cycle counter): restart the engines on it.</summary>
+    private void RebaseEngines()
+    {
+        if (PinLevelBuses == PinLevelBus.None) return;
+        var now = Cpu.Cycles;
+        Spi0.Rebase(now); Spi1.Rebase(now);
+        Uart0.Rebase(now); Uart1.Rebase(now);
+        I2c0.Rebase(now); I2c1.Rebase(now);
     }
 
     /// <summary>
@@ -862,8 +1054,10 @@ public sealed class RP2040Machine : IDisposable
         // ── Core 1 (if launched) ───────────────────────────────────────
         if (_core1Launched)
         {
-            _activeCoreId = 1;
             var before1 = Cpu1.Cycles;
+            _core1TurnBase0 = Cpu.Cycles - core0Delta;
+            _core1TurnBase1 = before1;
+            _activeCoreId = 1;
             Cpu1.Run(instructions);
             _activeCoreId = 0;
             // Both cores run in parallel on real hardware; wall-clock elapsed
@@ -1030,7 +1224,9 @@ public sealed class RP2040Machine : IDisposable
     /// part of it done; the caller finishes it with <see cref="FinishSlice"/>(instructions, <see cref="BoundedSliceDelta"/>).
     /// </summary>
     /// <returns>The number of slices booked before the last one.</returns>
-    public int RunAwakeBounded(int instructions, int maxSlices)
+    /// <param name="cutWatch">Nonzero: the run is also cut as <see cref="RunCut"/> cuts a slice, on these pads, and the
+    /// slice it ends in may then be shorter (<see cref="BoundedSliceSlots"/>).</param>
+    public int RunAwakeBounded(int instructions, int maxSlices, uint cutWatch = 0)
     {
         var g = _gate;
         g.Machine = this;
@@ -1041,9 +1237,21 @@ public sealed class RP2040Machine : IDisposable
         g.Plan();
         EndBoundedRun = false;
         _activeCoreId = 0;
-        Cpu.RunGated(g, instructions);
+        if (cutWatch == 0)
+        {
+            Cpu.RunGated(g, instructions);
+            BoundedSliceSlots = instructions;
+            return g.Booked;
+        }
+        ArmCut(cutWatch);
+        try { Cpu.RunGatedCut(g, instructions); }
+        finally { DisarmCut(); }
+        BoundedSliceSlots = instructions - Cpu.CutLeft;
         return g.Booked;
     }
+
+    /// <summary>Instructions core 0 ran in the slice a bounded run ended in: the slice, unless a cut ended it early.</summary>
+    public int BoundedSliceSlots { get; private set; }
 
     /// <summary>Core-0 cycles of the slice a bounded run ended in, for <see cref="FinishSlice"/>.</summary>
     public long BoundedSliceDelta => Cpu.Cycles - _gate.SliceStart;
@@ -1073,6 +1281,8 @@ public sealed class RP2040Machine : IDisposable
             var m = Machine;
             // A core that went to sleep (or locked up) on the slice's last slot: the next slice is a sleeping one.
             if (Booked + 1 >= MaxSlices || m.EndBoundedRun || cpu.Registers.Waiting || cpu.IsLockedUp) return false;
+            // A cut run whose cut falls on this slice end: the plain slices would end here too, and sweep.
+            if (cpu.CutRequest || cpu.Cycles >= cpu.CutCycle) return false;
             var launched = m._core1Launched;
             if (launched && !QuietAsleep(m.Cpu1)) return false;
             var d0 = cpu.Cycles - SliceStart;
@@ -1172,8 +1382,10 @@ public sealed class RP2040Machine : IDisposable
         var delta = Cpu.Cycles - before0;
         if (_core1Launched)
         {
-            _activeCoreId = 1;
             var before1 = Cpu1.Cycles;
+            _core1TurnBase0 = Cpu.Cycles - delta;
+            _core1TurnBase1 = before1;
+            _activeCoreId = 1;
             Cpu1.Run(instructions);
             _activeCoreId = 0;
             delta = Math.Max(delta, (int)(Cpu1.Cycles - before1));
@@ -1200,6 +1412,7 @@ public sealed class RP2040Machine : IDisposable
         Ppb.Reset();
         Ppb1.Reset();
         Usb.Reset();
+        RebaseEngines();
     }
 
     /// <summary>
