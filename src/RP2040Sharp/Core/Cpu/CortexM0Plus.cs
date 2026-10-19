@@ -235,23 +235,51 @@ public sealed unsafe class CortexM0Plus
     {
         switch (_activeDecoder)
         {
-            case DecoderType.NativeLut: RunGeneric(ref _nativeLutDecoder, instructions); break;
-            case DecoderType.Lut:       RunGeneric(ref _lutDecoder, instructions); break;
-            case DecoderType.Switch:    RunGeneric(ref _switchDecoder, instructions); break;
-            default:                    RunGeneric(ref _nativeLutDecoder, instructions); break;
+            case DecoderType.NativeLut: RunGeneric<Decoders.NativeLutDecoder, NoRunLimit>(ref _nativeLutDecoder, instructions); break;
+            case DecoderType.Lut:       RunGeneric<Decoders.LutDecoder, NoRunLimit>(ref _lutDecoder, instructions); break;
+            case DecoderType.Switch:    RunGeneric<Decoders.SwitchDecoder, NoRunLimit>(ref _switchDecoder, instructions); break;
+            default:                    RunGeneric<Decoders.NativeLutDecoder, NoRunLimit>(ref _nativeLutDecoder, instructions); break;
         }
     }
 
+    /// <summary>
+    /// A bounded run: slices of <paramref name="slice"/> instructions, one after the other in the same loop, for as
+    /// long as <paramref name="gate"/> lets each slice end go by (<see cref="ISliceGate.NextSlice"/>). Each slice is
+    /// exactly what <see cref="Run"/>(<paramref name="slice"/>) would execute, a sleep included: falling asleep
+    /// charges the rest of the slice and ends the run, as it ends a <see cref="Run"/>. A separate instantiation of
+    /// the run loop, so <see cref="Run"/> pays nothing for it.
+    /// </summary>
+    public void RunGated(ISliceGate gate, int slice)
+    {
+        Gate = gate;
+        GateSlice = slice;
+        try
+        {
+            switch (_activeDecoder)
+            {
+                case DecoderType.Lut:    RunGeneric<Decoders.LutDecoder, SliceRunLimit>(ref _lutDecoder, slice); break;
+                case DecoderType.Switch: RunGeneric<Decoders.SwitchDecoder, SliceRunLimit>(ref _switchDecoder, slice); break;
+                default:                 RunGeneric<Decoders.NativeLutDecoder, SliceRunLimit>(ref _nativeLutDecoder, slice); break;
+            }
+        }
+        finally { Gate = null; }
+    }
+
+    /// <summary>The gate and slice length of the bounded run in flight (<see cref="RunGated"/>).</summary>
+    internal ISliceGate? Gate;
+    internal int GateSlice;
+
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private void RunGeneric<TDecoder>(ref TDecoder decoder, int instructions)
+    private void RunGeneric<TDecoder, TLimit>(ref TDecoder decoder, int instructions)
         where TDecoder : struct, Decoders.IInstructionDecoder
+        where TLimit : struct, IRunLimit
     {
         var fetchPtr = _fetchPtr;
         var fetchMask = _fetchMask;
         var fetchBase = _fetchBase;
         var fetchLen = _fetchLen;
 
-        while (instructions-- > 0)
+        while (instructions-- > 0 || TLimit.Refill(this, ref instructions))
         {
             // ARMv6-M §B1.5.13 Lockup: CPU halts when HardFault fires in HardFault/NMI handler.
             if (IsLockedUp) return;

@@ -16,6 +16,22 @@ public sealed class ApbBridge : IMemoryMappedDevice, IAddressDecoder
     private readonly IMemoryMappedDevice?[] _devices = new IMemoryMappedDevice?[256];
     private readonly bool[] _present = new bool[256];
 
+    // Deferred ticks of the peripherals behind each slot (docs/peripheral-deadlines.md): synced before every
+    // access, asked to plan again after every write (and after reads where reading changes the state).
+    private readonly DeferredTick?[] _schedule = new DeferredTick?[256];
+    private readonly bool[] _readsMutate = new bool[256];
+
+    /// <summary>Make every access to the device at <paramref name="baseAddress"/> sync <paramref name="schedule"/> first.</summary>
+    public void RegisterSchedule(uint baseAddress, DeferredTick schedule, bool readsMutate = false)
+    {
+        var slot = ((baseAddress & 0x0FFFFFFF) >> 14) & 0xFF;
+        _schedule[slot] = schedule;
+        _readsMutate[slot] = readsMutate;
+    }
+
+    private void BeforeRead(uint slot) => _schedule[slot]?.Sync();
+    private void AfterRead(uint slot) { if (_readsMutate[slot]) _schedule[slot]?.Touch(); }
+
     public uint Size => 0x10000000;
 
     // 256 slots of 16 KiB: the bridge decodes 0x40000000-0x403FFFFF, and only where a peripheral sits
@@ -38,21 +54,36 @@ public sealed class ApbBridge : IMemoryMappedDevice, IAddressDecoder
     {
         var device = _devices[(address >> 14) & 0xFF];
         if (device == null) { EmuStrict.Note("apb.read.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return 0; }
-        return device.ReadWord(address & 0xFFF);
+        var slot = (address >> 14) & 0xFF;
+        if (_schedule[slot] == null) return device.ReadWord(address & 0xFFF);
+        BeforeRead(slot);
+        var v = device.ReadWord(address & 0xFFF);
+        AfterRead(slot);
+        return v;
     }
 
     public ushort ReadHalfWord(uint address)
     {
         var device = _devices[(address >> 14) & 0xFF];
         if (device == null) { EmuStrict.Note("apb.read.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return 0; }
-        return device.ReadHalfWord(address & 0xFFF);
+        var slot = (address >> 14) & 0xFF;
+        if (_schedule[slot] == null) return device.ReadHalfWord(address & 0xFFF);
+        BeforeRead(slot);
+        var v = device.ReadHalfWord(address & 0xFFF);
+        AfterRead(slot);
+        return v;
     }
 
     public byte ReadByte(uint address)
     {
         var device = _devices[(address >> 14) & 0xFF];
         if (device == null) { EmuStrict.Note("apb.read.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return 0; }
-        return device.ReadByte(address & 0xFFF);
+        var slot = (address >> 14) & 0xFF;
+        if (_schedule[slot] == null) return device.ReadByte(address & 0xFFF);
+        BeforeRead(slot);
+        var v = device.ReadByte(address & 0xFFF);
+        AfterRead(slot);
+        return v;
     }
 
     public void WriteWord(uint address, uint value)
@@ -60,6 +91,15 @@ public sealed class ApbBridge : IMemoryMappedDevice, IAddressDecoder
         var device = _devices[(address >> 14) & 0xFF];
         if (device == null) { EmuStrict.Note("apb.write.unmapped-peripheral", $"0x{0x40000000u | (address & 0x0FFFFFFF):X8}"); return; }
 
+        var schedule = _schedule[(address >> 14) & 0xFF];
+        if (schedule == null) { WriteDevice(device, address, value); return; }
+        schedule.Sync();
+        WriteDevice(device, address, value);
+        schedule.Touch();
+    }
+
+    private static void WriteDevice(IMemoryMappedDevice device, uint address, uint value)
+    {
         var atomicType = (address >> 12) & 0x3;
         var offset = address & 0xFFF;
 

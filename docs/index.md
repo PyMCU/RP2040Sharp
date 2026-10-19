@@ -129,4 +129,6 @@ compat/index
 :caption: Reference
 
 reference/index
+native-abi
+peripheral-deadlines
 ```

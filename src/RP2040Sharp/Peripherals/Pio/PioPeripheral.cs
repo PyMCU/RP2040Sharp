@@ -10,7 +10,7 @@ namespace RP2040.Peripherals.Pio;
 /// 4 state machines. 32 × 16-bit instruction words.
 /// Implements ITickable; tick at system clock granularity.
 /// </summary>
-public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
+public sealed class PioPeripheral : IMemoryMappedDevice, IDeferrableTickable
 {
     private const int SM_COUNT    = 4;
     private const int INSTR_COUNT = 32;
@@ -145,6 +145,56 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
             StepRound(round);
         }
         EndTick();
+    }
+
+    /// <summary>The deferred tick the machine keeps for this block (bus accesses sync it in the bridge).</summary>
+    public DeferredTick? Schedule { get; set; }
+
+    /// <summary>
+    /// Cycles until the next divider edge of an enabled state machine (a step). Before that a tick only advances the
+    /// block clock and re-levels the interrupt lines, unless they are about to change or the IRQ latch is behind the
+    /// flags: then the next sweep.
+    /// </summary>
+    public long CyclesUntilEvent()
+    {
+        if (_irqSnapshot != _irq || LinesWouldChange()) return 0;
+        var best = long.MaxValue;
+        for (var s = 0; s < SM_COUNT; s++)
+        {
+            var sm = _sm[s];
+            if (!sm.Enabled) continue;
+            var div = Divisor(sm.ClkDiv);
+            // smallest c with (_clkAccum + 256 c) / div > DivEdgesSeen
+            var need = ((sm.DivEdgesSeen + 1) * div - _clkAccum + 255) / 256;
+            if (need < best) best = need;
+        }
+        return Math.Max(0, best);
+    }
+
+    /// <summary>Owed cycles with no divider edge among them: only the block clock moves.</summary>
+    public void CatchUp(long cycles) => _clkAccum += cycles * 256;
+
+    /// <summary>What a tick without a step does: <see cref="EndTick"/> (the latch and the interrupt heartbeat).</summary>
+    public void SkipTick() => EndTick();
+
+    private bool LinesWouldChange()
+    {
+        var intr = BuildIntr();
+        var irq0Active = ((intr | _irq0Intf) & _irq0Inte) != 0;
+        var irq1Active = ((intr | _irq1Intf) & _irq1Inte) != 0;
+        return !_irqStateKnown || irq0Active != _lastIrq0 || irq1Active != _lastIrq1;
+    }
+
+    /// <summary>
+    /// True when this block's sleep heartbeat (<see cref="CheckInterrupts"/> while the core sleeps) would leave both
+    /// cores' NVIC pending bits as they are: its lines are already latched as pending exactly when active.
+    /// </summary>
+    public bool HeartbeatInert(CortexM0Plus core0, CortexM0Plus core1)
+    {
+        if (LinesWouldChange()) return false;
+        var mask = 3u << (int)(7 + _blockIndex * 2);
+        var want = (_lastIrq0 ? 1u << (int)(7 + _blockIndex * 2) : 0) | (_lastIrq1 ? 1u << (int)(8 + _blockIndex * 2) : 0);
+        return (core0.Registers.PendingInterrupts & mask) == want && (core1.Registers.PendingInterrupts & mask) == want;
     }
 
     /// <summary>Clock divisor in x256 units: bits[31:16]=integer (0 means 65536), bits[15:8]=frac.</summary>
@@ -424,6 +474,8 @@ public sealed class PioPeripheral : IMemoryMappedDevice, ITickable
     /// <summary>Inject a value directly into the RX FIFO of <paramref name="smIndex"/>.</summary>
     public void InjectRxData(int smIndex, uint value)
     {
+        Schedule?.Sync();
+        Schedule?.Touch();
         var sm = _sm[smIndex];
         if (sm.RxFifo.Count < sm.RxDepth)
         {

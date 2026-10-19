@@ -11,7 +11,7 @@ namespace RP2040.Peripherals.Pwm;
 /// <see cref="SetBInput"/> from the GPIO input path when the pin is muxed to PWM.
 /// Provides ITickable to advance the counter.
 /// </summary>
-public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
+public sealed class PwmPeripheral : IMemoryMappedDevice, IDeferrableTickable
 {
     private const int SLICE_COUNT = 8;
 
@@ -91,6 +91,8 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
     public void SetBInput(int slice, bool level)
     {
         if (_bInput[slice] == level) return;
+        Schedule?.Sync();
+        Schedule?.Touch();
         _bInput[slice] = level;
         if ((_csr[slice] & CSR_EN) == 0) return;
         var divMode = (_csr[slice] & CSR_DIVMODE) >> 4;
@@ -114,44 +116,99 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
 
         var phCorrect = (_csr[s] & CSR_PH_CORRECT) != 0;
 
-        for (var i = 0L; i < steps; i++)
+        // Counter steps that only count are taken at once; the loop goes round once per wrap or turn at TOP, which
+        // is where a step does more (the same result as stepping one at a time).
+        while (steps > 0)
         {
+            long c = _ctr[s], top = _top[s];
             if (phCorrect)
             {
-                // Phase-correct: count up to TOP then back down to 0
                 if (_phaseDir[s])
                 {
-                    _ctr[s]++;
-                    if (_ctr[s] >= _top[s])
-                    {
-                        _ctr[s] = _top[s];
-                        _phaseDir[s] = false;
-                    }
+                    // Counting up: each step increments; the one that reaches TOP turns the counter round.
+                    var toTurn = c < top ? top - c : 1;
+                    if (steps < toTurn) { _ctr[s] = (uint)(c + steps); return; }
+                    steps -= toTurn;
+                    _ctr[s] = _top[s];
+                    _phaseDir[s] = false;
                 }
                 else
                 {
-                    if (_ctr[s] == 0)
-                    {
-                        _phaseDir[s] = true;
-                        _intr |= 1u << s;
-                        if ((_inte & (1u << s)) != 0)
-                            _cpu.SetInterrupt(4, true); // PWM_IRQ_WRAP is single shared IRQ
-                    }
-                    else _ctr[s]--;
-                }
-            }
-            else
-            {
-                _ctr[s]++;
-                if (_ctr[s] > _top[s])
-                {
+                    // Counting down: c steps to 0, then the step at 0 turns it up and raises the wrap.
+                    if (steps <= c) { _ctr[s] = (uint)(c - steps); return; }
+                    steps -= c + 1;
                     _ctr[s] = 0;
+                    _phaseDir[s] = true;
                     _intr |= 1u << s;
                     if ((_inte & (1u << s)) != 0)
                         _cpu.SetInterrupt(4, true); // PWM_IRQ_WRAP is single shared IRQ
                 }
             }
+            else
+            {
+                // The step past TOP wraps to 0 (a counter above TOP, after a TOP write, wraps on the next step).
+                var toWrap = c >= top ? 1 : top - c + 1;
+                if (steps < toWrap) { _ctr[s] = (uint)(c + steps); return; }
+                steps -= toWrap;
+                _ctr[s] = 0;
+                _intr |= 1u << s;
+                if ((_inte & (1u << s)) != 0)
+                    _cpu.SetInterrupt(4, true); // PWM_IRQ_WRAP is single shared IRQ
+            }
         }
+    }
+
+    /// <summary>The deferred tick the machine keeps for this block (bus accesses sync it in the bridge).</summary>
+    public DeferredTick? Schedule { get; set; }
+
+    /// <summary>
+    /// Cycles until the first counter step, over the slices the clock advances, that does more than count: a wrap
+    /// (raw interrupt, IRQ), a turn at TOP, or a channel output that changes (the pads follow it). Edge-counting
+    /// slices and gated ones with B low have no timed event (<see cref="SetBInput"/> syncs).
+    /// </summary>
+    public long CyclesUntilEvent()
+    {
+        var best = long.MaxValue;
+        for (var s = 0; s < SLICE_COUNT; s++)
+        {
+            if ((_csr[s] & CSR_EN) == 0) continue;
+            var divMode = (_csr[s] & CSR_DIVMODE) >> 4;
+            if (divMode >= 2) continue;
+            if (divMode == 1 && !_bInput[s]) continue;
+
+            long c = _ctr[s], top = _top[s];
+            long la = _cc[s] & 0xFFFF, lb = (_cc[s] >> 16) & 0xFFFF;
+            long k;   // counter steps until the event
+            var phCorrect = (_csr[s] & CSR_PH_CORRECT) != 0;
+            if (!phCorrect)
+            {
+                k = c >= top ? 1 : top - c + 1;                       // the wrap
+                // an output falls at the step that makes CTR = level
+                if (la > c && la <= top) k = Math.Min(k, la - c);
+                if (lb > c && lb <= top) k = Math.Min(k, lb - c);
+            }
+            else if (_phaseDir[s])
+            {
+                k = c < top ? top - c : 1;                            // the turn at TOP
+                if (la > c && la < top) k = Math.Min(k, la - c);
+                if (lb > c && lb < top) k = Math.Min(k, lb - c);
+            }
+            else
+            {
+                k = c + 1;                                            // the wrap at 0
+                // an output rises at the step that makes CTR = level - 1
+                if (la >= 1 && la <= c) k = Math.Min(k, c - la + 1);
+                if (lb >= 1 && lb <= c) k = Math.Min(k, c - lb + 1);
+            }
+
+            var divInt = (int)((_div[s] >> 4) & 0xFF);
+            if (divInt == 0) divInt = 1;
+            long divisor = divInt * 16 + (int)(_div[s] & 0xF);
+            // smallest d with (_fracAccum + 16 d) / divisor >= k
+            var need = (k * divisor - _fracAccum[s] + 15) / 16;
+            if (need < best) best = need;
+        }
+        return Math.Max(0, best);
     }
 
     // ── IMemoryMappedDevice ──────────────────────────────────────────
@@ -265,7 +322,7 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
     }
 
     /// <summary>True if slice counter is currently counting up (phase-correct mode).</summary>
-    public bool IsCountingUp(int slice) => _phaseDir[slice];
+    public bool IsCountingUp(int slice) { Schedule?.Sync(); return _phaseDir[slice]; }
 
     /// <summary>True if the slice is enabled (CSR_EN).</summary>
     public bool IsSliceEnabled(int slice) => (uint)slice < SLICE_COUNT && (_csr[slice] & CSR_EN) != 0;
@@ -274,6 +331,7 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
     public bool GetChannelOutput(int slice, bool channelB)
     {
         if ((uint)slice >= SLICE_COUNT) return false;
+        Schedule?.Sync();
         var level = channelB ? (_cc[slice] >> 16) & 0xFFFF : _cc[slice] & 0xFFFF;
         var high = _ctr[slice] < level;
         var inv = (_csr[slice] & (channelB ? CSR_B_INV : CSR_A_INV)) != 0;
@@ -288,6 +346,7 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, ITickable
     public PwmSliceSnapshot GetSlice(int slice)
     {
         if ((uint)slice >= SLICE_COUNT) return default;
+        Schedule?.Sync();
         return new PwmSliceSnapshot(IsSliceEnabled(slice), _ctr[slice], _top[slice],
             GetDutyA(slice), GetDutyB(slice), _div[slice], IsCountingUp(slice),
             GetChannelOutput(slice, false), GetChannelOutput(slice, true));

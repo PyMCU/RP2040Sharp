@@ -17,7 +17,7 @@ namespace RP2040.Peripherals.Usb;
 /// and bulk CDC-ACM transfers. Companion host driver lives in <see cref="UsbCdcHost"/>.
 /// Equivalent to rp2040js: src/peripherals/usb.ts (device mode subset).
 /// </summary>
-public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, ITickable
+public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, IDeferrableTickable
 {
     private const int USB_IRQ = 5;
 
@@ -143,6 +143,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     /// </summary>
     public void Reset()
     {
+        HostAccess();
         Array.Clear(_dpram);
         Array.Clear(_addrEndp);
         _mainCtrl = 0;
@@ -389,6 +390,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     /// <summary>Simulate a bus reset received by the device. Sets BUS_RESET in SIE_STATUS.</summary>
     public void SignalBusReset()
     {
+        HostAccess();
         _sieStatus |= SIE_BUS_RESET | SIE_CONNECTED;
         SieStatusUpdated();
     }
@@ -399,6 +401,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     /// </summary>
     public void SignalResume()
     {
+        HostAccess();
         _sieStatus |= SIE_RESUME;
         SieStatusUpdated();
     }
@@ -409,6 +412,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     /// </summary>
     public void SignalSof(uint frameNumber)
     {
+        HostAccess();
         // SOF frame number is in SOF_RD register (R_SOF_RD offset 0x048)
         _sofRd = frameNumber & 0x7FF;
         _intr |= INTR_DEV_SOF;
@@ -419,6 +423,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     /// <summary>Simulate an isolated SETUP_REC bit assertion (no payload).</summary>
     public void SignalSetupPacket()
     {
+        HostAccess();
         _sieStatus |= SIE_SETUP_REC;
         SieStatusUpdated();
     }
@@ -427,6 +432,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     public void SendSetupPacket(ReadOnlySpan<byte> setup)
     {
         if (setup.Length != 8) throw new ArgumentException("SETUP packet must be 8 bytes", nameof(setup));
+        HostAccess();
         OnUsbEvent?.Invoke($"SETUP [{Convert.ToHexString(setup)}]");
         setup.CopyTo(_dpram.AsSpan(0, 8));
         // Raise SETUP_REC on the NEXT Tick, not now. A new SETUP triggers reset_ep0 in the device, which
@@ -443,6 +449,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     /// <summary>Provide data for an OUT endpoint that the firmware previously armed.</summary>
     public void EndpointReadDone(int endpoint, ReadOnlySpan<byte> data)
     {
+        HostAccess();
         // Defer DPRAM write + IndicateBufferReady to Tick() after READ_DELAY_CYCLES.
         // Matches rp2040js endpointReadAlarms: without this delay, TinyUSB immediately re-arms
         // the endpoint from within the BUFF_STATUS ISR, creating a tight loop that eventually
@@ -456,6 +463,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     /// <summary>Copy <paramref name="data"/> into DPRAM at <paramref name="dpramOffset"/>.</summary>
     public void WriteDpram(uint dpramOffset, ReadOnlySpan<byte> data)
     {
+        HostAccess();
         if (dpramOffset + data.Length > DPRAM_SIZE)
             throw new ArgumentOutOfRangeException(nameof(dpramOffset));
         data.CopyTo(_dpram.AsSpan((int)dpramOffset));
@@ -606,6 +614,34 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     /// so that level-triggered USB IRQ can re-assert via NVIC_ISER enable).
     /// </summary>
     public void RecheckInterrupts() => CheckInterrupts();
+
+    /// <summary>The deferred tick the machine keeps for the USB block (bus accesses sync it in the bridge).</summary>
+    public DeferredTick? Schedule { get; set; }
+
+    /// <summary>A call from the host side (or a reset): bring the block up to date, and plan again afterwards.</summary>
+    private void HostAccess()
+    {
+        if (Schedule is not { } s) return;
+        s.Sync();
+        s.Touch();
+    }
+
+    /// <summary>
+    /// Cycles until a tick does more than count: a SETUP to raise or a SOF bit to clear (the next sweep), the next
+    /// SOF while the controller runs in device mode, or the next deferred endpoint completion.
+    /// </summary>
+    public long CyclesUntilEvent()
+    {
+        if (_setupPending || (_intr & INTR_DEV_SOF) != 0) return 0;
+        var best = long.MaxValue;
+        if (_controllerEnabled && !_hostMode)
+            best = Math.Max(0, _lastSofCycles + SOF_PERIOD_CYCLES - _totalCycles);
+        foreach (var q in _pendingWrites.Values)
+            if (q.Count > 0) best = Math.Min(best, Math.Max(0, q.Peek().deliverAt - _totalCycles));
+        foreach (var q in _pendingReads.Values)
+            if (q.Count > 0) best = Math.Min(best, Math.Max(0, q.Peek().deliverAt - _totalCycles));
+        return best;
+    }
 
     private const long SOF_PERIOD_CYCLES = 125_000L; // 1ms at 125 MHz (USB full-speed SOF rate)
     private long _lastSofCycles = long.MinValue / 2;

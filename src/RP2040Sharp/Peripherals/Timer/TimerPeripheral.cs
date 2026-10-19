@@ -8,7 +8,7 @@ namespace RP2040.Peripherals.Timer;
 /// Maintains a 64-bit microsecond counter driven by <see cref="Tick"/>.
 /// Four alarms fire when the lower 32 bits of the counter match their values.
 /// </summary>
-public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
+public sealed class TimerPeripheral : IMemoryMappedDevice, IDeferrableTickable
 {
     private const uint TIMEHW    = 0x000;
     private const uint TIMELW    = 0x004;
@@ -49,7 +49,16 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
 
     // ── Read-only inspection surface (playground/tests) ──────────────────────
     /// <summary>Live 64-bit microsecond counter (TIMERAWH:TIMERAWL).</summary>
-    public ulong GetCounter() => LiveMicros();
+    public ulong GetCounter() { Schedule?.Sync(); return LiveMicros(); }
+
+    /// <summary>The deferred tick the machine keeps for this timer (bus accesses sync it in the bridge).</summary>
+    public DeferredTick? Schedule { get; set; }
+
+    /// <summary>
+    /// Core-0 cycle count of the sweep a tick stands for. A tick per sweep runs right after the slice, at the core's
+    /// own count; a deferred one runs later, so the machine says where its last sweep was. Null: the core's count.
+    /// </summary>
+    public Func<long>? SweepClock { get; set; }
     public uint GetAlarm(int i) => (uint)i < 4 ? _alarm[i] : 0;
     public bool IsArmed(int i)  => (uint)i < 4 && (_armed & (1u << i)) != 0;
     private uint _intr;    // raw interrupt status (written 1 to clear)
@@ -68,7 +77,7 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
 
     public void Tick(long deltaCycles)
     {
-        _cyclesAtLastTick = _cpu.Cycles;
+        _cyclesAtLastTick = SweepClock?.Invoke() ?? _cpu.Cycles;
         _cycleAccum += deltaCycles;
 
         // Convert accumulated cycles to microseconds
@@ -94,6 +103,27 @@ public sealed class TimerPeripheral : IMemoryMappedDevice, ITickable
                     _cpu.SetInterrupt(i, true);   // Timer IRQ 0-3 = hardware IRQ 0-3
             }
         }
+    }
+
+    /// <summary>
+    /// Cycles until the counter reaches the nearest armed alarm (one already due fires at the next microsecond the
+    /// counter moves): only then does a tick do more than count.
+    /// </summary>
+    public long CyclesUntilEvent()
+    {
+        if (_armed == 0) return long.MaxValue;
+        var low = (uint)_timeMicros;
+        var best = long.MaxValue;
+        for (var i = 0; i < 4; i++)
+        {
+            if ((_armed & (1u << i)) == 0) continue;
+            long k = unchecked(_alarm[i] - low);              // microseconds ahead
+            if (k == 0 || k > 0x80000000L) k = 1;             // already due: fires when the counter next moves
+            // smallest c with (_cycleAccum + c) * 1e6 / clk >= k
+            var need = (k * _clkHz + 999_999) / 1_000_000 - _cycleAccum;
+            if (need < best) best = need;
+        }
+        return Math.Max(0, best);
     }
 
     /// <summary>

@@ -260,6 +260,13 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
     /// <summary>Pads currently muxed to PWM (FUNCSEL 4), whose level is time-varying, not write-driven.</summary>
     private uint _pwmMuxedPins;
 
+    /// <summary>
+    /// Pads currently muxed to PWM (FUNCSEL 4), one bit per GPIO. Their level follows the PWM counter, which
+    /// never goes through <see cref="NotifyPads"/>, so neither <see cref="PadChanged"/> nor
+    /// <see cref="PadsChanged"/> reports their edges: a host that watches such a pad polls it.
+    /// </summary>
+    public uint PwmMuxedPins => _pwmMuxedPins;
+
     /// <summary>Pads muxed to each function, kept in step with FUNCSEL writes.</summary>
     private uint _sioPins, _pio0Pins, _pio1Pins;
 

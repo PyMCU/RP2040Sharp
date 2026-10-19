@@ -11,7 +11,7 @@ namespace RP2040.Peripherals.Spi;
 /// level tracks backpressure and drains on <see cref="Tick"/>, so a DMA channel paced by SPI*_TX
 /// stalls when the FIFO fills instead of draining its whole buffer at trigger time.
 /// </summary>
-public sealed class SpiPeripheral : IMemoryMappedDevice, ITickable
+public sealed class SpiPeripheral : IMemoryMappedDevice, IDeferrableTickable
 {
     private const uint SSPCR0  = 0x000;  // Control 0: SCR, SPH, SPO, FRF, DSS
     private const uint SSPCR1  = 0x004;  // Control 1: SOD, MS, SSE, LBM
@@ -92,6 +92,12 @@ public sealed class SpiPeripheral : IMemoryMappedDevice, ITickable
         (_cr1 & CR1_LBM) != 0);
 
     // ── ITickable ─────────────────────────────────────────────────────
+
+    /// <summary>A tick drains a TX FIFO that holds words (at the next sweep, whatever its length); else nothing.</summary>
+    public long CyclesUntilEvent() => _txLevel > 0 ? 0 : long.MaxValue;
+
+    /// <summary>Nothing counts with time.</summary>
+    public void CatchUp(long cycles) { }
 
     public void Tick(long deltaCycles)
     {

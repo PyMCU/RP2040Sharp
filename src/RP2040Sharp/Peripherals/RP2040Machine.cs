@@ -229,7 +229,7 @@ public sealed class RP2040Machine : IDisposable
         IoBank0.OnInputChanged = (pin, level) =>
         {
             if ((pin & 1) != 0 && IoBank0.GetFuncSel(pin) == 4)
-                Pwm.SetBInput((pin >> 1) & 7, level);
+                Pwm.SetBInput((pin >> 1) & 7, level);   // syncs the PWM first: the gate changes from here on
         };
 
         // Timer @ 0x40054000 (slot 21)
@@ -325,7 +325,33 @@ public sealed class RP2040Machine : IDisposable
         // so Ppb1 does not need a separate entry here.
         // Spi0/Spi1 tick so their TX FIFO drains over time: the TX DREQ follows real occupancy
         // (see WireSpiDreq), and a FIFO that never drains never frees a beat.
+        _ppbRouter = ppbRouter;
         _tickables = [ppbRouter, Timer, Pwm, Pio0, Pio1, Rtc, Watchdog, Adc, Usb, Dma, Spi0, Spi1];
+        _schedule = new DeferredTick[_tickables.Length];
+        for (var i = 0; i < _tickables.Length; i++)
+            _schedule[i] = new DeferredTick(this, _tickables[i], i);
+        Timer.Schedule = _schedule[1];
+        Timer.SweepClock = () => _lastSweepCpu0;
+        Pwm.Schedule  = _schedule[2];
+        Pio0.Schedule = _schedule[3];
+        Pio1.Schedule = _schedule[4];
+        Rtc.Schedule  = _schedule[5];
+        Usb.Schedule  = _schedule[8];
+        // Bus accesses (CPU or DMA) bring a deferred peripheral up to date first and make it plan again after.
+        apb.RegisterSchedule(0x40054000, _schedule[1]);
+        apb.RegisterSchedule(0x40050000, _schedule[2]);
+        ahb.RegisterSchedule(0x50200000, _schedule[3], readsMutate: true);
+        ahb.RegisterSchedule(0x50300000, _schedule[4], readsMutate: true);
+        apb.RegisterSchedule(0x4005C000, _schedule[5]);
+        apb.RegisterSchedule(0x40058000, _schedule[6]);
+        apb.RegisterSchedule(0x4004C000, _schedule[7], readsMutate: true);
+        ahb.RegisterSchedule(0x50100000, _schedule[8]);
+        ahb.RegisterSchedule(0x50000000, _schedule[9]);
+        apb.RegisterSchedule(0x4003C000, _schedule[10], readsMutate: true);
+        apb.RegisterSchedule(0x40040000, _schedule[11], readsMutate: true);
+        _schedule[9].AlwaysAsk = _schedule[10].AlwaysAsk = _schedule[11].AlwaysAsk = true;
+        // SysTick counts from the cores' own cycle counters (nothing is owed); a write only changes when it fires.
+        ppbRouter.OnWrite = () => ScheduleEpoch++;
         Watchdog.OnReset = SystemReset;
 
         // ── DMA DREQ sources ──────────────────────────────────────────────
@@ -822,7 +848,16 @@ public sealed class RP2040Machine : IDisposable
         _activeCoreId = 0;
         var before0 = Cpu.Cycles;
         Cpu.Run(instructions);
-        var delta = Cpu.Cycles - before0;
+        FinishSlice(instructions, Cpu.Cycles - before0);
+    }
+
+    /// <summary>
+    /// The rest of a <see cref="Run"/> slice once core 0 has run its part (<paramref name="core0Delta"/> cycles):
+    /// core 1's turn, if launched, then the peripheral sweep with the longer of the two.
+    /// </summary>
+    public void FinishSlice(int instructions, long core0Delta)
+    {
+        var delta = core0Delta;
 
         // ── Core 1 (if launched) ───────────────────────────────────────
         if (_core1Launched)
@@ -837,9 +872,228 @@ public sealed class RP2040Machine : IDisposable
         }
 
         LastElapsedCycles = delta;
+        Sweep(delta);
+    }
 
-        foreach (var t in _tickables)
-            t.Tick(delta);
+    // ── Peripheral sweeps and deferred ticks (docs/peripheral-deadlines.md) ──
+
+    private readonly PerCorePpbRouter _ppbRouter;
+    private readonly DeferredTick[] _schedule;
+    private bool _deferTicks;
+    private long _swept;
+    private long _lastSweepCpu0;
+    private long _sweepDelta;
+    private int _sweepCursor = int.MaxValue;
+
+    /// <summary>Cycles of every peripheral sweep so far, counted or still owed: the peripherals' time base.</summary>
+    public long SweptCycles => _swept;
+
+    /// <summary>Bumped whenever a deferred peripheral's next event may have moved (an access, a tick, a SysTick write).</summary>
+    internal long ScheduleEpoch;
+
+    /// <summary>
+    /// Put each time-aware peripheral's tick off until its next event or until something accesses it, instead of
+    /// ticking all of them after every slice. Exactly the same results (the peripherals are synchronized before every
+    /// register access and host call); off by default, which ticks every peripheral every sweep (the reference).
+    /// Turning it off brings every peripheral up to date first.
+    /// </summary>
+    public bool DeferPeripheralTicks
+    {
+        get => _deferTicks;
+        set
+        {
+            if (value == _deferTicks) return;
+            if (!value) SyncPeripherals();
+            _deferTicks = value;
+            foreach (var e in _schedule) e.Reset(e.Deferrable == null ? _swept : e.Applied);
+        }
+    }
+
+    /// <summary>The swept total peripheral <paramref name="index"/> should stand at: during a sweep, the ones whose
+    /// turn has not come yet still stand where the previous sweep left them.</summary>
+    internal long SweptFor(int index) => index >= _sweepCursor ? _swept - _sweepDelta : _swept;
+
+    /// <summary>Bring every deferred peripheral up to date (before a host reads or changes them from outside).</summary>
+    public void SyncPeripherals()
+    {
+        foreach (var e in _schedule) e.Sync();
+        ScheduleEpoch++;
+    }
+
+    /// <summary>Tick the time-aware peripherals for a slice of <paramref name="delta"/> cycles.</summary>
+    private void Sweep(long delta)
+    {
+        _lastSweepCpu0 = Cpu.Cycles;
+        _swept += delta;
+        _sweepDelta = delta;
+        try
+        {
+            var schedule = _schedule;
+            for (var i = 0; i < schedule.Length; i++)
+            {
+                var e = schedule[i];
+                // From here on this peripheral stands at the new total; the ones after it not yet.
+                _sweepCursor = i + 1;
+                if (!_deferTicks || e.Deferrable == null) { e.Applied = _swept; e.Target.Tick(delta); }
+                else e.OnSweep(_swept);
+            }
+        }
+        finally { _sweepCursor = int.MaxValue; }
+    }
+
+    /// <summary>
+    /// Swept cycles from now until the first sweep at which some peripheral (or a SysTick) has something to do:
+    /// 0 when that is the next sweep, <see cref="long.MaxValue"/> when nothing is ever due. Meaningful only with
+    /// <see cref="DeferPeripheralTicks"/> on.
+    /// </summary>
+    public long SweptCyclesUntilEvent()
+    {
+        var at = long.MaxValue;
+        foreach (var e in _schedule)
+            if (e.Deferrable != null) at = Math.Min(at, e.EventAt);
+        var until = at == long.MaxValue ? long.MaxValue : Math.Max(0, at - _swept);
+        return Math.Min(until, _ppbRouter.CyclesUntilEvent(_core1Launched));
+    }
+
+    /// <summary>
+    /// True when a <see cref="CortexM0Plus.Run"/> of <paramref name="cpu"/> would only charge its slots as sleep:
+    /// asleep, not locked up, no event registered and nothing pending that an interrupt check would take or wake on.
+    /// </summary>
+    internal static bool QuietAsleep(CortexM0Plus cpu)
+    {
+        ref readonly var r = ref cpu.Registers;
+        return r.Waiting && !r.EventRegistered && !cpu.IsLockedUp && !WouldAct(cpu);
+    }
+
+    private static bool WouldAct(CortexM0Plus cpu)
+    {
+        ref readonly var r = ref cpu.Registers;
+        return (r.PendingInterrupts & r.EnabledInterrupts) != 0 || r.PendingNMI || r.PendingSVCall
+               || r.PendingPendSV || r.PendingSystick;
+    }
+
+    /// <summary>
+    /// Whether whole sleeping slices can be skipped (<see cref="SkipSleepingSlices"/>): both cores quietly asleep
+    /// (core 1 counts only once launched), deferred ticks on, and PIO's wake heartbeat would change nothing.
+    /// </summary>
+    public bool CanSkipSleepingSlices()
+    {
+        if (!_deferTicks || !QuietAsleep(Cpu)) return false;
+        if (_core1Launched && !QuietAsleep(Cpu1)) return false;
+        return Pio0.HeartbeatInert(Cpu, Cpu1) && Pio1.HeartbeatInert(Cpu, Cpu1);
+    }
+
+    /// <summary>
+    /// <paramref name="slices"/> sleeping slices of <paramref name="instructions"/> slots at once, with the result
+    /// of running them one by one with <see cref="Run"/>: each core is charged the slots as sleep, the sweeps add
+    /// their cycles up, and PIO's heartbeat runs as after the last of them. The caller makes sure none of the sweeps
+    /// reaches an event (<see cref="SweptCyclesUntilEvent"/>) and that <see cref="CanSkipSleepingSlices"/> holds.
+    /// </summary>
+    public void SkipSleepingSlices(long slices, int instructions)
+    {
+        var cycles = slices * instructions;
+        Cpu.Cycles += cycles;
+        Cpu.Registers.InterruptsUpdated = false;
+        if (_core1Launched)
+        {
+            Cpu1.Cycles += cycles;
+            Cpu1.Registers.InterruptsUpdated = false;
+        }
+        LastElapsedCycles = instructions;
+        _lastSweepCpu0 = Cpu.Cycles;
+        _swept += cycles;
+        foreach (var e in _schedule)
+            e.Deferrable?.SkipTick();
+    }
+
+    /// <summary>Whether core 1 lets core 0 run bounded: not launched, or quietly asleep.</summary>
+    public bool Core1Inert => !_core1Launched || QuietAsleep(Cpu1);
+
+    /// <summary>
+    /// Called at each slice end of a bounded run that would otherwise be booked, with the sweep's result already
+    /// standing (nothing is due in it): a host that looks at something after every slice (pads that follow a PWM
+    /// counter) does it here; true ends the run with that slice.
+    /// </summary>
+    public Func<bool>? BoundaryCheck;
+
+    /// <summary>Set by a host to end a bounded run (<see cref="RunAwakeBounded"/>) with the slice in flight.</summary>
+    public bool EndBoundedRun;
+
+    private readonly ArmGate _gate = new();
+
+    /// <summary>
+    /// Run core 0 for up to <paramref name="maxSlices"/> slices of <paramref name="instructions"/> each, with the
+    /// result of calling <see cref="Run"/> that many times, in one interpreter loop. Core 1 must be
+    /// <see cref="Core1Inert"/>, core 0 awake and deferred ticks on. A slice whose end changes nothing (core 1 still
+    /// inert, no peripheral due, no <see cref="EndBoundedRun"/>) is booked without running: core 1 is charged its
+    /// sleep and the sweep only adds its cycles up. The run returns at the first slice that needs more, with core 0's
+    /// part of it done; the caller finishes it with <see cref="FinishSlice"/>(instructions, <see cref="BoundedSliceDelta"/>).
+    /// </summary>
+    /// <returns>The number of slices booked before the last one.</returns>
+    public int RunAwakeBounded(int instructions, int maxSlices)
+    {
+        var g = _gate;
+        g.Machine = this;
+        g.N = instructions;
+        g.MaxSlices = maxSlices;
+        g.Booked = 0;
+        g.SliceStart = Cpu.Cycles;
+        g.Plan();
+        EndBoundedRun = false;
+        _activeCoreId = 0;
+        Cpu.RunGated(g, instructions);
+        return g.Booked;
+    }
+
+    /// <summary>Core-0 cycles of the slice a bounded run ended in, for <see cref="FinishSlice"/>.</summary>
+    public long BoundedSliceDelta => Cpu.Cycles - _gate.SliceStart;
+
+    /// <summary>Core-0 cycle count at the start of the slice a bounded run ended in.</summary>
+    public long BoundedSliceStart => _gate.SliceStart;
+
+    /// <summary>The books of a bounded run: where its slices end and what their ends would have done.</summary>
+    private sealed class ArmGate : ISliceGate
+    {
+        public RP2040Machine Machine = null!;
+        public int N, MaxSlices, Booked;
+        public long SliceStart;
+        private long _eventAt, _epoch;
+
+        public void Plan()
+        {
+            var m = Machine;
+            _epoch = m.ScheduleEpoch;
+            var until = m.SweptCyclesUntilEvent();
+            _eventAt = until >= long.MaxValue - m._swept ? long.MaxValue : m._swept + until;
+        }
+
+        /// <summary>Core 0 finished a slice; true books its end and starts the next one.</summary>
+        public bool NextSlice(CortexM0Plus cpu)
+        {
+            var m = Machine;
+            // A core that went to sleep (or locked up) on the slice's last slot: the next slice is a sleeping one.
+            if (Booked + 1 >= MaxSlices || m.EndBoundedRun || cpu.Registers.Waiting || cpu.IsLockedUp) return false;
+            var launched = m._core1Launched;
+            if (launched && !QuietAsleep(m.Cpu1)) return false;
+            var d0 = cpu.Cycles - SliceStart;
+            var delta = launched ? Math.Max(d0, N) : d0;
+            if (m.ScheduleEpoch != _epoch) Plan();
+            if (m._swept + delta >= _eventAt) return false;
+            // The host's own look at the slice end (pads it polls): the sweep would change nothing it sees.
+            if (m.BoundaryCheck is { } check && check()) return false;
+            // Book core 1's turn (a quiet sleeper's Run only charges the slots) and the sweep (nothing due).
+            if (launched)
+            {
+                m.Cpu1.Cycles += N;
+                m.Cpu1.Registers.InterruptsUpdated = false;
+            }
+            m._swept += delta;
+            m._lastSweepCpu0 = cpu.Cycles;
+            m.LastElapsedCycles = delta;
+            Booked++;
+            SliceStart = cpu.Cycles;
+            return true;
+        }
     }
 
     /// <summary>Running estimate of cycles per instruction, used by <see cref="RunCycles"/> to size slices.</summary>
@@ -879,8 +1133,7 @@ public sealed class RP2040Machine : IDisposable
                 // Both cores are stopped (locked up): time still passes, so burn the rest of the budget
                 // instead of spinning on a clock that never moves.
                 Cpu.Cycles += remaining;
-                foreach (var t in _tickables)
-                    t.Tick(remaining);
+                Sweep(remaining);
                 spent = remaining;
             }
             else
@@ -926,8 +1179,7 @@ public sealed class RP2040Machine : IDisposable
             delta = Math.Max(delta, (int)(Cpu1.Cycles - before1));
         }
         LastElapsedCycles = delta;
-        foreach (var t in _tickables)
-            t.Tick(delta);
+        Sweep(delta);
     }
 
     /// <summary>Number of system resets (watchdog reboots) performed.</summary>
@@ -1112,10 +1364,17 @@ public sealed class RP2040Machine : IDisposable
         public uint   ReadWord(uint address)              => Active.ReadWord(address);
         public ushort ReadHalfWord(uint address)          => Active.ReadHalfWord(address);
         public byte   ReadByte(uint address)              => Active.ReadByte(address);
-        public void   WriteWord(uint address, uint value) => Active.WriteWord(address, value);
-        public void   WriteHalfWord(uint address, ushort value) =>
-            Active.WriteHalfWord(address, value);
-        public void   WriteByte(uint address, byte value) => Active.WriteByte(address, value);
+        public void   WriteWord(uint address, uint value) { Active.WriteWord(address, value); OnWrite?.Invoke(); }
+        public void   WriteHalfWord(uint address, ushort value) { Active.WriteHalfWord(address, value); OnWrite?.Invoke(); }
+        public void   WriteByte(uint address, byte value) { Active.WriteByte(address, value); OnWrite?.Invoke(); }
+
+        /// <summary>Raised after every PPB write (a SysTick write may move its next exception).</summary>
+        public Action? OnWrite;
+
+        /// <summary>A lower bound on the swept cycles until either SysTick raises its exception: each core runs at
+        /// most a sweep's cycles per sweep. Core 1's counts only while it runs.</summary>
+        public long CyclesUntilEvent(bool core1Runs) =>
+            Math.Min(_ppb0.CyclesUntilSysTick(), core1Runs ? _ppb1.CyclesUntilSysTick() : long.MaxValue);
 
         /// <summary>Tick both PPBs (SysTick, etc.) by the same delta cycles.</summary>
         public void Tick(long deltaCycles)

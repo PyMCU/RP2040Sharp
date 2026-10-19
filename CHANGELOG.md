@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New: native C ABI (`st_rp2040_*`)
+
+`src/RP2040Sharp.Native` exposes a Pico or Pico W (`ST_RP2040_CYW43`) to C/C++ hosts through
+`include/silicontwin_rp2040.h`, mirroring the RP2350 ABI: handles with fault isolation, UF2 loading
+with family check, `run` / `run_until_edge`, pads with exact pad-change cycles for CPU writes,
+UART0/1 and USB CDC serial channels. It is an exports library for a host's single NativeAOT
+library (`<UnmanagedEntryPointsAssembly Include="RP2040Sharp.Native" />`). See
+[docs/native-abi.md](docs/native-abi.md). `IoBank0Peripheral.PwmMuxedPins` is new and public.
+
+### New: co-simulation speed-ups with the result of plain slices
+
+Ported from RP2350Sharp, each proven by differential tests to give exactly what guard-sized slices
+give (pad events and their cycles, CDC transcript with arrival cycles, both cores, retired counts,
+SRAM, peripheral registers, call returns). See [docs/peripheral-deadlines.md](docs/peripheral-deadlines.md).
+
+- **Deferred peripheral ticks** (`RP2040Machine.DeferPeripheralTicks`, off by default in the
+  library, on in the native chip): TIMER, PWM, both PIO blocks, RTC, watchdog, ADC, USB, DMA and
+  SPI are ticked only at their next event (`IDeferrableTickable.CyclesUntilEvent`), and brought
+  up to date before every bus access (APB/AHB bridges) and host call (`DeferredTick`).
+- **Sleeping stretches**: while both cores sleep quietly the native `run_until_edge` books the
+  sleeping slices before the next event at once (`RP2040Machine.SkipSleepingSlices`).
+- **Bounded awake runs**: with core 0 awake and core 1 unlaunched or asleep, its slices run in one
+  interpreter loop (`CortexM0Plus.RunGated`, a type-parameter limit; `Run` is unchanged) that
+  stops only at a slice whose end matters.
+- `PwmPeripheral` advances its counters in closed form (the same steps, without a loop per step).
+- Fixed: `RoscPeripheral.RANDOMBIT` was a process-wide counter, so pico_rand's seed (and with it
+  the Pico W WLAN bring-up) depended on every other machine in the process.
+
 ### New: the SiliconTwin.Abstractions contract
 
 `RP2040Mcu` implements [`SiliconTwin.Abstractions`](https://github.com/silicon-twin/abstractions)
