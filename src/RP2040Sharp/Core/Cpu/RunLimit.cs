@@ -20,6 +20,10 @@ internal interface IRunLimit
 {
     /// <summary>Called when the budget is spent; true continues with <paramref name="instructions"/> refilled.</summary>
     static abstract bool Refill(CortexM0Plus cpu, ref int instructions);
+
+    /// <summary>Whether the run stops early at <see cref="CortexM0Plus.CutCycle"/> / <see cref="CortexM0Plus.CutRequest"/>
+    /// (a constant per limit, so the check folds away where it is false).</summary>
+    static abstract bool HasCut { get; }
 }
 
 /// <summary>The plain run: the budget is the whole run.</summary>
@@ -27,6 +31,8 @@ internal struct NoRunLimit : IRunLimit
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool Refill(CortexM0Plus cpu, ref int instructions) => false;
+
+    public static bool HasCut => false;
 }
 
 /// <summary>A run of slices of <see cref="CortexM0Plus.GateSlice"/> instructions; the gate decides at each slice end.</summary>
@@ -39,4 +45,24 @@ internal struct SliceRunLimit : IRunLimit
         instructions = cpu.GateSlice - 1;   // this slot is the first of the new slice
         return true;
     }
+
+    public static bool HasCut => false;
+}
+
+/// <summary>A plain run that also stops at the cut cycle or on a cut request (<see cref="CortexM0Plus.RunCut"/>).</summary>
+internal struct CutRunLimit : IRunLimit
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool Refill(CortexM0Plus cpu, ref int instructions) => false;
+
+    public static bool HasCut => true;
+}
+
+/// <summary>A bounded run (<see cref="SliceRunLimit"/>) that also stops at the cut (<see cref="CortexM0Plus.RunGatedCut"/>).</summary>
+internal struct SliceCutRunLimit : IRunLimit
+{
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static bool Refill(CortexM0Plus cpu, ref int instructions) => SliceRunLimit.Refill(cpu, ref instructions);
+
+    public static bool HasCut => true;
 }
