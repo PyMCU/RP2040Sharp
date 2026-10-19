@@ -28,7 +28,9 @@ public sealed class RoscPeripheral : IMemoryMappedDevice
     private uint _div    = 0xAA0;   // default divisor
     private uint _phase;
 
-    private static uint _randomBit;  // simple pseudo-random bit
+    // Per instance: a static counter made each machine's RANDOMBIT stream depend on every other machine in the
+    // process (pico_rand seeds from it), so two runs of the same firmware in one process diverged.
+    private uint _randomBit;  // simple pseudo-random bit
 
     public uint Size => 0x1000;
 
