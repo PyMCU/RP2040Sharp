@@ -128,8 +128,19 @@ public sealed class UsbCdcHost
         _inEndpoint = -1;
         _outEndpoint = -1;
         _armedOutEp = -1;
-        _usb.SendSetupPacket(SetDeviceAddressPacket(1));
+        // A real host does not talk to the device the moment the reset ends: it waits the reset recovery
+        // time first (USB 2.0 §7.1.7.5 and §9.2.6.2, TRSTRCY >= 10 ms). This handler runs inside the firmware's
+        // write that clears SIE_STATUS.BUS_RESET; newer TinyUSB (CircuitPython 11) drops a SETUP that arrives
+        // before it has processed the reset, and the device never enumerates.
+        _usb.SendSetupPacketAfter(SetDeviceAddressPacket(1), ResetRecoveryCycles);
     }
+
+    /// <summary>Reset recovery (TRSTRCY, USB 2.0 §7.1.7.5 and §9.2.6.2): 10 ms between the end of a bus reset and the first SETUP.</summary>
+    public const long ResetRecoveryCycles = 10 * UsbPeripheral.CyclesPerMs;
+
+    /// <summary>SetAddress recovery (USB 2.0 §9.2.6.3): the device may take 2 ms after the status stage of
+    /// SET_ADDRESS before it must answer at the new address, so the host sends nothing earlier.</summary>
+    public const long SetAddressRecoveryCycles = 2 * UsbPeripheral.CyclesPerMs;
 
     private void HandleEndpointWrite(int endpoint, byte[] buffer)
     {
@@ -137,7 +148,10 @@ public sealed class UsbCdcHost
         {
             if (_descriptorsSize == null)
             {
-                _usb.SendSetupPacket(GetDescriptorPacket(DescriptorType.Configuration, CONFIGURATION_DESCRIPTOR_SIZE));
+                // Status stage of SET_ADDRESS: wait the SetAddress recovery interval. The other requests follow
+                // each other as soon as the previous one completes, which the spec allows: it sets no minimum gap.
+                _usb.SendSetupPacketAfter(GetDescriptorPacket(DescriptorType.Configuration, CONFIGURATION_DESCRIPTOR_SIZE),
+                                          SetAddressRecoveryCycles);
             }
             else if (!_initialized)
             {

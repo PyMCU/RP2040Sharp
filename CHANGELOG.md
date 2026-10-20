@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: the USB host waits the reset recovery time before SET_ADDRESS
+
+`UsbCdcHost` wrote SET_ADDRESS into DPRAM from inside the firmware's write that clears `SIE_STATUS.BUS_RESET`
+(SETUP_REC followed one tick later). Newer TinyUSB (CircuitPython 11 on the RP2350) drops a SETUP that arrives before
+it has processed the reset. The host now keeps a real host's timing on simulated time: SET_ADDRESS 10 ms after the
+reset ends (TRSTRCY, USB 2.0 §7.1.7.5 and §9.2.6.2), the next request 2 ms after the SET_ADDRESS status stage
+(SetAddress recovery, §9.2.6.3). `UsbPeripheral.SendSetupPacketAfter` schedules the SETUP for `Tick` (it bounds
+`CyclesUntilEvent`; a controller reset cancels it). The two waits add up to 12 ms of simulated time to enumeration.
+
 ### Fixed: an LDMIA abandoned by a bus fault keeps its original base
 
 A load or store that cannot complete already took a precise HardFault (stacked PC = the instruction, no

@@ -172,6 +172,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
         _pendingWrites.Clear();
         _pendingReads.Clear();
         _setupPending = false;
+        _scheduledSetup = null;
     }
 
     // ── IMemoryMappedDevice ───────────────────────────────────────────────
@@ -446,6 +447,28 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
 
     private bool _setupPending;
 
+    /// <summary>Clk_sys cycles in one millisecond of bus time: the SOF period this model ticks with
+    /// (1 ms at 125 MHz). Host-side delays are counted in it.</summary>
+    public const long CyclesPerMs = SOF_PERIOD_CYCLES;
+
+    private byte[]? _scheduledSetup;
+    private long _scheduledSetupAt;
+
+    /// <summary>
+    /// Inject <paramref name="setup"/> as <see cref="SendSetupPacket"/> does, but <paramref name="delayCycles"/> of
+    /// simulated time from now: <see cref="Tick"/> delivers it, never the caller. A host uses it for the waits the
+    /// USB spec puts between transactions (reset recovery, SetAddress recovery), so the device's firmware sees the
+    /// SETUP after it has returned from the register write or interrupt that led to it. EP0 carries one control
+    /// transfer at a time, so a SETUP still pending is replaced. Cancelled by <see cref="Reset"/>.
+    /// </summary>
+    public void SendSetupPacketAfter(ReadOnlySpan<byte> setup, long delayCycles)
+    {
+        if (setup.Length != 8) throw new ArgumentException("SETUP packet must be 8 bytes", nameof(setup));
+        HostAccess();
+        _scheduledSetup = setup.ToArray();
+        _scheduledSetupAt = _totalCycles + Math.Max(0, delayCycles);
+    }
+
     /// <summary>Provide data for an OUT endpoint that the firmware previously armed.</summary>
     public void EndpointReadDone(int endpoint, ReadOnlySpan<byte> data)
     {
@@ -636,6 +659,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
         var best = long.MaxValue;
         if (_controllerEnabled && !_hostMode)
             best = Math.Max(0, _lastSofCycles + SOF_PERIOD_CYCLES - _totalCycles);
+        if (_scheduledSetup != null) best = Math.Min(best, Math.Max(0, _scheduledSetupAt - _totalCycles));
         foreach (var q in _pendingWrites.Values)
             if (q.Count > 0) best = Math.Min(best, Math.Max(0, q.Peek().deliverAt - _totalCycles));
         foreach (var q in _pendingReads.Values)
@@ -672,6 +696,12 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
                 _sofFrameCount = (_sofFrameCount + 1) & 0x7FF;
                 SignalSof(_sofFrameCount);
             }
+        }
+
+        if (_scheduledSetup is { } setup && _totalCycles >= _scheduledSetupAt)
+        {
+            _scheduledSetup = null;
+            SendSetupPacket(setup);   // SETUP_REC rises on the next tick, as for any SETUP
         }
 
         if (_pendingWrites.Count == 0 && _pendingReads.Count == 0) return;

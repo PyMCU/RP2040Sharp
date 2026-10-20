@@ -206,4 +206,34 @@ public abstract class UsbTests
             (f.Usb.ReadWord(INTR) & (1u << 16)).Should().Be(1u << 16, "SETUP_REQ in INTR");
         }
     }
+
+    public class HostTiming
+    {
+        [Fact]
+        public void Host_sends_SET_ADDRESS_after_the_reset_recovery_time_not_inside_the_reset_ack()
+        {
+            using var f = new Fixture();
+            _ = new UsbCdcHost(f.Usb);
+            f.Usb.WriteWord(MAIN_CTRL, 0x1);                       // CONTROLLER_EN: the host resets the bus
+            f.Usb.WriteWord(SIE_STATUS + 0x3000, 1u << 19);        // the firmware acknowledges BUS_RESET (CLR alias)
+            f.Usb.Tick(1);
+            (f.Usb.ReadWord(SIE_STATUS) & (1u << 17)).Should().Be(0u, "no SETUP before the reset recovery time");
+
+            f.Usb.Tick(UsbCdcHost.ResetRecoveryCycles);            // TRSTRCY elapses: the SETUP is written...
+            f.Usb.Tick(1);                                         // ...and SETUP_REC rises on the next tick
+            (f.Usb.ReadWord(SIE_STATUS) & (1u << 17)).Should().Be(1u << 17);
+            f.Usb.ReadWord(DPRAM_BASE).Should().Be(0x0001_0500u, "bmRequestType 0, SET_ADDRESS (5), wValue 1");
+        }
+
+        [Fact]
+        public void A_scheduled_SETUP_is_cancelled_by_a_controller_reset()
+        {
+            using var f = new Fixture();
+            f.Usb.SendSetupPacketAfter(new byte[8], 100);
+            f.Usb.Reset();
+            f.Usb.Tick(1000);
+            f.Usb.Tick(1);
+            (f.Usb.ReadWord(SIE_STATUS) & (1u << 17)).Should().Be(0u);
+        }
+    }
 }
