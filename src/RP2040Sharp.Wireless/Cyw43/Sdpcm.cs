@@ -77,6 +77,18 @@ public sealed class Sdpcm
     /// <summary>Diagnostics/notification: the STA joined a network (matched SSID) or failed (null).</summary>
     public Action<string?>? OnStaJoin;
 
+    /// <summary>What the station side of the chip just did, for a host that reports link status: the event and
+    /// the SSID it concerns (null for a scan, or for a join request too short to carry one). Raised after the
+    /// events the driver will read are queued, so the guest sees the outcome a little later.</summary>
+    public Action<StaEvent, string?>? OnStaEvent;
+
+    /// <summary>Station events (see <see cref="OnStaEvent"/>).</summary>
+    public enum StaEvent { Scan, Joined, BadAuth, NoNetwork, Left }
+
+    /// <summary>Ethernet traffic through the WLAN function: frames and bytes the host transmitted (to the air) and
+    /// frames and bytes queued for the host (from the air). Monotonic.</summary>
+    public long TxFrames, TxBytes, RxFrames, RxBytes;
+
     /// <summary>A Wi-Fi network the emulated chip "sees" on the air. Populated by the virtual radio
     /// (Fase 5/6) so <c>scan()</c> returns real BSSes; an empty list yields an empty scan.</summary>
     /// <summary>
@@ -210,6 +222,7 @@ public sealed class Sdpcm
             foreach (var ap in VisibleAps)
                 EnqueueAsyncEvent(BuildEscanResultEvent(ap, STATUS_PARTIAL));
             EnqueueAsyncEvent(BuildEscanResultEvent(null, STATUS_SUCCESS));
+            OnStaEvent?.Invoke(StaEvent.Scan, null);
         }
         // STA join: connect() ends with WLC_SET_SSID (or the "join" iovar) carrying le32(ssid_len)+ssid.
         else if (cmd == WLC_SET_SSID)
@@ -220,10 +233,12 @@ public sealed class Sdpcm
         // WLAN.disconnect() leaves status() still reporting GOT_IP and isconnected() still true.
         else if (cmd == WLC_DISASSOC)
         {
+            var left = _joinedAp;
             _joinedAp = null;
             EnqueueAsyncEvent(BuildBcmEvent(EV_LINK, STATUS_SUCCESS, 0, 0, 0));   // flags&1 = 0 → link down
             EnqueueAsyncEvent(BuildBcmEvent(EV_DISASSOC, STATUS_SUCCESS, 0, 0, 0));
             OnStaJoin?.Invoke(null);
+            if (left is not null) OnStaEvent?.Invoke(StaEvent.Left, left.Ssid);
         }
         // SoftAP SSID: cyw43_ll_wifi_ap_init sends iovar "bsscfg:ssid" = u32(ap iface) u32(ssid_len) ssid[32].
         // Capture it so the virtual air can advertise this guest's own AP to other stations' scans.
@@ -294,6 +309,7 @@ public sealed class Sdpcm
             EnqueueAsyncEvent(BuildBcmEvent(EV_AUTH, STATUS_SUCCESS, 0, 0, 0));
             EnqueueAsyncEvent(BuildBcmEvent(EV_PSK_SUP, SUP_KEYXCHANGE_WAIT_M1, 0, 0, 0));
             OnStaJoin?.Invoke(null);
+            OnStaEvent?.Invoke(StaEvent.BadAuth, ssid);
             return;
         }
 
@@ -308,6 +324,7 @@ public sealed class Sdpcm
         EnqueueAsyncEvent(BuildBcmEvent(EV_LINK, STATUS_SUCCESS, 1, 0, 0)); // flags&1 = link up
         _joinedAp = ap;
         OnStaJoin?.Invoke(ssid);
+        OnStaEvent?.Invoke(StaEvent.Joined, ssid);
     }
 
     private void EmitJoinFail(string? ssid = null)
@@ -315,6 +332,7 @@ public sealed class Sdpcm
         _joinedAp = null;
         EnqueueAsyncEvent(BuildBcmEvent(EV_SET_SSID, STATUS_NO_NETWORKS, 0, 0, 0));
         OnStaJoin?.Invoke(null);
+        OnStaEvent?.Invoke(StaEvent.NoNetwork, ssid);
     }
 
     private static void Put16Be(byte[] b, int o, int v) { b[o] = (byte)(v >> 8); b[o + 1] = (byte)v; }
@@ -464,6 +482,8 @@ public sealed class Sdpcm
         var dataOff = pkt[bdcOff + 3] << 2;
         var payloadOff = bdcOff + BdcHeaderLen + dataOff;
         if (payloadOff >= size) return;
+        TxFrames++;
+        TxBytes += size - payloadOff;
         OnHostEthernet?.Invoke(itf, pkt[payloadOff..size]);
     }
 
@@ -512,6 +532,8 @@ public sealed class Sdpcm
     /// The virtual network (DHCP/ARP/peer traffic) uses this to deliver frames to the STA/AP netif.</summary>
     public void EnqueueEthernet(int itf, byte[] ethFrame)
     {
+        RxFrames++;
+        RxBytes += ethFrame.Length;
         var size = DataBdcOffset + BdcHeaderLen + ethFrame.Length;   // header_length is 14, see EnqueueAsyncEvent
         var buf = new byte[Align4(size)];
         Put16(buf, 0, size);

@@ -104,9 +104,16 @@ public sealed class VirtualNet
     private static string MacKey(byte[] b, int o) => $"{b[o]:x2}{b[o + 1]:x2}{b[o + 2]:x2}{b[o + 3]:x2}{b[o + 4]:x2}{b[o + 5]:x2}";
     private static bool IsBroadcastOrMulticast(byte[] dst) => (dst[0] & 1) != 0; // multicast/broadcast bit
 
+    /// <summary>
+    /// Serve the guest's station interface (itf 0) only. A guest that also runs its own SoftAP (itf 1, by default
+    /// 192.168.4.1 as well) then has that network to itself instead of meeting this gateway's ARP replies for its own
+    /// address. Off by default (tests join several stations, AP and STA, through one gateway).
+    /// </summary>
+    public bool StationOnly { get; set; }
+
     private void HandleGuestFrame(Sdpcm from, int itf, byte[] frame)
     {
-        if (frame.Length < 14) return;
+        if (frame.Length < 14 || (StationOnly && itf != 0)) return;
         var srcKey = MacKey(frame, 6);
         if (_macToDevice.Count < MaxStations || _macToDevice.ContainsKey(srcKey))
             _macToDevice[srcKey] = from;         // learn source MAC → station
