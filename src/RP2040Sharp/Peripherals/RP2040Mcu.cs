@@ -74,10 +74,11 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         ArgumentNullException.ThrowIfNull(machine);
         _machine = machine;
         _ownsMachine = ownsMachine;
+        // The co-simulation loop of the C ABI chip; the pin bank reports through its recorder, hooked while it has a
+        // listener.
+        _cosim = new RP2040CoSim(machine, attachPads: false);
         _bank = new PinBank(this);
         _banks = [_bank];
-        // The co-simulation loop of the C ABI chip, reporting through the pin bank's recorder.
-        _cosim = new RP2040CoSim(machine, _bank.Recorder);
         _uarts = [new UartPort(0, machine.Uart0), new UartPort(1, machine.Uart1)];
         _spis = [new SpiPort(0, machine.Spi0), new SpiPort(1, machine.Spi1)];
         _i2cs = [new I2cPort(0, machine.I2c0), new I2cPort(1, machine.I2c1)];
@@ -349,8 +350,6 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         private readonly Action<uint> _sioHook;
         private readonly PadEventRecorder _recorder;
 
-        /// <summary>The recorder the pin bank reports from (immediate mode), shared with the co-simulation loop.</summary>
-        public PadEventRecorder Recorder => _recorder;
 
         private PinChangeHandler? _changed;
         private ulong _watchMask = AllPins;
@@ -363,11 +362,9 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
             _sioHook = OnSioChanged;
             // Every pad change with its own cycle (PadEventRecorder), handed over while it happens so a handler can
             // answer at once; a SIO output register that moves under a pin nobody drives is no change.
-            _recorder = new PadEventRecorder(_m)
-            {
-                Mode = PadReportMode.Immediate,
-                Immediate = OnPadsChanged,
-            };
+            _recorder = owner._cosim.Pads;
+            _recorder.Mode = PadReportMode.Immediate;
+            _recorder.Immediate = OnPadsChanged;
         }
 
         public string Name => "GPIO";

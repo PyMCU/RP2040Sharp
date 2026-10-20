@@ -100,7 +100,7 @@ internal sealed unsafe class Chip
         // writes, DMA into SIO, the pin-level UART / SPI / I2C engines) is recorded while it happens, so it is
         // stamped with its own cycle (an engine's: the cycle of its edge). PWM-muxed pads follow the counter instead
         // and are polled. The host is told after each call, starting from every pad undriven and low.
-        CoSim = new RP2040CoSim(Machine);
+        CoSim = new RP2040CoSim(Machine, attachPads: false);
         Pads.Attach(baseline: false);
         Machine.ExactPwmPadEdges = true;
         if (cyw43)
@@ -196,9 +196,12 @@ internal sealed unsafe class Chip
     /// </summary>
     internal bool EventGuard = true;
 
-    /// <summary>Test probes (RP2040CoSim): slices booked by stretches and by bounded runs, run plainly, cut early.</summary>
-    internal long StretchedSlices => CoSim.StretchedSlices;
-    internal long BoundedSlices => CoSim.BoundedSlices;
+    /// <summary>Test probes (RP2040CoSim): sleeping stretches and the cycles they booked, bounded runs and the slots
+    /// they covered, slices run one by one, slices cut early.</summary>
+    internal long SleepStretches => CoSim.SleepStretches;
+    internal long SleepStretchCycles => CoSim.SleepStretchCycles;
+    internal long AwakeRuns => CoSim.AwakeRuns;
+    internal long AwakeRunSlots => CoSim.AwakeRunSlots;
     internal long PlainSlices => CoSim.PlainSlices;
     internal long CutSlices => CoSim.CutSlices;
 

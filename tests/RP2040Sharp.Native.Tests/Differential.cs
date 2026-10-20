@@ -161,7 +161,7 @@ internal static class Differential
 {
     /// <summary>
     /// Run <paramref name="script"/> on an Eager, a Deferred and a Fast chip; Deferred and Fast must reproduce the
-    /// Eager trace line for line. Returns the Fast chip's probe counts (stretched, bounded, plain slices).
+    /// Eager trace line for line. Returns the Fast chip's probe counts (cycles booked by sleeping stretches, slots by bounded runs, plain slices).
     /// </summary>
     public static (long Stretched, long Bounded, long Plain) Check(Action<DiffRun> script, uint flags = 0,
         SliceMode[]? modes = null)
@@ -176,7 +176,7 @@ internal static class Differential
             var trace = run.Trace();
             if (reference is null) reference = trace;
             else DiffRun.AssertSame(reference, trace, $"{mode} against {modes[0]}");
-            if (mode == SliceMode.Fast) probe = (run.Chip.StretchedSlices, run.Chip.BoundedSlices, run.Chip.PlainSlices);
+            if (mode == SliceMode.Fast) probe = (run.Chip.SleepStretchCycles, run.Chip.AwakeRunSlots, run.Chip.PlainSlices);
         }
         return probe;
     }

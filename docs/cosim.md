@@ -10,8 +10,7 @@ silicon; timing is modelled, not cycle-exact.
 ## The run
 
 ```csharp
-var cosim = new RP2040CoSim(machine);                 // using RP2040.CoSim; its PadEventRecorder reports deferred
-cosim.Pads.Attach();
+var cosim = new RP2040CoSim(machine);                 // using RP2040.CoSim; its PadEventRecorder, attached, reports deferred
 var r = cosim.RunUntilEdge(new RunRequest
 {
     MaxSlots = 1_000_000,          // instruction slots per core
@@ -120,10 +119,14 @@ iOS no-JIT constraints.
 
 ## Differences from RP2350Sharp to reconcile
 
-- `RunRequest`, `RunResult`, `StopReason` and `CoSimFlags` have RP2350's shapes (`MaxSlots` an int, `TargetCycle` 0 for
-  none, `Watch` a ulong, `CoSimFlags.All`). The constructors differ (`RP2040CoSim(machine, recorder?)` against
-  `RP2350CoSim(machine, pinCount, attachPads, syncToNow)`), and so do the probes (`StretchedSlices`, `BoundedSlices`,
-  `PlainSlices`, `CutSlices` against `SleepStretches`, `AwakeRuns`, ...). `Run(n)` now counts its `Quantum` (512)
+- `RunRequest`, `RunResult`, `StopReason` and `CoSimFlags` have RP2350's member sets (`MaxSlots` an int, `TargetCycle`
+  0 for none, `Watch` a ulong, `CoSimFlags.All`). The constructor is RP2350's shape, `RP2040CoSim(machine, pinCount = 30,
+  attachPads = true)` (the co-simulation owns its recorder; RP2040Mcu's pin bank uses it), without RP2350's
+  `syncToNow`: an RP2040 access already meets a deferred peripheral at the sweeps so far. The diagnostics carry
+  RP2350's names: `AwakeRuns` / `AwakeRunSlots` (bounded runs, slots covered), `SleepStretches` / `SleepStretchCycles`,
+  `CutSlices`, `PlainSlices` (added to RP2350 too); `ClockChanged` exists and is never raised. RP2350-only:
+  `EdgeBoundSlices` and the per-path `Probe` (an RP2040 slice cut at an engine edge counts in `CutSlices`). RP2040-only:
+  `Quantum`, `RunFlags`, `BeforeSlice`, `AllPads`. `Run(n)` now counts its `Quantum` (512)
   slices across calls, as RP2350 counts its `RunChunk` (1024) chunks: the 512 stays (it is the slice every sweep
   follows here, where RP2350 coalesces its ticks to a cycle quantum), the absolute boundaries make it call-size
   independent all the same.

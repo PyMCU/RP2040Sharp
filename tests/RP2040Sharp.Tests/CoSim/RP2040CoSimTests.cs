@@ -64,7 +64,7 @@ public class RP2040CoSimTests
                 var r = cosim.RunUntilEdge(To(start + budget, fast));
                 Assert.Equal(start + budget, m.Cpu.Cycles);
                 Assert.Equal(budget, r.Cycles);
-                if (fast && budget > 2 * 16_384) Assert.True(cosim.StretchedSlices > 0);
+                if (fast && budget > 2 * 16_384) Assert.True(cosim.SleepStretches > 0);
             }
         }
     }

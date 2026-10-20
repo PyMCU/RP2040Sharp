@@ -65,7 +65,7 @@ public class SliceDifferentialTests(ITestOutputHelper output)
             while (run.Cycles < 125 * 1500) run.RunUntilEdge(1_000_000, 75);
             var gp15 = run.Host.Pins.Count(p => p.Gpio == 15);
             var gp14 = run.Host.Pins.Count(p => p.Gpio == 14);
-            output.WriteLine($"{f}: GP15 {gp15} events, GP14 {gp14}, stretched {run.Chip.StretchedSlices}, bounded {run.Chip.BoundedSlices}, plain {run.Chip.PlainSlices}");
+            output.WriteLine($"{f}: GP15 {gp15} events, GP14 {gp14}, stretched {run.Chip.SleepStretchCycles} cycles, bounded {run.Chip.AwakeRunSlots} slots, plain {run.Chip.PlainSlices}");
             Assert.True(gp15 > 10, $"{f}: {gp15} GP15 events");
             if (f.StartsWith("pwm")) Assert.True(gp14 > 20, $"{f}: {gp14} GP14 events");
         }

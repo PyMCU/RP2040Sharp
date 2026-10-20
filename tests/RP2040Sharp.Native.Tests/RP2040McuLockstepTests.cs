@@ -297,13 +297,13 @@ public class RP2040McuLockstepTests(ITestOutputHelper output)
             var m = mcu.Machine;
             var cosim = (RP2040.CoSim.RP2040CoSim)typeof(RP2040Mcu)
                 .GetField("_cosim", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(mcu)!;
-            return (m.Cpu.Registers.R7, m.Bus.ReadWord(PwmBase + 0x14 + 8), mcu.Cycles, events, cosim.BoundedSlices);
+            return (m.Cpu.Registers.R7, m.Bus.ReadWord(PwmBase + 0x14 + 8), mcu.Cycles, events, cosim.AwakeRunSlots);
         }
         var eager = Go(false);
         var deferred = Go(true);
         int answered = eager.Events.Count(e => (e.Item2 & from) != 0);
         output.WriteLine($"fromSweep={fromSweep} step {step}: {eager.Events.Count} events ({answered} answered), CTR {eager.Ctr}, " +
-                         $"bounded slices (deferred) {deferred.Bounded}");
+                         $"bounded-run slots (deferred) {deferred.Bounded}");
         Assert.True(answered > 100, "the wire answered");
         Assert.True(eager.Ctr != 0, "the gate opened");
         if (!fromSweep && step > 100 * slice) Assert.True(deferred.Bounded > 0, "bounded runs between the edges");

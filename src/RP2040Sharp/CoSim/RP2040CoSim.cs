@@ -90,8 +90,18 @@ public sealed class RP2040CoSim
     /// for CPU-bound code, low by up to one slice per sleep/wake transition.</summary>
     public readonly ulong[] Retired = new ulong[2];
 
-    /// <summary>Probes: slices booked by stretches and by bounded runs, slices run plainly, slices a cut ended early.</summary>
-    public long StretchedSlices, BoundedSlices, PlainSlices, CutSlices;
+    /// <summary>Diagnostics: bounded runs taken and the instruction slots they covered (RP2350CoSim's names).</summary>
+    public long AwakeRuns, AwakeRunSlots;
+    /// <summary>Diagnostics: sleeping stretches taken and the cycles they covered.</summary>
+    public long SleepStretches, SleepStretchCycles;
+    /// <summary>Diagnostics: slices a cut ended early (an engine edge, a watched pad move, the target).</summary>
+    public long CutSlices;
+    /// <summary>Diagnostics: slices run one by one (the last slice of a bounded run included).</summary>
+    public long PlainSlices;
+
+    /// <summary>Never raised: the RP2040 runs clk_sys at a fixed <see cref="RP2040Machine.CLK_HZ"/> (RP2350CoSim raises
+    /// it after a run that changed clk_sys).</summary>
+    public event Action? ClockChanged { add { } remove { } }
 
     /// <summary>Called before every slice that runs instructions (fault-injection tests). A bounded run degrades to
     /// plain slices while it is set.</summary>
@@ -99,10 +109,20 @@ public sealed class RP2040CoSim
 
     private bool _stopOnEdge;
 
-    public RP2040CoSim(RP2040Machine machine, PadEventRecorder? pads = null)
+    /// <summary>Builds the co-simulation of <paramref name="machine"/>'s pads (RP2350CoSim's shape).</summary>
+    /// <param name="machine">The machine; it is not owned.</param>
+    /// <param name="pinCount">The RP2040's 30 user pads (the only value accepted).</param>
+    /// <param name="attachPads">Hook IO_BANK0 now, from the pads as they are (the recorder's default). A host that hooks
+    /// them only while it has a listener (the managed pin bank), or from another baseline (the native chip reports from
+    /// every pad undriven and low), passes false and calls <see cref="PadEventRecorder.Attach"/> itself.</param>
+    /// <remarks>RP2350CoSim also takes <c>syncToNow</c> (its register accesses see the cycles of the executing slice);
+    /// the RP2040 has nothing to set: an access brings a deferred peripheral to the sweeps so far, as on the eager
+    /// machine.</remarks>
+    public RP2040CoSim(RP2040Machine machine, int pinCount = 30, bool attachPads = true)
     {
+        if (pinCount != 30) throw new ArgumentOutOfRangeException(nameof(pinCount), "The RP2040 has 30 user pads.");
         Machine = machine;
-        Pads = pads ?? new PadEventRecorder(machine);
+        Pads = new PadEventRecorder(machine);
         // A watched pad's change ends a bounded run and cuts a cut slice right after the instruction that made it.
         Pads.WatchedEdge = () =>
         {
@@ -117,6 +137,7 @@ public sealed class RP2040CoSim
             if (pwm != 0 && !Machine.ExactPwmPadEdges) Pads.Poll(pwm);
             return _stopOnEdge && Pads.WatchedChanged;
         };
+        if (attachPads) Pads.Attach();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -226,7 +247,8 @@ public sealed class RP2040CoSim
                         if (skip > 0)
                         {
                             m.SkipSleepingSlices(skip, slice);
-                            StretchedSlices += skip;
+                            SleepStretches++;
+                            SleepStretchCycles += skip * slice;
                             done += skip * slice;
                             continue;
                         }
@@ -293,7 +315,8 @@ public sealed class RP2040CoSim
         bool p1 = Parked(1);
         int booked = m.RunAwakeBounded(n, maxSlices, cut ? Pads.Watch : 0);
         int k = m.BoundedSliceSlots;
-        BoundedSlices += booked;
+        AwakeRuns++;
+        AwakeRunSlots += (long)booked * n + k;
         PlainSlices++;
         if (k < n) CutSlices++;
         Retired[0] += (ulong)booked * (ulong)n;
