@@ -25,9 +25,12 @@ cosim.Pads.Drain((gpio, level, oe, cycle) => Console.WriteLine($"GP{gpio}={level
 
 A run is a sequence of slices, each of the guard while a pad is watched and the guard is nonzero (twice it while
 both cores sleep, `AdaptiveSleep`), else of `Quantum` (512) instructions per core, never more than the quantum.
-After every slice the peripherals sweep. `Run(n)` is `RunUntilEdge` with `MaxSlots = n` and nothing watched: its
-slices are the quantum counted from the start of the call, the last one shorter (the chunk boundaries depend only
-on the calls, never on the firmware).
+After every slice the peripherals sweep. `Run(n)` runs `n` slots per core with nothing watched (`RunFlags`), in
+slices of the quantum counted across calls, as RP2350's `RunChunk` chunks: a call that starts inside a slice first
+finishes it, so a host's call size moves no boundary and only adds a sweep where a call ends inside a slice (the
+boundaries depend only on the calls, never on the firmware). `CallSizeTests`: MicroPython booted with 150M
+instructions in calls of 1.5M and of 10M lands on the same cycle (151,048,460) with the same CDC text; counted from
+each call's start, as before, the 1.5M calls ended 2,250 cycles later.
 
 | Flag | What it does | Result |
 |---|---|---|
@@ -120,8 +123,10 @@ iOS no-JIT constraints.
 - `RunRequest`, `RunResult`, `StopReason` and `CoSimFlags` have RP2350's shapes (`MaxSlots` an int, `TargetCycle` 0 for
   none, `Watch` a ulong, `CoSimFlags.All`). The constructors differ (`RP2040CoSim(machine, recorder?)` against
   `RP2350CoSim(machine, pinCount, attachPads, syncToNow)`), and so do the probes (`StretchedSlices`, `BoundedSlices`,
-  `PlainSlices`, `CutSlices` against `SleepStretches`, `AwakeRuns`, ...). `Run(n)` slices at `Quantum` (512) from the
-  call's start; RP2350's runs `RunChunk` (1024) chunks on absolute boundaries.
+  `PlainSlices`, `CutSlices` against `SleepStretches`, `AwakeRuns`, ...). `Run(n)` now counts its `Quantum` (512)
+  slices across calls, as RP2350 counts its `RunChunk` (1024) chunks: the 512 stays (it is the slice every sweep
+  follows here, where RP2350 coalesces its ticks to a cycle quantum), the absolute boundaries make it call-size
+  independent all the same.
 - `SyncForHostInput`: one contract on both chips, two mechanisms. The contract: the cycles already run see the old
   level, the eager machine's state at that point is where the input meets the peripherals, and no cycle is ticked
   twice. RP2350 flushes its coalesced accumulators outside a run or a plain slice, turns the input into a peripheral

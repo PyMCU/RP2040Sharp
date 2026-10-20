@@ -131,8 +131,26 @@ internal sealed unsafe class Chip
     /// <summary>Conservative per-core retired-instruction count (RP2040CoSim.Retired).</summary>
     public ulong[] Retired => CoSim.Retired;
 
-    /// <summary>Run <paramref name="max"/> instructions per core in peripheral-quantum slices (st_rp2040_run).</summary>
-    public void Run(int max) => RunUntilEdge(max, 0, 0);
+    /// <summary>Run <paramref name="max"/> instructions per core in peripheral-quantum slices counted across calls
+    /// (st_rp2040_run, RP2040CoSim.Run). Pad changes are reported at the end, in cycle order.</summary>
+    public void Run(int max)
+    {
+        CoSim.RunFlags = Flags;
+        CoSim.Run(max);
+        ScanPads();
+    }
+
+    private CoSimFlags Flags
+    {
+        get
+        {
+            var flags = CoSimFlags.StopOnWatchedEdge | CoSimFlags.AdaptiveSleep;
+            if (EventGuard) flags |= CoSimFlags.EventGuard;
+            if (SleepingStretches) flags |= CoSimFlags.SleepingStretches;
+            if (AwakeBoundedRuns) flags |= CoSimFlags.BoundedRuns;
+            return flags;
+        }
+    }
 
     /// <summary>
     /// Run up to <paramref name="max"/> instructions in slices of <paramref name="guard"/> whenever a pad is watched
@@ -141,11 +159,7 @@ internal sealed unsafe class Chip
     /// </summary>
     public void RunUntilEdge(int max, int guard, uint watch)
     {
-        var flags = CoSimFlags.StopOnWatchedEdge | CoSimFlags.AdaptiveSleep;
-        if (EventGuard) flags |= CoSimFlags.EventGuard;
-        if (SleepingStretches) flags |= CoSimFlags.SleepingStretches;
-        if (AwakeBoundedRuns) flags |= CoSimFlags.BoundedRuns;
-        CoSim.RunUntilEdge(new RunRequest { MaxSlots = max, Guard = guard, Watch = watch, Flags = flags });
+        CoSim.RunUntilEdge(new RunRequest { MaxSlots = max, Guard = guard, Watch = watch, Flags = Flags });
         ScanPads();
     }
 

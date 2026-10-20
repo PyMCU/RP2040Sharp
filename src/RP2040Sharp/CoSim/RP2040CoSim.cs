@@ -125,10 +125,32 @@ public sealed class RP2040CoSim
         : !Machine.Core1Launched || Machine.Cpu1.Registers.Waiting || Machine.Cpu1.IsLockedUp;
 
     /// <summary>
-    /// <paramref name="n"/> instruction slots per core in slices of <see cref="Quantum"/> from the call's start (the last
-    /// one shorter): the chunk boundaries depend only on the calls, never on what the firmware does (st_rp2040_run).
+    /// <paramref name="n"/> instruction slots per core in slices of <see cref="Quantum"/>, with the slice boundaries
+    /// counted across calls (st_rp2040_run): they fall at the same executed-slot counts whatever the host's call size,
+    /// so a long call and the same slots in shorter calls differ only by the extra sweep where a call ends inside a
+    /// slice. A call that starts on a boundary is one <see cref="RunUntilEdge"/>; one that starts inside a slice
+    /// first finishes it. The boundaries depend only on the calls, never on what the firmware does. Uses
+    /// <see cref="RunFlags"/>.
     /// </summary>
-    public void Run(int n) => RunUntilEdge(new RunRequest { MaxSlots = n, Flags = CoSimFlags.All });
+    public void Run(int n)
+    {
+        int quantum = Math.Max(1, Quantum);
+        if (_runPhase >= quantum) _runPhase = 0;   // the quantum changed
+        while (n > 0)
+        {
+            int k = _runPhase == 0 ? n : Math.Min(n, quantum - _runPhase);
+            k = RunUntilEdge(new RunRequest { MaxSlots = k, Flags = RunFlags }).Slots;
+            if (k <= 0) return;
+            _runPhase = (int)((_runPhase + (long)k) % quantum);
+            n -= k;
+        }
+    }
+
+    private int _runPhase;
+
+    /// <summary>What <see cref="Run"/> may use (<see cref="CoSimFlags.All"/>; only the speed-ups apply, nothing is
+    /// watched). The native chip's switches set it.</summary>
+    public CoSimFlags RunFlags { get; set; } = CoSimFlags.All;
 
     /// <summary>
     /// Run up to <see cref="RunRequest.MaxSlots"/> instructions per core and no further than
