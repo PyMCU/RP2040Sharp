@@ -183,6 +183,87 @@ void st_rp2040_set_serial_callback(st_rp2040 *chip, st_rp2040_serial_cb cb, void
  * channel other than st_rp2040_serial_channel are rejected; len 0 does nothing. */
 void st_rp2040_serial_write(st_rp2040 *chip, st_rp2040_serial_channel channel, const uint8_t *data, size_t len);
 
+/* ---- Wi-Fi (Pico W, ST_RP2040_CYW43) --------------------------------------------------------------------------
+ * A chip created with ST_RP2040_CYW43 has a virtual network behind its CYW43439: one access point the host
+ * configures here, and a gateway at 192.168.4.1 that answers ARP and DHCP (leases from 192.168.4.2, mask /24).
+ * The guest's own driver and TCP/IP stack run unmodified (MicroPython: network.WLAN(network.STA_IF).scan(),
+ * .connect(ssid, key), .ifconfig()). Protocol level only: no RF, and nothing reaches the host's real network.
+ * docs/native-abi.md describes the model and what later versions add (host port forwarding, outbound bridges).
+ * Every call below on a chip without the CYW43439 is rejected (-1, last_error says why). */
+
+/* Join state of the station (st_rp2040_wifi_info.state). New values may be added: treat unknown ones as DOWN. */
+typedef enum {
+    ST_RP2040_WIFI_DOWN       = 0, /* not associated: radio off, never joined, or left */
+    ST_RP2040_WIFI_SCANNING   = 1, /* not associated; the station scanned and has not tried to join since */
+    ST_RP2040_WIFI_JOINED     = 2, /* associated with the AP; ST_RP2040_WIFI_LEASED in flags once DHCP gave it an address */
+    ST_RP2040_WIFI_BAD_AUTH   = 3, /* the last join found the AP but the passphrase was wrong (MicroPython: STAT_WRONG_PASSWORD) */
+    ST_RP2040_WIFI_NO_NETWORK = 4  /* the last join asked for an SSID no AP has (MicroPython: STAT_NO_AP_FOUND) */
+} st_rp2040_wifi_state;
+
+/* st_rp2040_wifi_info.flags */
+enum {
+    ST_RP2040_WIFI_POWERED = 1, /* WL_ON (GPIO23) is high: the firmware powered the radio */
+    ST_RP2040_WIFI_LEASED  = 2  /* ipv4 holds the address the gateway's DHCP server gave the station */
+};
+
+/* Link status. Set `size` to sizeof(st_rp2040_wifi_info) before calling: the library fills that many bytes at most and
+ * sets `size` to the bytes it filled, so a host built against an older, shorter struct keeps working with a newer
+ * library and the other way round. Fields are only ever added at the end; a reserved field may later get a meaning
+ * whose value is 0 in every earlier version. 112 bytes in this version, the same on x86 and x64. */
+typedef struct st_rp2040_wifi_info {
+    uint32_t size;        /* in: bytes the caller provides (at least 8); out: bytes filled */
+    int32_t  state;       /* st_rp2040_wifi_state */
+    uint32_t flags;       /* ST_RP2040_WIFI_POWERED | ST_RP2040_WIFI_LEASED */
+    int32_t  rssi;        /* dBm of the joined AP, 0 when not joined */
+    uint8_t  ipv4[4];     /* the DHCP lease (ST_RP2040_WIFI_LEASED), else 0.0.0.0 */
+    uint8_t  gateway[4];  /* 192.168.4.1 */
+    uint8_t  netmask[4];  /* 255.255.255.0 */
+    uint8_t  mac[6];      /* the CYW43439's station MAC (unique per chip in a process) */
+    uint8_t  reserved0[2];
+    char     ssid[33];    /* the joined SSID, or the one of the last failed join; NUL-terminated UTF-8 */
+    uint8_t  reserved1[3];
+    uint64_t tx_bytes;    /* Ethernet bytes the guest transmitted (since create) */
+    uint64_t rx_bytes;    /* Ethernet bytes delivered to the guest */
+    uint64_t tx_frames;
+    uint64_t rx_frames;
+    uint32_t changes;     /* status changes so far (each st_rp2040_wifi_event counts one) */
+    uint32_t reserved2;
+} st_rp2040_wifi_info;
+
+/* Events of the Wi-Fi callback. New values may be added: ignore unknown ones. */
+typedef enum {
+    ST_RP2040_WIFI_EV_SCAN       = 1, /* the guest scanned (it finds the configured AP, if any) */
+    ST_RP2040_WIFI_EV_JOIN       = 2, /* associated with the AP (DHCP follows) */
+    ST_RP2040_WIFI_EV_LEASE      = 3, /* the gateway leased status->ipv4 to the station */
+    ST_RP2040_WIFI_EV_LEAVE      = 4, /* the association ended: disconnect(), active(False) or WL_ON low */
+    ST_RP2040_WIFI_EV_BAD_AUTH   = 5, /* a join with the wrong passphrase */
+    ST_RP2040_WIFI_EV_NO_NETWORK = 6  /* a join for an SSID no AP has */
+} st_rp2040_wifi_event;
+
+/* A Wi-Fi status change. Called when st_rp2040_run / st_rp2040_run_until_edge has finished running, on the same
+ * thread, once per event in the order they happened (after the pin callbacks of that call), never from the middle
+ * of the emulation. `cycle` is the core-0 cycle at which it happened (st_rp2040_cycle_to_ps converts it); `status`
+ * is the status right after it, valid during the call only. Running the chip from inside is rejected, as from the
+ * other callbacks; reading it (st_rp2040_wifi_status...) and destroying it are allowed. Events raised while no
+ * callback is set are not kept. */
+typedef void (*st_rp2040_wifi_cb)(void *user, int event, uint64_t cycle, const st_rp2040_wifi_info *status);
+
+/* Configure the AP the chip sees: `ssid` 1..32 bytes of UTF-8; `passphrase` NULL or "" for an open network, else
+ * WPA2-PSK with 8..63 printable ASCII characters (or 64 hex digits). channel 1..14 (0 = 6), rssi -120..-1 dBm
+ * (0 = -50). It replaces the previous AP; ssid NULL or "" removes it (scans then find nothing and joins fail with
+ * ST_RP2040_WIFI_NO_NETWORK). Call it at any time: before loading or running the firmware (the usual place), or later (an
+ * existing association is kept; the next scan or join sees the new AP). Returns 0, or -1 on a bad handle, a faulted
+ * chip, a chip without the CYW43439 or a bad argument (st_rp2040_last_error says which). */
+int  st_rp2040_wifi_set_ap(st_rp2040 *chip, const char *ssid, const char *passphrase, int channel, int rssi);
+/* Fill *status (see st_rp2040_wifi_info for `size`). Returns 0, or -1 (bad handle, faulted chip, no CYW43439, NULL, size < 8). */
+int  st_rp2040_wifi_status(st_rp2040 *chip, st_rp2040_wifi_info *status);
+/* cb = NULL disables (also from inside a callback). */
+void st_rp2040_set_wifi_callback(st_rp2040 *chip, st_rp2040_wifi_cb cb, void *user);
+
+/* The Wi-Fi types and values are those of silicontwin_rp2350.h: st_rp2040_wifi_info is its st_wifi_status (the name
+ * differs because st_rp2040_wifi_status is the function), same layout, same ST_*WIFI_* numbers, so a host that drives
+ * both chips can share one handler. */
+
 #ifdef ST_ENABLE_TEST_HOOKS
 /* TEST ONLY: exists only in a library built with -p:StTestHooks=true, never in packages.
  * Makes the core throw so the fault path can be exercised: mode 1 = exception inside the next run,

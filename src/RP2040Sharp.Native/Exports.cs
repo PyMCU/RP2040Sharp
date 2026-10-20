@@ -22,7 +22,9 @@ internal sealed unsafe class Chip
 
     public readonly RP2040Machine Machine;
     public readonly UsbCdcHost Cdc;
-    public readonly Cyw43439Device? Cyw43;
+    /// <summary>The Pico W radio and its virtual LAN (ST_RP2040_CYW43), null on a plain Pico.</summary>
+    public readonly ChipWifi? Wifi;
+    public Cyw43439Device? Cyw43 => Wifi?.Device;
     private readonly ushort[] _adc = new ushort[4];
 
     /// <summary>Every pad change with its own cycle, reported in cycle order after each call (RP2040CoSim.Pads).</summary>
@@ -109,7 +111,22 @@ internal sealed unsafe class Chip
             // for the pads muxed to SIO, so forward every SIO write (WL_REG_ON, the gSPI chip select) to the device.
             var m = Machine;
             m.Sio.OnGpioChanged += mask => m.IoBank0.NotifyPads(mask);
-            Cyw43 = new Cyw43439Device(m.IoBank0);
+            // Behind the radio, a virtual LAN with a gateway (DHCP 192.168.4.x) and no AP until the host sets one.
+            Wifi = new ChipWifi(m.IoBank0, () => (ulong)m.Cpu.Cycles);
+        }
+    }
+
+    /// <summary>Hand the host the Wi-Fi events raised during the run that just ended, in order. The host may clear
+    /// the callback or destroy the chip from inside it: what is left is then dropped.</summary>
+    public void ReportWifi()
+    {
+        var w = Wifi;
+        if (w is null) return;
+        while (!DestroyPending && w.TryTake(out var ev, out var cycle, out var status))
+        {
+            var cb = w.Cb;
+            if (cb == null) break;
+            cb(w.User, ev, cycle, &status);
         }
     }
 
@@ -138,6 +155,7 @@ internal sealed unsafe class Chip
         CoSim.RunFlags = Flags;
         CoSim.Run(max);
         ScanPads();
+        ReportWifi();
     }
 
     private CoSimFlags Flags
@@ -161,6 +179,7 @@ internal sealed unsafe class Chip
     {
         CoSim.RunUntilEdge(new RunRequest { MaxSlots = max, Guard = guard, Watch = watch, Flags = Flags });
         ScanPads();
+        ReportWifi();
     }
 
     // ---- co-simulation speed-ups (docs/peripheral-deadlines.md) -----------------------------------------------------
@@ -683,6 +702,61 @@ internal static unsafe class Exports
             }
         }
         catch (Exception e) { chip.Fault("st_rp2040_serial_write", e); }
+    }
+
+    // ---- Wi-Fi (Pico W: ST_RP2040_CYW43) ------------------------------------------------------------------------------
+    // docs/native-abi.md. Every call on a chip created without the CYW43439 is rejected (-1 / ignored, last_error says so).
+
+    private static ChipWifi? WifiOf(Chip chip, string fn)
+    {
+        if (chip.Wifi is { } w) return w;
+        chip.Reject(fn + ": this chip has no CYW43439 (create it with ST_RP2040_CYW43)");
+        return null;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_wifi_set_ap", CallConvs = [typeof(CallConvCdecl)])]
+    public static int WifiSetAp(nint h, byte* ssid, byte* passphrase, int channel, int rssi)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return -1;
+        try
+        {
+            if (WifiOf(chip, "st_rp2040_wifi_set_ap") is not { } w) return -1;
+            var why = ChipWifi.ParseAp(ssid, passphrase, channel, rssi, out var s, out var p, out var ch, out var r);
+            if (why != null) { chip.Reject("st_rp2040_wifi_set_ap: " + why); return -1; }
+            w.SetAp(s, p, ch, r);
+            return 0;
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_wifi_set_ap", e); return -1; }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_wifi_status", CallConvs = [typeof(CallConvCdecl)])]
+    public static int WifiStatusOf(nint h, WifiStatus* status)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return -1;
+        try
+        {
+            if (WifiOf(chip, "st_rp2040_wifi_status") is not { } w) return -1;
+            if (status == null) { chip.Reject("st_rp2040_wifi_status: status is NULL"); return -1; }
+            if (status->Size < 8) { chip.Reject("st_rp2040_wifi_status: status->size " + status->Size + " is below 8 (set it to sizeof(st_rp2040_wifi_info))"); return -1; }
+            w.Fill(status, status->Size);
+            return 0;
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_wifi_status", e); return -1; }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_set_wifi_callback", CallConvs = [typeof(CallConvCdecl)])]
+    public static void SetWifiCallback(nint h, delegate* unmanaged[Cdecl]<nint, int, ulong, WifiStatus*, void> cb, nint user)
+    {
+        var chip = Lookup(h);
+        if (chip == null) return;
+        try
+        {
+            if (cb == null) { chip.Wifi?.SetCallback(null, 0); return; }   // NULL disables, with or without a radio
+            WifiOf(chip, "st_rp2040_set_wifi_callback")?.SetCallback(cb, user);
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_set_wifi_callback", e); }
     }
 
 #if ST_ENABLE_TEST_HOOKS

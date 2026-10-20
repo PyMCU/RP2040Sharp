@@ -43,9 +43,28 @@ dotnet publish src/RP2040Sharp.Native -c Release -r win-x64 -p:StNativeLib=true 
 | `st_rp2040_pin_get`, `st_rp2040_pin_get_pull`, `st_rp2040_pin_set_input` | `-1` releases a pad: it reads its pull and follows later pull changes. `pin_set_input` first applies the peripheral time still pending, so no tick samples the new level retroactively; a pad already held at the level (or already released) is left alone, without that sync, as on RP2350 |
 | `st_rp2040_adc_set_voltage` | Channels 0..3 (GP26..29); the temperature sensor reads 27 °C |
 | `st_rp2040_set_pin_callback`, `st_rp2040_set_serial_callback`, `st_rp2040_serial_write` | Channels UART0, UART1 and USB CDC: an emulated USB host (`UsbCdcHost`) enumerates the device and asserts DTR, so the MicroPython REPL works over CDC |
+| `st_rp2040_wifi_set_ap`, `st_rp2040_wifi_status`, `st_rp2040_set_wifi_callback` | Pico W (`ST_RP2040_CYW43`) only: the virtual access point and the link status, below |
 
 Type names carry the chip (`st_rp2040_pin_cb`, `ST_RP2040_STATUS_OK`...) so that a translation unit
 can include both headers; values and callback signatures are those of the RP2350 header.
+
+### Wi-Fi (Pico W)
+
+With `ST_RP2040_CYW43` the CYW43439 has a virtual network behind it: one access point the host sets with
+`st_rp2040_wifi_set_ap(chip, ssid, passphrase, channel, rssi)` (open with a NULL or empty passphrase, else WPA2-PSK),
+and a gateway at `192.168.4.1/24` that answers ARP, DHCP (the station gets `192.168.4.2`) and DNS (NXDOMAIN). The
+guest's own driver and lwIP run unmodified, so MicroPython's `WLAN.scan()`, `.connect(ssid, key)` and `.ifconfig()`
+work as on the board; a wrong passphrase ends in `STAT_WRONG_PASSWORD` (-3), an unknown SSID in `STAT_NO_AP_FOUND`
+(-2). `st_rp2040_wifi_status` fills an `st_rp2040_wifi_info` (join state, DHCP address, gateway, netmask, MAC, SSID,
+RSSI, Ethernet bytes and frames each way; a caller-set `size`, so the struct can grow at the end) and
+`st_rp2040_set_wifi_callback` reports every change (scan, join, lease, leave, wrong passphrase, unknown SSID) when
+the run call that raised it has finished, never from inside the emulation. Protocol level only: no RF, and nothing
+reaches the host's network.
+
+It is the RP2350 ABI with `st_rp2040_` names: the same functions, values and 112-byte layout (the struct is
+`st_wifi_status` there; here it is `st_rp2040_wifi_info` because `st_rp2040_wifi_status` is the function). The model,
+the compatibility rules and the planned host port forwarding (W2) and outbound bridges (W3) are described in
+RP2350Sharp's `docs/wireless.md`.
 
 ### Pad-change cycles
 
@@ -118,7 +137,9 @@ guard 75 5.3x before, 67x after.
   rejected arguments, UF2 families, time, pulls, re-entrancy, destroy from a callback, injected
   faults with `-p:StTestHooks=true`), `run_until_edge` semantics and guard invariance on a
   hand-assembled firmware, MicroPython on the Pico (REPL over CDC, an `exec`'d script toggling GP15)
-  and on the Pico W (`network.WLAN(network.STA_IF).active(True)` with `ST_RP2040_CYW43`).
+  and on the Pico W (`network.WLAN(network.STA_IF).active(True)` with `ST_RP2040_CYW43`; `PicoWWifiTests`: the
+  Wi-Fi exports with a scan, a WPA2 connect up to the DHCP lease, a wrong passphrase, an open network and an unknown
+  SSID, run as the Proteus model runs it, guard 75).
   The Pico image is the one under `tests/RP2040Sharp.IntegrationTests/Firmware`; the Pico W image
   comes from `RP2040_MICROPYTHON_PICOW_UF2` or the integration tests' firmware cache, and the test
   skips without it.
@@ -126,4 +147,5 @@ guard 75 5.3x before, 67x after.
   [peripheral-deadlines.md](peripheral-deadlines.md#differential-tests)); `CoSimBench`: the measurements above.
 - `PinLevelDifferentialTests`, `PinLevelLockstepTests`, `MicroPythonBusTests`: the pin-level buses
   ([pin-level-buses.md](pin-level-buses.md#tests)).
-- `tests/RP2040Sharp.Native.Tests/abi_selftest.c`: the same ABI from C against the NativeAOT library.
+- `tests/RP2040Sharp.Native.Tests/abi_selftest.c`: the same ABI from C against the NativeAOT library (with a Pico W
+  image as second argument also the Wi-Fi join, a wrong passphrase and the Wi-Fi callback's re-entrancy rules).
