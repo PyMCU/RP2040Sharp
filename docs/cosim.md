@@ -76,8 +76,8 @@ Every change that goes through IO_BANK0 is recorded while it happens, with its o
 
 Nothing is reported past core 0's own clock (core 1 may run more cycles in a slice) nor before the previous report
 (`ReportedTo`): a stamp is clamped into that window on delivery. `PadReportMode.Deferred` keeps every change and
-`Drain` hands them over sorted by cycle (stable: they are in order but for core 1's, which follow core 0's of the
-same slice); `PadReportMode.Immediate` raises each batch through `Immediate` (a `PadChangeHandler`: the pads that
+`Drain` hands them over sorted by cycle, pad order among equal cycles (they are in order but for core 1's, which
+follow core 0's of the same slice), one pad's changes at one cycle folded into one; `PadReportMode.Immediate` raises each batch through `Immediate` (a `PadChangeHandler`: the pads that
 moved, output enable and driven levels of the `ImmediateWatch` pads, the cycle) while it happens, so a handler can
 answer at once (the managed adapter). The counter of a PWM slice still advances at the sweeps, so in immediate mode a
 register write and the counter edges of the same slice can arrive out of cycle order. `LevelsOnlyWhenDriven`
@@ -138,8 +138,10 @@ iOS no-JIT constraints.
   `CycleToPs`, `PsIn`, `NoteWrite`, `Track`); on the RP2040 it keeps one segment (`RP2040CoSim.Clock`). The mapping of
   the peripherals' swept cycles onto core 0's clock is `SweepTimeline`, which RP2350 does not need (its peripherals
   run on core 0's clock).
-- `PadEventRecorder` deferred mode keeps every change of a pad (the RP2040 C ABI reports each one); RP2350's keeps
-  each pad's last change per report. RP2350's also hooks SIO, CTRL and PWM itself and stamps PIO by lockstep round
+- `PadEventRecorder` deferred mode reports every change on both chips now (RP2350's kept each pad's last change per
+  report and lost the pulses of a plain call), in cycle order with pad order among equal cycles, the changes of one pad
+  at one cycle folded into one (none when the pad is back: a zero-width pulse depends on how a sweep batched the work;
+  RP2350's `Cyw43CallSizeTests` needed it). RP2350's also hooks SIO, CTRL and PWM itself and stamps PIO by lockstep round
   (`PioRounds`); here IO_BANK0's `PadsChanged` carries all of them (PWM through `ExactPwmPadEdges`), and PIO edges
   carry the end of the slice. The extra members here: `Watch` / `WatchedChanged` / `WatchedEdge` (the run loop's),
   `LevelsOnlyWhenDriven`, `Poll`, `Record`, `Stamp`, `Pending`, `Baseline`.

@@ -41,6 +41,28 @@ public class PadEventRecorderTests
         Assert.Equal(0, r.Pending);
     }
 
+    // Every change of a call is reported, a pulse included; the changes of one pad at one cycle are one (none when the
+    // pad is back where it was), as in RP2350Sharp: a zero-width pulse depends on how a sweep batched the work.
+    [Fact]
+    public void A_drain_reports_every_change_and_folds_one_pad_s_changes_at_one_cycle()
+    {
+        using var m = Machine();
+        Drive(m, 14); Drive(m, 15);
+        m.Cpu.Cycles = 100;
+        var r = new PadEventRecorder(m);
+        r.Baseline();
+        Toggle(m, 14); r.Record(1u << 14, 10);
+        Toggle(m, 14); r.Record(1u << 14, 11);   // a pulse: both edges
+        Toggle(m, 15); r.Record(1u << 15, 30);
+        Toggle(m, 15); r.Record(1u << 15, 30);   // zero width: nothing
+        Toggle(m, 14); r.Record(1u << 14, 40);
+        Toggle(m, 14); r.Record(1u << 14, 40);
+        Toggle(m, 14); r.Record(1u << 14, 40);   // three at one cycle: the last state
+        var got = new List<(int, bool, bool, ulong)>();
+        r.Drain((g, l, oe, c) => got.Add((g, l, oe, c)));
+        Assert.Equal([(14, true, true, 10UL), (14, false, true, 11UL), (14, true, true, 40UL)], got);
+    }
+
     [Theory]
     [InlineData(false, 1)]
     [InlineData(true, 0)]

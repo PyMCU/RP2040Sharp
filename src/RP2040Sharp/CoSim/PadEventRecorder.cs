@@ -30,8 +30,8 @@ public delegate void PadChangeHandler(ulong changed, ulong outputEnable, ulong l
 /// <item>Anything else in a sweep (PIO, DMA into SIO), and <see cref="Poll"/>: core 0's clock, the end of the slice.</item>
 /// </list>
 /// Nothing is reported past core 0's own clock (core 1 may run more cycles in a slice) nor before the previous report
-/// (<see cref="ReportedTo"/>): a stamp is clamped into that window when it is delivered. The events of a drain are
-/// sorted by cycle, stably (they are already in order but for core 1's, which follow core 0's of the same slice).
+/// (<see cref="ReportedTo"/>): a stamp is clamped into that window when it is delivered. The events of a drain are sorted
+/// by cycle, pad order among equal cycles, one pad's changes at one cycle folded into one (see <see cref="Drain"/>).
 /// </summary>
 /// <remarks>The public surface follows RP2350Sharp's RP2350.CoSim.PadEventRecorder (Mode, Immediate, ImmediateWatch,
 /// Drain, Snapshot, ReportedTo, Attached), so the two can be unified; see docs/cosim.md for what differs.</remarks>
@@ -43,6 +43,7 @@ public sealed class PadEventRecorder
     private readonly RP2040Machine _m;
     private readonly Action<uint> _hook;
     private uint _lastOe, _lastLevel;            // pad state as of the last record
+    private uint _repOe, _repLevel;              // pad state as of the last drain
     private ulong _immOe, _immLevel;             // immediate mode: the state last raised (driven levels)
     private ulong _immWatch = AllPads;
     private ulong _reportedTo;
@@ -127,6 +128,7 @@ public sealed class PadEventRecorder
         _m.IoBank0.GetPadOutputState(out _lastOe, out _lastLevel);
         _lastOe &= AllPads;
         _lastLevel &= AllPads;
+        (_repOe, _repLevel) = (_lastOe, _lastLevel);
         Snapshot(AllPads);
     }
 
@@ -194,26 +196,37 @@ public sealed class PadEventRecorder
 
     /// <summary>
     /// Deferred mode: hand every event recorded since the last drain to <paramref name="sink"/> (gpio, level, output
-    /// enable, cycle) in cycle order, clamped into [<see cref="ReportedTo"/>, core 0's clock], then forget them; no sink
-    /// only moves the report point. The sink may make the pads move again (a host answering with an input): those land
-    /// in a fresh list for the next drain. Immediate mode: moves the report point.
+    /// enable, cycle), clamped into [<see cref="ReportedTo"/>, core 0's clock], in cycle order (pad order among equal
+    /// cycles), then forget them; the changes of one pad at one cycle are one change, to the last state (none when that
+    /// is where the pad was): a zero-width pulse depends on how a sweep batched the work, not on the signal. No sink only
+    /// moves the report point. The sink may make the pads move again (a host answering with an input): those land in a
+    /// fresh list for the next drain. Immediate mode: moves the report point. (RP2350Sharp's recorder reports the same.)
     /// </summary>
     public void Drain(Action<int, bool, bool, ulong>? sink)
     {
         var now = (ulong)_m.Cpu.Cycles;
         var from = _reportedTo;
         _reportedTo = now;
+        uint pOe = _repOe, pLv = _repLevel;   // as reported so far
+        (_repOe, _repLevel) = (_lastOe, _lastLevel);
         if (_pending.Count == 0) return;
         (_reporting, _pending) = (_pending, _reporting);
         var events = _reporting;
         try
         {
             if (sink is null) return;
+            for (var i = 0; i < events.Count; i++) events[i] = events[i] with { Cycle = Clamp(events[i].Cycle, from, now) };
             SortByCycle(events);
             for (var i = 0; i < events.Count; i++)
             {
                 var e = events[i];
-                sink(e.Gpio, e.Level, e.Oe, Clamp(e.Cycle, from, now));
+                bool group = false;
+                while (i + 1 < events.Count && events[i + 1].Gpio == e.Gpio && events[i + 1].Cycle == e.Cycle) { e = events[++i]; group = true; }
+                var bit = 1u << e.Gpio;
+                if (group && e.Oe == ((pOe & bit) != 0) && e.Level == ((pLv & bit) != 0)) continue;
+                pOe = e.Oe ? pOe | bit : pOe & ~bit;
+                pLv = e.Level ? pLv | bit : pLv & ~bit;
+                sink(e.Gpio, e.Level, e.Oe, e.Cycle);
             }
         }
         finally { events.Clear(); }
@@ -222,17 +235,20 @@ public sealed class PadEventRecorder
     /// <summary>A stamp is delivered inside the report window: never before the last report, never past core 0's clock.</summary>
     public static ulong Clamp(ulong cycle, ulong from, ulong now) => cycle < from ? from : cycle > now ? now : cycle;
 
-    /// <summary>Stable insertion sort by cycle: the list is already in order but for core 1's changes, which follow
-    /// core 0's.</summary>
+    /// <summary>Stable insertion sort by (cycle, gpio): the list is already in order but for core 1's changes, which
+    /// follow core 0's, and pads that moved at the same cycle.</summary>
     private static void SortByCycle(List<(int Gpio, bool Level, bool Oe, ulong Cycle)> events)
     {
         for (var i = 1; i < events.Count; i++)
         {
             var e = events[i];
             var j = i - 1;
-            if (events[j].Cycle <= e.Cycle) continue;
-            while (j >= 0 && events[j].Cycle > e.Cycle) { events[j + 1] = events[j]; j--; }
+            if (!After(events[j], e)) continue;
+            while (j >= 0 && After(events[j], e)) { events[j + 1] = events[j]; j--; }
             events[j + 1] = e;
         }
     }
+
+    private static bool After((int Gpio, bool Level, bool Oe, ulong Cycle) a, (int Gpio, bool Level, bool Oe, ulong Cycle) b) =>
+        a.Cycle > b.Cycle || (a.Cycle == b.Cycle && a.Gpio > b.Gpio);
 }
