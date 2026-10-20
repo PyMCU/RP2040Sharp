@@ -111,6 +111,14 @@ path (idle 0.063 against 0.050): it ticks the same peripherals at the end of the
 after deciding per sweep which ones are due. Whole stretches are where deferral pays (`Run(125000)` idle: 0.0011
 against 0.033 eager).
 
+`RP2040Mcu.RunUntilEdge(max, guard, watch)` is the managed run-until-edge a generic st_mcu_* library calls through
+`McuDescriptor.RunUntilEdge` (RP2350Sharp's SiliconTwin.Native.Exports), with `CyclesUntilPadEdge` for
+`st_mcu_cycles_until_edge`: `RunUntilEdge` with `TargetCycle = now + max`, the guard (capped at
+`MaxSliceInstructions`), the watch and `CoSimFlags.All`, until the target or a watched edge; a change counts while the
+pin bank is armed (a `PinChanged` subscriber). `McuRunUntilEdgeTests`: the same calls on pico-sdk blink and a pin-level
+UART program, guards 1 and 75, return after the same cycles with the same driven pad changes as
+`st_rp2040_run_until_edge`.
+
 ## AOT
 
 Everything here is plain classes and closed struct instantiations (`CutRunLimit`, `SliceCutRunLimit` of the

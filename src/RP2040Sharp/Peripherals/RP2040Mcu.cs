@@ -151,6 +151,57 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         return used;
     }
 
+    /// <summary>
+    /// Like <see cref="Run"/>, for a host whose circuit answers within a bit time (a pin-level I2C or SPI device): runs up
+    /// to <paramref name="maxCycles"/> in slices of <paramref name="guard"/> instructions per core (at most
+    /// <see cref="MaxSliceInstructions"/>; twice that while both cores sleep) and returns after the slice in which a pin
+    /// of <paramref name="watch"/> changed, through the co-simulation loop with everything the native chip uses
+    /// (<see cref="CoSimFlags.All"/>: the event guard ends a slice where guard 1 would have after each watched edge, plus
+    /// bounded runs, sleeping stretches and adaptive sleeping slices, each with the result of the plain slices). A change
+    /// counts when the bank records it, so the bank must be armed (a <see cref="IPinBank.PinChanged"/> subscriber); with
+    /// nobody listening this is <see cref="Run"/>. With <see cref="CoSim"/> off: <see cref="Run"/> in guard-sized steps
+    /// until such a change.
+    /// </summary>
+    /// <returns>The wall-clock cycles that elapsed, as <see cref="Run"/>.</returns>
+    public long RunUntilEdge(long maxCycles, int guard, ulong watch)
+    {
+        if (maxCycles <= 0) return 0;
+        if (guard <= 0 || (watch & PinBank.AllPinsMask) == 0 || !_bank.Armed) return Run(maxCycles);
+        long used = 0;
+        if (CoSim)
+        {
+            _cosim.Quantum = Math.Max(1, MaxSliceInstructions);
+            var swept = _machine.SweptCycles;
+            var request = new RunRequest
+            {
+                MaxSlots = int.MaxValue,
+                TargetCycle = _machine.Cpu.Cycles + maxCycles,
+                Guard = guard,
+                Watch = watch,
+                Flags = CoSimFlags.All,
+            };
+            while (_cosim.RunUntilEdge(request).Reason == StopReason.Budget) { }
+            used = _machine.SweptCycles - swept;
+            if (used > 0 && _machine.DeferPeripheralTicks) _machine.SyncPeripherals();
+        }
+        else
+        {
+            var pads = _cosim.Pads;
+            pads.Watch = (uint)(watch & PinBank.AllPinsMask);
+            pads.WatchedChanged = false;
+            try
+            {
+                while (used < maxCycles && !pads.WatchedChanged) used += Run(Math.Min(guard, maxCycles - used));
+            }
+            finally { pads.Watch = 0; }
+        }
+        return used;
+    }
+
+    /// <summary>Cycles from now until the next edge a pin-level engine makes on a pin of <paramref name="watch"/>,
+    /// long.MaxValue when none has one coming (<see cref="RP2040CoSim.CyclesUntilPadEdge"/>).</summary>
+    public long CyclesUntilPadEdge(ulong watch) => _cosim.CyclesUntilPadEdge(watch);
+
     /// <inheritdoc />
     public long RunUntil(long absoluteCycle)
     {
@@ -344,6 +395,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
     private sealed class PinBank : IPinBank
     {
         private const uint AllPins = (1u << PinCountValue) - 1;
+        public const ulong AllPinsMask = AllPins;
 
         private readonly RP2040Mcu _owner;
         private readonly RP2040Machine _m;
@@ -368,6 +420,9 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         }
 
         public string Name => "GPIO";
+
+        /// <summary>True while somebody listens to <see cref="PinChanged"/> (the recorder is hooked).</summary>
+        public bool Armed => _armed;
 
         public int PinCount => PinCountValue;
 
