@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: an LDMIA abandoned by a bus fault keeps its original base
+
+A load or store that cannot complete already took a precise HardFault (stacked PC = the instruction, no
+destination or writeback). One case slipped through: `LDMIA rn, {..., rn, ...}` that loaded the base from an
+earlier word and then faulted on a later one left the base holding the loaded word. The abandoned LDM now leaves
+the base at its original value, like every register the fault does not touch.
+
 ### Fixed: CPSIE/CPSID are ignored in unprivileged Thread mode
 
 ARMv6-M executes CPS only when `CurrentModeIsPrivileged()`. The core applied it from unprivileged code too, so a
