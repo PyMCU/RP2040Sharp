@@ -182,6 +182,8 @@ public sealed class VirtualNet
         }
         else if (proto == 6)                       // TCP
         {
+            // A forwarded host connection (ForwardTcp) first, then the scripted client.
+            if (_forwarder is { } fw && f.Length >= l4 + 20 && fw.HandleGuestSegment(f, ip, l4)) return;
             HandleTcp(itf, f, ip, l4);
         }
     }
@@ -379,6 +381,7 @@ public sealed class VirtualNet
     /// </summary>
     public void Poll()
     {
+        _forwarder?.Pump();
         foreach (var conn in _inbound.Values.ToArray())
         {
             var sock = conn.Bridge;
@@ -406,6 +409,41 @@ public sealed class VirtualNet
             catch (System.Net.Sockets.SocketException) { CloseBridge(conn); }
             catch (ObjectDisposedException) { CloseBridge(conn); }
         }
+    }
+
+    // ── Host port forwarding: real host clients reach a server on the station ──────────
+
+    private TcpForwarder? _forwarder;
+
+    /// <summary>
+    /// The host side of port forwarding (created on first use): <see cref="TcpForwarder.Listen"/> opens
+    /// 127.0.0.1:hostPort and relays each connection to <see cref="ClientIp"/>:guestPort. <see cref="Poll"/> pumps it.
+    /// </summary>
+    public TcpForwarder Forwarder => _forwarder ??= new TcpForwarder(this);
+
+    /// <summary>Listen on 127.0.0.1:<paramref name="hostPort"/> (0: any free port) and relay every connection to the
+    /// station's <paramref name="guestPort"/>. Returns the port listened on.</summary>
+    public int ForwardTcp(ushort hostPort, ushort guestPort) => Forwarder.Listen(hostPort, guestPort);
+
+    /// <summary>The MAC of the station holding <see cref="ClientIp"/> (null until DHCP leased it).</summary>
+    internal byte[]? StationMac()
+    {
+        foreach (var (key, ip) in _leases)
+            if (IpEquals(ip, ClientIp)) return Convert.FromHexString(key);
+        return null;
+    }
+
+    /// <summary>Send a TCP segment (checksum filled here) from the gateway to the station at <see cref="ClientIp"/>.</summary>
+    internal void SendToStation(byte[] mac, byte[] tcp)
+    {
+        var csum = TcpChecksum(GatewayIp, ClientIp, tcp);
+        tcp[16] = (byte)(csum >> 8); tcp[17] = (byte)csum;
+        var ipPkt = BuildIpv4(6, GatewayIp, ClientIp, tcp);
+        var frame = new byte[14 + ipPkt.Length];
+        WriteEthHeader(frame, mac, GatewayMac, 0x0800);
+        Array.Copy(ipPkt, 0, frame, 14, ipPkt.Length);
+        _macToDevice.TryGetValue(MacKey(mac, 0), out var dev);
+        (dev ?? _sdpcm)?.EnqueueEthernet(0, frame);
     }
 
     private void CloseBridge(InboundConn conn)

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using RP2040.Peripherals.Gpio;
@@ -5,8 +6,8 @@ using RP2040Sharp.Wireless.Cyw43;
 
 namespace SiliconTwin.Native;
 
-/// <summary>st_rp2040_wifi_info (silicontwin_rp2040.h): 112 bytes, the same layout on x86 and x64. Grown only at the end;
-/// the caller's <c>size</c> says how much of it the caller knows (docs/native-abi.md).</summary>
+/// <summary>st_rp2040_wifi_info (silicontwin_rp2040.h): 160 bytes (112 before the port forwarding fields), the same layout on
+/// x86 and x64. Grown only at the end; the caller's <c>size</c> says how much of it the caller knows (docs/wireless.md).</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct WifiStatus
 {
@@ -23,6 +24,10 @@ internal unsafe struct WifiStatus
     public fixed byte Reserved1[3];
     public ulong TxBytes, RxBytes, TxFrames, RxFrames;
     public uint Changes, Reserved2;
+    // ---- 112: port forwarding (W2) ----
+    public uint TcpForwards, TcpOpen;
+    public ulong TcpAccepted, TcpFailed, TcpToGuest, TcpFromGuest;
+    public ushort TcpHostPort, TcpGuestPort, TcpPeerPort, Reserved3;
 }
 
 /// <summary>
@@ -30,13 +35,19 @@ internal unsafe struct WifiStatus
 /// gateway with DHCP on 192.168.4.0/24, <see cref="VirtualNet"/>) and the access point the host configures with
 /// st_rp2040_wifi_set_ap. It follows what the station does (scan, join, wrong passphrase, unknown SSID, leave, DHCP
 /// lease, WL_ON power) into a status a host can poll and events it delivers after each run, never from inside one.
-/// Protocol level only: no RF, and nothing reaches the host's real network (docs/native-abi.md).
+/// Protocol level only: no RF. The host's network is reached only through the forwards the host asks for
+/// (st_rp2040_wifi_forward_tcp): listeners on 127.0.0.1, relayed to the station's servers (docs/wireless.md).
 /// </summary>
-internal sealed unsafe class ChipWifi
+internal sealed unsafe class ChipWifi : IDisposable
 {
     public const int StateDown = 0, StateScanning = 1, StateJoined = 2, StateBadAuth = 3, StateNoNetwork = 4;
     public const uint FlagPowered = 1, FlagLeased = 2;
     public const int EvScan = 1, EvJoin = 2, EvLease = 3, EvLeave = 4, EvBadAuth = 5, EvNoNetwork = 6;
+    public const int EvTcpOpen = 7, EvTcpClose = 8, EvTcpRefused = 9;
+    /// <summary>Simulated seconds per core-0 cycle for the forwarder's timers: the nominal clk_sys is close enough.</summary>
+    private const double NominalHz = 125_000_000;
+    /// <summary>Host time between two pumps of the forwards from inside the run calls.</summary>
+    private static readonly long PumpInterval = Stopwatch.Frequency / 1000;
     public const int DefaultChannel = 6, DefaultRssi = -50;
 
     /// <summary>The virtual AP's BSSID: the gateway's MAC, the AP and the router being one box.</summary>
@@ -57,6 +68,9 @@ internal sealed unsafe class ChipWifi
     private byte[]? _lease;
     private bool _powered;
     private uint _changes;
+    private TcpForwarder? _fwd;
+    private TcpForwarder.ConnInfo _lastConn;
+    private long _nextPump;
 
     public delegate* unmanaged[Cdecl]<nint, int, ulong, WifiStatus*, void> Cb;
     public nint User;
@@ -198,6 +212,63 @@ internal sealed unsafe class ChipWifi
         if (cb == null) _pending.Clear();
     }
 
+    // ---- port forwarding (W2) ----------------------------------------------------------------------------------
+
+    /// <summary>st_rp2040_wifi_forward_tcp: listen on 127.0.0.1:<paramref name="hostPort"/> (0: a free port) for the
+    /// station's <paramref name="guestPort"/>; guestPort 0 removes the forward of hostPort. Returns the port listened on
+    /// (0 for a removal), or null with <paramref name="why"/>.</summary>
+    public int? Forward(int hostPort, int guestPort, out string? why)
+    {
+        why = null;
+        if (hostPort < 0 || hostPort > 65535) { why = "host_port " + hostPort + " out of range 0..65535"; return null; }
+        if (guestPort < 0 || guestPort > 65535) { why = "guest_port " + guestPort + " out of range 0..65535 (0 removes the forward)"; return null; }
+        if (guestPort == 0)
+        {
+            if (hostPort != 0 && _fwd is not null && _fwd.Unlisten((ushort)hostPort)) return 0;
+            why = "127.0.0.1:" + hostPort + " is not forwarded";
+            return null;
+        }
+        if (_fwd is null)
+        {
+            _fwd = Net.Forwarder;
+            _fwd.Clock = () => _cycles() / NominalHz;
+            _fwd.OnEvent = OnForward;
+        }
+        try { return _fwd.Listen((ushort)hostPort, (ushort)guestPort); }
+        catch (InvalidOperationException e) { why = e.Message; return null; }
+    }
+
+    private void OnForward(TcpForwarder.Event ev, TcpForwarder.ConnInfo info)
+    {
+        _lastConn = info;
+        Push(ev switch { TcpForwarder.Event.Open => EvTcpOpen, TcpForwarder.Event.Close => EvTcpClose, _ => EvTcpRefused });
+    }
+
+    /// <summary>st_rp2040_wifi_poll: move what the host sockets delivered into the guest now. Returns the open connections.</summary>
+    public int Poll()
+    {
+        var f = _fwd;
+        if (f is null) return 0;
+        f.Pump();
+        _nextPump = Stopwatch.GetTimestamp() + PumpInterval;
+        return f.OpenConnections;
+    }
+
+    /// <summary>From the run calls: pump the forwards at most once per <see cref="PumpInterval"/> of host time, and not at
+    /// all on a chip that forwards nothing (one null check on the idle fast path).</summary>
+    public void PumpIfDue()
+    {
+        var f = _fwd;
+        if (f is null || (f.Forwards == 0 && !f.Busy)) return;
+        var t = Stopwatch.GetTimestamp();
+        if (t < _nextPump) return;
+        _nextPump = t + PumpInterval;
+        f.Pump();
+    }
+
+    /// <summary>Close the listeners and reset the connections (st_rp2040_destroy): the host ports are free again.</summary>
+    public void Dispose() => _fwd?.Dispose();
+
     // ---- status ------------------------------------------------------------------------------------------------
 
     public WifiStatus Snapshot()
@@ -225,6 +296,18 @@ internal sealed unsafe class ChipWifi
         for (int i = 0; i < 6 && i < mac.Length; i++) s.Mac[i] = mac[i];
         var ssid = Encoding.UTF8.GetBytes(_ssid);
         for (int i = 0; i < ssid.Length && i < 32; i++) s.Ssid[i] = ssid[i];
+        if (_fwd is { } f)
+        {
+            s.TcpForwards = (uint)f.Forwards;
+            s.TcpOpen = (uint)f.OpenConnections;
+            s.TcpAccepted = (ulong)f.Accepted;
+            s.TcpFailed = (ulong)f.Failed;
+            s.TcpToGuest = (ulong)f.ToGuestBytes;
+            s.TcpFromGuest = (ulong)f.FromGuestBytes;
+            s.TcpHostPort = _lastConn.HostPort;
+            s.TcpGuestPort = _lastConn.GuestPort;
+            s.TcpPeerPort = _lastConn.PeerPort;
+        }
         return s;
     }
 

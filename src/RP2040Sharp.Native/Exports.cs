@@ -76,6 +76,7 @@ internal sealed unsafe class Chip
     {
         if (Freed) return;
         Freed = true;
+        try { Wifi?.Dispose(); } catch { }   // the forwarded host ports are free again
         try { Machine.Dispose(); } catch { }
         var p = _err; _err = null;
         // the error buffer is released with the chip; st_rp2040_last_error on a stale handle never reaches it
@@ -152,6 +153,7 @@ internal sealed unsafe class Chip
     /// (st_rp2040_run, RP2040CoSim.Run). Pad changes are reported at the end, in cycle order.</summary>
     public void Run(int max)
     {
+        Wifi?.PumpIfDue();
         CoSim.RunFlags = Flags;
         CoSim.Run(max);
         ScanPads();
@@ -177,6 +179,7 @@ internal sealed unsafe class Chip
     /// </summary>
     public void RunUntilEdge(int max, int guard, uint watch)
     {
+        Wifi?.PumpIfDue();   // forwarded host connections: at most every millisecond of host time, nothing without forwards
         CoSim.RunUntilEdge(new RunRequest { MaxSlots = max, Guard = guard, Watch = watch, Flags = Flags });
         ScanPads();
         ReportWifi();
@@ -757,6 +760,39 @@ internal static unsafe class Exports
             WifiOf(chip, "st_rp2040_set_wifi_callback")?.SetCallback(cb, user);
         }
         catch (Exception e) { chip.Fault("st_rp2040_set_wifi_callback", e); }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_wifi_forward_tcp", CallConvs = [typeof(CallConvCdecl)])]
+    public static int WifiForwardTcp(nint h, int hostPort, int guestPort)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return -1;
+        try
+        {
+            if (WifiOf(chip, "st_rp2040_wifi_forward_tcp") is not { } w) return -1;
+            if (w.Forward(hostPort, guestPort, out var why) is { } port) return port;
+            chip.Reject("st_rp2040_wifi_forward_tcp: " + why);
+            return -1;
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_wifi_forward_tcp", e); return -1; }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_wifi_poll", CallConvs = [typeof(CallConvCdecl)])]
+    public static int WifiPoll(nint h)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return -1;
+        if (chip.Running) { chip.Reject("st_rp2040_wifi_poll: called re-entrantly from a callback"); return -1; }
+        if (WifiOf(chip, "st_rp2040_wifi_poll") is not { } w) return -1;
+        chip.Running = true;
+        try
+        {
+            var open = w.Poll();
+            chip.ReportWifi();
+            return open;
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_wifi_poll", e); return -1; }
+        finally { EndRun(chip); }
     }
 
 #if ST_ENABLE_TEST_HOOKS

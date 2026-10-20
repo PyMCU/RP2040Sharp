@@ -127,8 +127,12 @@ public sealed class Sdpcm
     private byte _lastHostSeq;   // sequence of the most recent host packet (control or data)
     // Credit window granted ahead of the host's current sequence. The host stalls when its TX
     // sequence reaches the granted credit; granting seq+window keeps it flowing. The host only
-    // accepts a credit advance of ≤20 per packet (cyw43_ll.c), so the window stays small.
-    private const int CreditWindow = 4;
+    // accepts a credit advance of ≤20 per packet (cyw43_ll.c), so the window stays below that. It must
+    // cover a burst of TCP segments: a host stalled for credit reads packets into the very buffer that
+    // holds the frame it is about to send (cyw43_sdpcm_send_common), so an Ethernet frame arriving during
+    // the stall overwrites that frame's headers and the segment is lost (with 4, one in about eight
+    // segments of a 20 kB response, each costing the guest a retransmission timeout).
+    private const int CreditWindow = 16;
     private byte GrantedCredit => (byte)(_lastHostSeq + CreditWindow);
 
     /// <summary>Raised when a packet is queued for the host (drives the F2-packet-available IRQ);

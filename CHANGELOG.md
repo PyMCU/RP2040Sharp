@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added: Wi-Fi port forwarding into the guest (`st_rp2040_wifi_forward_tcp`, `st_rp2040_wifi_poll`)
+
+A Pico W can serve the PC: `st_rp2040_wifi_forward_tcp(chip, 8080, 80)` listens on `127.0.0.1:8080` (loopback only)
+and relays each connection to the station's port 80 through the virtual gateway's TCP (`TcpForwarder`, several
+connections, MSS and window, retransmission in simulated time, FIN / half-close / RST both ways), so a browser
+reaches a MicroPython socket or Microdot server. Socket I/O runs on background threads; the guest side only on the
+caller's thread, in `st_rp2040_wifi_poll` or the run calls (at most once per millisecond of host time, nothing on a
+chip without forwards). The status struct grows at its end to 160 bytes (connection counters and the last
+connection's ports) and three events are new (`TCP_OPEN`, `TCP_CLOSE`, `TCP_REFUSED`). Destroy frees the ports.
+The virtual network grants SDPCM bus credit 16 packets ahead instead of 4: a driver stalled for credit reads an
+incoming frame into the buffer of the frame it is sending, which lost about one TCP segment in eight of a large
+response. See [docs/wireless.md](docs/wireless.md).
+
 ### New: native C ABI (`st_rp2040_*`)
 
 `src/RP2040Sharp.Native` exposes a Pico or Pico W (`ST_RP2040_CYW43`) to C/C++ hosts through

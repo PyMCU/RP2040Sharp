@@ -187,8 +187,9 @@ void st_rp2040_serial_write(st_rp2040 *chip, st_rp2040_serial_channel channel, c
  * A chip created with ST_RP2040_CYW43 has a virtual network behind its CYW43439: one access point the host
  * configures here, and a gateway at 192.168.4.1 that answers ARP and DHCP (leases from 192.168.4.2, mask /24).
  * The guest's own driver and TCP/IP stack run unmodified (MicroPython: network.WLAN(network.STA_IF).scan(),
- * .connect(ssid, key), .ifconfig()). Protocol level only: no RF, and nothing reaches the host's real network.
- * docs/native-abi.md describes the model and what later versions add (host port forwarding, outbound bridges).
+ * .connect(ssid, key), .ifconfig()). Protocol level only: no RF. Nothing reaches the host's real network except
+ * through the forwards the host asks for (st_rp2040_wifi_forward_tcp: listeners on 127.0.0.1 only).
+ * docs/wireless.md describes the model and what later versions add (outbound bridges).
  * Every call below on a chip without the CYW43439 is rejected (-1, last_error says why). */
 
 /* Join state of the station (st_rp2040_wifi_info.state). New values may be added: treat unknown ones as DOWN. */
@@ -209,7 +210,8 @@ enum {
 /* Link status. Set `size` to sizeof(st_rp2040_wifi_info) before calling: the library fills that many bytes at most and
  * sets `size` to the bytes it filled, so a host built against an older, shorter struct keeps working with a newer
  * library and the other way round. Fields are only ever added at the end; a reserved field may later get a meaning
- * whose value is 0 in every earlier version. 112 bytes in this version, the same on x86 and x64. */
+ * whose value is 0 in every earlier version. 160 bytes in this version (112 before the port forwarding fields),
+ * the same on x86 and x64. */
 typedef struct st_rp2040_wifi_info {
     uint32_t size;        /* in: bytes the caller provides (at least 8); out: bytes filled */
     int32_t  state;       /* st_rp2040_wifi_state */
@@ -228,6 +230,17 @@ typedef struct st_rp2040_wifi_info {
     uint64_t rx_frames;
     uint32_t changes;     /* status changes so far (each st_rp2040_wifi_event counts one) */
     uint32_t reserved2;
+    /* ---- 112: port forwarding (st_rp2040_wifi_forward_tcp); a library older than it fills `size` = 112 ---- */
+    uint32_t tcp_forwards;   /* host ports listened on */
+    uint32_t tcp_open;       /* forwarded connections accepted and not finished */
+    uint64_t tcp_accepted;   /* connections accepted from host clients since create */
+    uint64_t tcp_failed;     /* of them, refused: nothing listened on the guest port in time, or too many at once */
+    uint64_t tcp_to_guest;   /* payload bytes from the host clients into the guest */
+    uint64_t tcp_from_guest; /* payload bytes from the guest's servers to the host clients */
+    uint16_t tcp_host_port;  /* the connection of the last ST_RP2040_WIFI_EV_TCP_* event: forward's host port, */
+    uint16_t tcp_guest_port; /*   its guest port, */
+    uint16_t tcp_peer_port;  /*   and the host client's own port (127.0.0.1:tcp_peer_port) */
+    uint16_t reserved3;
 } st_rp2040_wifi_info;
 
 /* Events of the Wi-Fi callback. New values may be added: ignore unknown ones. */
@@ -237,10 +250,13 @@ typedef enum {
     ST_RP2040_WIFI_EV_LEASE      = 3, /* the gateway leased status->ipv4 to the station */
     ST_RP2040_WIFI_EV_LEAVE      = 4, /* the association ended: disconnect(), active(False) or WL_ON low */
     ST_RP2040_WIFI_EV_BAD_AUTH   = 5, /* a join with the wrong passphrase */
-    ST_RP2040_WIFI_EV_NO_NETWORK = 6  /* a join for an SSID no AP has */
+    ST_RP2040_WIFI_EV_NO_NETWORK = 6, /* a join for an SSID no AP has */
+    ST_RP2040_WIFI_EV_TCP_OPEN    = 7, /* a forwarded connection reached the guest's server (tcp_*_port say which) */
+    ST_RP2040_WIFI_EV_TCP_CLOSE   = 8, /* a forwarded connection ended (closed by either side, or reset) */
+    ST_RP2040_WIFI_EV_TCP_REFUSED = 9  /* a forwarded connection was given up: no server on the guest port within 10 s simulated */
 } st_rp2040_wifi_event;
 
-/* A Wi-Fi status change. Called when st_rp2040_run / st_rp2040_run_until_edge has finished running, on the same
+/* A Wi-Fi status change. Called when st_rp2040_run / _run_until_edge / _wifi_poll has finished its work, on the same
  * thread, once per event in the order they happened (after the pin callbacks of that call), never from the middle
  * of the emulation. `cycle` is the core-0 cycle at which it happened (st_rp2040_cycle_to_ps converts it); `status`
  * is the status right after it, valid during the call only. Running the chip from inside is rejected, as from the
@@ -259,6 +275,23 @@ int  st_rp2040_wifi_set_ap(st_rp2040 *chip, const char *ssid, const char *passph
 int  st_rp2040_wifi_status(st_rp2040 *chip, st_rp2040_wifi_info *status);
 /* cb = NULL disables (also from inside a callback). */
 void st_rp2040_set_wifi_callback(st_rp2040 *chip, st_rp2040_wifi_cb cb, void *user);
+
+/* Port forwarding: listen on 127.0.0.1:host_port (loopback only: nothing outside the PC reaches it) and relay every
+ * connection accepted there to the station's guest_port (192.168.4.2), the way a NAT router's port forward does: a
+ * browser on http://127.0.0.1:8080 reaches a MicroPython / Microdot server on port 80. The guest sees the connections
+ * come from the gateway, 192.168.4.1. Connections made before the guest listens wait for it (SYN retried) up to 10 s
+ * of simulated time, then are reset (ST_RP2040_WIFI_EV_TCP_REFUSED). host_port 0 picks a free port. guest_port 0
+ * removes the forward of host_port (its connections are reset). At most 16 forwards per chip; st_rp2040_destroy
+ * closes them. Returns the port listened on (1..65535), 0 for a removal, or -1 (bad handle, faulted chip, no
+ * CYW43439, a port out of range, already forwarded, or in use by another program: st_rp2040_last_error says which). */
+int  st_rp2040_wifi_forward_tcp(st_rp2040 *chip, int host_port, int guest_port);
+/* Move what the forwarded host sockets delivered (connections, bytes, closes) into the guest now, and run the
+ * forwarding timers; then deliver the Wi-Fi events raised. The socket I/O itself runs on background threads; this
+ * and the run calls are the only places the guest side is touched, always on the caller's thread. The run calls do
+ * it by themselves at most once per millisecond of host time (never on a chip without forwards); a host that runs
+ * the chip in short calls (Proteus) calls this once per step for the lowest latency. Not from inside a callback.
+ * Returns the forwarded connections open, or -1. */
+int  st_rp2040_wifi_poll(st_rp2040 *chip);
 
 /* The Wi-Fi types and values are those of silicontwin_rp2350.h: st_rp2040_wifi_info is its st_wifi_status (the name
  * differs because st_rp2040_wifi_status is the function), same layout, same ST_*WIFI_* numbers, so a host that drives

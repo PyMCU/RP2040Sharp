@@ -44,6 +44,7 @@ dotnet publish src/RP2040Sharp.Native -c Release -r win-x64 -p:StNativeLib=true 
 | `st_rp2040_adc_set_voltage` | Channels 0..3 (GP26..29); the temperature sensor reads 27 °C |
 | `st_rp2040_set_pin_callback`, `st_rp2040_set_serial_callback`, `st_rp2040_serial_write` | Channels UART0, UART1 and USB CDC: an emulated USB host (`UsbCdcHost`) enumerates the device and asserts DTR, so the MicroPython REPL works over CDC |
 | `st_rp2040_wifi_set_ap`, `st_rp2040_wifi_status`, `st_rp2040_set_wifi_callback` | Pico W (`ST_RP2040_CYW43`) only: the virtual access point and the link status, below |
+| `st_rp2040_wifi_forward_tcp`, `st_rp2040_wifi_poll` | Pico W only: port forwarding from `127.0.0.1:host_port` to a server on the station, and its pump ([wireless.md](wireless.md)) |
 
 Type names carry the chip (`st_rp2040_pin_cb`, `ST_RP2040_STATUS_OK`...) so that a translation unit
 can include both headers; values and callback signatures are those of the RP2350 header.
@@ -58,13 +59,14 @@ work as on the board; a wrong passphrase ends in `STAT_WRONG_PASSWORD` (-3), an 
 (-2). `st_rp2040_wifi_status` fills an `st_rp2040_wifi_info` (join state, DHCP address, gateway, netmask, MAC, SSID,
 RSSI, Ethernet bytes and frames each way; a caller-set `size`, so the struct can grow at the end) and
 `st_rp2040_set_wifi_callback` reports every change (scan, join, lease, leave, wrong passphrase, unknown SSID) when
-the run call that raised it has finished, never from inside the emulation. Protocol level only: no RF, and nothing
-reaches the host's network.
+the run call that raised it has finished, never from inside the emulation. Protocol level only: no RF, and the guest
+reaches nothing of the host's network; the host can open a way in with port forwards on 127.0.0.1
+(`st_rp2040_wifi_forward_tcp`, [wireless.md](wireless.md)).
 
-It is the RP2350 ABI with `st_rp2040_` names: the same functions, values and 112-byte layout (the struct is
+It is the RP2350 ABI with `st_rp2040_` names: the same functions, values and 160-byte layout (the struct is
 `st_wifi_status` there; here it is `st_rp2040_wifi_info` because `st_rp2040_wifi_status` is the function). The model,
-the compatibility rules and the planned host port forwarding (W2) and outbound bridges (W3) are described in
-RP2350Sharp's `docs/wireless.md`.
+the compatibility rules and the planned outbound bridges (W3) are described in RP2350Sharp's `docs/wireless.md`; port
+forwarding (W2) in [wireless.md](wireless.md).
 
 ### Pad-change cycles
 

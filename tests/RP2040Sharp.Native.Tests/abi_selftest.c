@@ -18,6 +18,29 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+typedef SOCKET sock_t;
+#define SOCK_BAD INVALID_SOCKET
+#define sock_close closesocket
+static void sock_nonblock(sock_t s) { u_long on = 1; ioctlsocket(s, FIONBIO, &on); }
+static int sock_wouldblock(void) { return WSAGetLastError() == WSAEWOULDBLOCK; }
+#else
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+typedef int sock_t;
+#define SOCK_BAD (-1)
+#define sock_close close
+static void sock_nonblock(sock_t s) { fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK); }
+static int sock_wouldblock(void) { return errno == EAGAIN || errno == EWOULDBLOCK; }
+#endif
+
 #include "silicontwin_rp2040.h"
 
 static int st_checks, st_failed;
@@ -143,9 +166,11 @@ static void wifi_arguments(void) {
     st_rp2040 *plain = st_rp2040_create_ex(0, ST_RP2040_BUS_ALL);
     st_rp2040 *w = st_rp2040_create_ex(0, ST_RP2040_BUS_ALL | ST_RP2040_CYW43);
     st_rp2040_wifi_cb cb = wifi_event;
-    CHECK(sizeof(st_rp2040_wifi_info) == 112 && offsetof(st_rp2040_wifi_info, ipv4) == 16 && offsetof(st_rp2040_wifi_info, mac) == 28 &&
+    CHECK(sizeof(st_rp2040_wifi_info) == 160 && offsetof(st_rp2040_wifi_info, ipv4) == 16 && offsetof(st_rp2040_wifi_info, mac) == 28 &&
           offsetof(st_rp2040_wifi_info, ssid) == 36 && offsetof(st_rp2040_wifi_info, tx_bytes) == 72 &&
-          offsetof(st_rp2040_wifi_info, changes) == 104, "st_rp2040_wifi_info layout: 112 bytes, documented offsets");
+          offsetof(st_rp2040_wifi_info, changes) == 104 && offsetof(st_rp2040_wifi_info, tcp_forwards) == 112 &&
+          offsetof(st_rp2040_wifi_info, tcp_accepted) == 120 && offsetof(st_rp2040_wifi_info, tcp_host_port) == 152,
+          "st_rp2040_wifi_info layout: 160 bytes, documented offsets");
     memset(&s, 0, sizeof s);
     s.size = sizeof s;
     CHECK(st_rp2040_wifi_set_ap(plain, "Proteus", NULL, 0, 0) == -1 && contains(st_rp2040_last_error(plain), "CYW43439"),
@@ -175,8 +200,113 @@ static void wifi_arguments(void) {
     st_rp2040_set_wifi_callback(w, cb, NULL);
     st_rp2040_set_wifi_callback(w, NULL, NULL);
     CHECK(st_rp2040_status(w) == ST_RP2040_STATUS_OK, "Pico W still OK after all of that");
+    {
+        int p, q;
+        CHECK(st_rp2040_wifi_forward_tcp(plain, 0, 80) == -1 && contains(st_rp2040_last_error(plain), "CYW43439"), "plain chip: wifi_forward_tcp -> -1 + reason");
+        CHECK(st_rp2040_wifi_poll(plain) == -1 && st_rp2040_wifi_poll(NULL) == -1, "wifi_poll: plain chip / NULL -> -1");
+        CHECK(st_rp2040_wifi_forward_tcp(w, -1, 80) == -1 && st_rp2040_wifi_forward_tcp(w, 65536, 80) == -1 &&
+              st_rp2040_wifi_forward_tcp(w, 0, 65536) == -1, "ports out of range -> -1");
+        CHECK(st_rp2040_wifi_forward_tcp(w, 8080, 0) == -1 && contains(st_rp2040_last_error(w), "not forwarded"), "removing a forward that is not there -> -1");
+        p = st_rp2040_wifi_forward_tcp(w, 0, 80);
+        CHECK(p > 0 && p <= 65535, "host_port 0: a free port");
+        CHECK(st_rp2040_wifi_forward_tcp(w, p, 81) == -1 && contains(st_rp2040_last_error(w), "already"), "the same port twice -> -1");
+        CHECK(st_rp2040_wifi_poll(w) == 0, "wifi_poll: nothing open");
+        memset(&s, 0, sizeof s);
+        s.size = sizeof s;
+        CHECK(st_rp2040_wifi_status(w, &s) == 0 && s.size == sizeof s && s.tcp_forwards == 1 && s.tcp_open == 0, "status counts the forward");
+        CHECK(st_rp2040_wifi_forward_tcp(w, p, 0) == 0, "guest_port 0 removes it");
+        q = st_rp2040_wifi_forward_tcp(w, p, 80);
+        CHECK(q == p, "the port can be forwarded again");
+    }
     st_rp2040_destroy(plain);
     st_rp2040_destroy(w);
+}
+
+/* Port forwarding: a MicroPython server on :80, reached by a socket of this process through 127.0.0.1, while the
+ * chip runs as the Proteus model runs it (guard 75, wifi_poll after each call). */
+static int wifi_forward_once(st_rp2040 *chip, int port, const uint32_t watch, char *resp, size_t cap) {
+    struct sockaddr_in a;
+    size_t got = 0;
+    int ok = 0;
+    sock_t sk = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    const char *req = "GET / HTTP/1.0\r\n\r\n";
+    if (sk == SOCK_BAD) return 0;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((unsigned short)port);
+    a.sin_addr.s_addr = htonl(0x7F000001u);
+    if (connect(sk, (struct sockaddr *)&a, sizeof a) != 0) { sock_close(sk); return 0; }   /* the listener's backlog accepts */
+    send(sk, req, (int)strlen(req), 0);
+    sock_nonblock(sk);
+    resp[0] = 0;
+    for (long i = 0; i < 2000000 && st_rp2040_status(chip) == ST_RP2040_STATUS_OK; i++) {
+        int n;
+        st_rp2040_run_until_edge(chip, 30000, 75, watch);
+        st_rp2040_wifi_poll(chip);
+        n = (int)recv(sk, resp + got, (int)(cap - 1 - got), 0);
+        if (n > 0) { got += (size_t)n; resp[got] = 0; continue; }
+        if (n == 0) { ok = 1; break; }                                    /* the server closed: whole response */
+        if (!sock_wouldblock()) break;
+    }
+    sock_close(sk);
+    return ok;
+}
+
+static void wifi_forward(const unsigned char *uf2, size_t len) {
+    static const char *server =
+        "import network,time,socket\nw=network.WLAN(network.STA_IF)\nw.active(True)\nw.connect('Proteus','proteus-pass')\n"
+        "while not w.isconnected():\n time.sleep_ms(20)\n"
+        "s=socket.socket()\ns.bind(('0.0.0.0',80))\ns.listen(2)\nprint('LISTENING')\n"
+        "while True:\n c,a=s.accept()\n c.recv(512)\n c.write(b'HTTP/1.0 200 OK\\r\\n\\r\\nHello from C')\n c.close()\n\x04";
+    const uint32_t watch = 0x3FFFFFFFu & ~((1u << 23) | (1u << 24) | (1u << 25) | (1u << 29));
+    char resp[1024], what[160];
+    st_rp2040_wifi_info s;
+    int stage = 0, port;
+    clock_t t0;
+#ifdef _WIN32
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+    g_wifi_events = g_wifi_lease = 0; g_wifi_mode = 0; g_wifi_cdc_len = 0; g_wifi_cdc[0] = 0;
+    g_wifi_chip = st_rp2040_create_ex(0, ST_RP2040_BUS_ALL | ST_RP2040_CYW43);
+    st_rp2040_set_serial_callback(g_wifi_chip, wifi_cdc, NULL);
+    CHECK(st_rp2040_wifi_set_ap(g_wifi_chip, "Proteus", "proteus-pass", 0, 0) == 0, "forward: WPA2 AP");
+    port = st_rp2040_wifi_forward_tcp(g_wifi_chip, 0, 80);
+    CHECK(port > 0, "forward: 127.0.0.1:<free port> -> 192.168.4.2:80");
+    CHECK(st_rp2040_load_uf2(g_wifi_chip, uf2, len) > 1000, "forward: Pico W image loads");
+    for (long i = 0; i < 400000 && stage < 2 && st_rp2040_status(g_wifi_chip) == ST_RP2040_STATUS_OK; i++) {
+        st_rp2040_run_until_edge(g_wifi_chip, 30000, 75, watch);
+        st_rp2040_wifi_poll(g_wifi_chip);
+        if (stage == 0 && contains(g_wifi_cdc, ">>> ")) {
+            st_rp2040_serial_write(g_wifi_chip, ST_RP2040_SERIAL_USB_CDC, (const uint8_t *)"\x01", 1);
+            stage = 1;
+        }
+        if (stage == 1 && contains(g_wifi_cdc, "raw REPL")) {
+            st_rp2040_serial_write(g_wifi_chip, ST_RP2040_SERIAL_USB_CDC, (const uint8_t *)server, strlen(server));
+            stage = 2;
+        }
+    }
+    for (long i = 0; i < 400000 && !contains(g_wifi_cdc, "LISTENING") && st_rp2040_status(g_wifi_chip) == ST_RP2040_STATUS_OK; i++) {
+        st_rp2040_run_until_edge(g_wifi_chip, 30000, 75, watch);
+        st_rp2040_wifi_poll(g_wifi_chip);
+    }
+    CHECK(contains(g_wifi_cdc, "LISTENING"), "forward: the guest server listens");
+    for (int round = 0; round < 2; round++) {
+        t0 = clock();
+        CHECK(wifi_forward_once(g_wifi_chip, port, watch, resp, sizeof resp) && contains(resp, "200 OK") && contains(resp, "Hello from C"),
+              round == 0 ? "forward: a socket on 127.0.0.1 gets the guest's response" : "forward: a second connection too");
+        snprintf(what, sizeof what, "request %d: %.0f ms wall", round + 1, (double)(clock() - t0) * 1000.0 / CLOCKS_PER_SEC);
+        printf("  %s\n", what);
+    }
+    for (int k = 0; k < 2000; k++) { st_rp2040_run_until_edge(g_wifi_chip, 30000, 75, watch); if (st_rp2040_wifi_poll(g_wifi_chip) == 0) break; }
+    memset(&s, 0, sizeof s);
+    s.size = sizeof s;
+    CHECK(st_rp2040_wifi_status(g_wifi_chip, &s) == 0 && s.tcp_accepted == 2 && s.tcp_failed == 0 && s.tcp_open == 0 &&
+          s.tcp_to_guest > 0 && s.tcp_from_guest > 0, "forward: status counts two connections, both finished");
+    st_rp2040_destroy(g_wifi_chip);
+    g_wifi_chip = st_rp2040_create_ex(0, ST_RP2040_BUS_ALL | ST_RP2040_CYW43);
+    CHECK(st_rp2040_wifi_forward_tcp(g_wifi_chip, port, 80) == port, "forward: destroy freed the port (a new chip takes it)");
+    st_rp2040_destroy(g_wifi_chip);
 }
 
 /* MicroPython (Pico W) types a scan + connect over the CDC, run as the Proteus model runs it (guard 75). */
@@ -331,6 +461,7 @@ int main(int argc, char **argv) {
             wifi_join(wfw, wlen, 0, "wrong-pass");
             wifi_join(wfw, wlen, 1, "proteus-pass");
             wifi_join(wfw, wlen, 2, "proteus-pass");
+            wifi_forward(wfw, wlen);
             free(wfw);
         }
     } else puts("wifi (firmware): SKIPPED (pass a Pico W .uf2 as the second argument)");
