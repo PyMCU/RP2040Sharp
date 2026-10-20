@@ -37,6 +37,8 @@ internal sealed class DiffRun : IDisposable
         Chip = Exports.Lookup(H)!;
         Chip.DeferPeripheralTicks = mode != SliceMode.Eager;
         Chip.SleepingStretches = Chip.AwakeBoundedRuns = mode == SliceMode.Fast;
+        // The eager reference keeps a stalled PIO state machine due at every divider edge, re-run on every step.
+        Chip.Machine.Pio0.StalledDeadlines = Chip.Machine.Pio1.StalledDeadlines = mode != SliceMode.Eager;
         // The flash unique ID is random per machine (machine.unique_id(), MicroPython seeds from it): pin it.
         Chip.Machine.Ssi.UniqueId = [0xE6, 0x60, 0x58, 0x38, 0x83, 0x4F, 0x2A, 0x2D];
         // So is the CYW43439's MAC (a process-wide counter).

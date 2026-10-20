@@ -153,7 +153,8 @@ public sealed class PioPeripheral : IMemoryMappedDevice, IDeferrableTickable
     /// <summary>
     /// Cycles until the next divider edge of an enabled state machine (a step). Before that a tick only advances the
     /// block clock and re-levels the interrupt lines, unless they are about to change or the IRQ latch is behind the
-    /// flags: then the next sweep.
+    /// flags: then the next sweep. A state machine that waits on an access (<see cref="WaitsOnAccess"/>) has no step of
+    /// its own coming; with all of them waiting, none (<see cref="long.MaxValue"/>).
     /// </summary>
     public long CyclesUntilEvent()
     {
@@ -162,7 +163,7 @@ public sealed class PioPeripheral : IMemoryMappedDevice, IDeferrableTickable
         for (var s = 0; s < SM_COUNT; s++)
         {
             var sm = _sm[s];
-            if (!sm.Enabled) continue;
+            if (!sm.Enabled || StalledDeadlines && WaitsOnAccess(sm)) continue;
             var div = Divisor(sm.ClkDiv);
             // smallest c with (_clkAccum + 256 c) / div > DivEdgesSeen
             var need = ((sm.DivEdgesSeen + 1) * div - _clkAccum + 255) / 256;
@@ -171,8 +172,103 @@ public sealed class PioPeripheral : IMemoryMappedDevice, IDeferrableTickable
         return Math.Max(0, best);
     }
 
-    /// <summary>Owed cycles with no divider edge among them: only the block clock moves.</summary>
-    public void CatchUp(long cycles) => _clkAccum += cycles * 256;
+    /// <summary>Owed cycles with no step among them: only the block clock moves, and the divider edges of the state
+    /// machines that wait on an access pass (each would have re-run its stalled instruction with nothing to show).</summary>
+    public void CatchUp(long cycles)
+    {
+        _clkAccum += cycles * 256;
+        if (!StalledDeadlines) return;
+        for (var s = 0; s < SM_COUNT; s++)
+        {
+            var sm = _sm[s];
+            if (sm.Enabled && WaitsOnAccess(sm)) sm.DivEdgesSeen = _clkAccum / Divisor(sm.ClkDiv);
+        }
+    }
+
+    /// <summary>A state machine stalled on something only an access can release has no deadline (see
+    /// <see cref="WaitsOnAccess"/>). Off, it is due at its next divider edge as a running one, as before (the
+    /// differential tests' eager reference).</summary>
+    public bool StalledDeadlines { get; set; } = true;
+
+    /// <summary>
+    /// The SM re-runs a stalled instruction on every divider edge with nothing to show for it until a FIFO, a register
+    /// or an IRQ flag changes: an OUT on autopull or a blocking PULL with the TX FIFO empty, a blocking PUSH or an
+    /// autopush with the RX FIFO full, a WAIT on an IRQ flag, an IRQ WAIT whose flag is still set. The CPU and DMA reach
+    /// those through the bus bridge (which syncs the block and asks for its next event again), another SM only by
+    /// stepping, and a running SM keeps the block due at its own edges. A re-run also writes the instruction's side-set
+    /// and the sticky FDEBUG stall bit, so it counts only while those writes would change nothing. The condition is
+    /// tested as it stands (an IRQ write releases a wait without re-running it). GPIO and pin waits are not quiet (the
+    /// pads move without telling the block), nor is a pending delay.
+    /// </summary>
+    private bool WaitsOnAccess(PioStateMachine sm)
+    {
+        if (!sm.Stalled || sm.DelayCounter > 0) return false;
+        if (sm.AutopushPending) return sm.RxFifo.Count >= sm.RxDepth;   // the re-run only retries the push
+        if (sm.PC >= INSTR_COUNT) return false;
+        var instr = _instrMem[sm.PC];
+        bool txStall = ((_fdebug >> (24 + sm.SmIndex)) & 1) != 0, rxStall = ((_fdebug >> sm.SmIndex) & 1) != 0;
+        bool quiet;
+        switch (instr >> 13)
+        {
+            case OP_OUT:
+                quiet = sm.AutopullEnabled && (32u - sm.OsrCount) >= (uint)sm.AutopullThreshold && sm.TxFifo.Count == 0 && txStall;
+                break;
+            case OP_PUSH_PULL:
+                quiet = (instr & 0x20) != 0 &&
+                        ((instr & 0x80) != 0 ? sm.TxFifo.Count == 0 && txStall : sm.RxFifo.Count >= sm.RxDepth && rxStall);
+                break;
+            case OP_WAIT:
+            {
+                if (((instr >> 5) & 3) != 2) { quiet = false; break; }
+                var index = (uint)(instr & 0x1F);
+                var flag = (index & 0x10) != 0 ? (int)((index & 0xC) | (((index & 3) + (uint)sm.SmIndex) & 3)) : (int)(index & 0x7);
+                quiet = ((_irq >> flag) & 1) != ((uint)instr >> 7 & 1);
+                break;
+            }
+            case OP_IRQ:
+            {
+                if ((instr & 0x60) != 0x20) { quiet = false; break; }   // IRQ WAIT (set and wait), not a clear
+                var index = (uint)(instr & 0x1F);
+                var flag = (index & 0x10) != 0 ? (int)((index & 0xC) | (((index & 3) + (uint)sm.SmIndex) & 3)) : (int)(index & 0x7);
+                quiet = ((_irq >> flag) & 1) != 0;   // the re-run sets it again: no change while it is set
+                break;
+            }
+            default: quiet = false; break;
+        }
+        return quiet && SidesetSettled(sm, instr);
+    }
+
+    // ApplySideset(sm, instr) would leave the SM's pins and the block's pad drive as they are.
+    private bool SidesetSettled(PioStateMachine sm, ushort instr)
+    {
+        var sidesetCount = (int)sm.SidesetCount;
+        if (sidesetCount == 0) return true;
+        var field = (instr >> 8) & 0x1F;
+        int sideValue, pinCount;
+        if (sm.SideEn != 0)
+        {
+            if ((field & 0x10) == 0) return true;
+            sideValue = (field >> (5 - sidesetCount)) & ((1 << (sidesetCount - 1)) - 1);
+            pinCount = sidesetCount - 1;
+        }
+        else
+        {
+            sideValue = (field >> (5 - sidesetCount)) & ((1 << sidesetCount) - 1);
+            pinCount = sidesetCount;
+        }
+        if (pinCount <= 0) return true;
+        var sideBase = (int)sm.SidesetBase;
+        var pinMask = pinCount < 32 ? ((1u << pinCount) - 1) << sideBase : 0xFFFFFFFFu;
+        bool dirs = sm.SidePinDir != 0;
+        var cur = dirs ? sm.GpioPinDirs : sm.GpioPins;
+        var next = cur;
+        for (var bit = 0; bit < pinCount; bit++)
+        {
+            var pin = (sideBase + bit) & 0x1F;
+            next = (next & ~(1u << pin)) | ((uint)((sideValue >> bit) & 1) << pin);
+        }
+        return next == cur && ((dirs ? _dbgPadOe : _dbgPadOut) & pinMask) == (cur & pinMask);
+    }
 
     /// <summary>What a tick without a step does: <see cref="EndTick"/> (the latch and the interrupt heartbeat).</summary>
     public void SkipTick() => EndTick();
@@ -217,6 +313,10 @@ public sealed class PioPeripheral : IMemoryMappedDevice, IDeferrableTickable
     {
         _clkAccum += cycles * 256;
 
+        // Every enabled SM waits on an access: none can release another inside this tick, so every round would re-run
+        // stalled instructions with nothing to show. Their edges pass (below); no round runs.
+        bool allWait = StalledDeadlines;
+
         var maxSteps = 0L;
         for (var s = 0; s < SM_COUNT; s++)
         {
@@ -231,13 +331,14 @@ public sealed class PioPeripheral : IMemoryMappedDevice, IDeferrableTickable
             sm.StallValid = false;
 
             if (!sm.Enabled) { _stepsBuf[s] = 0; continue; }
+            if (allWait && !WaitsOnAccess(sm)) allWait = false;
 
             var edgesNow = _clkAccum / Divisor(sm.ClkDiv);
             _stepsBuf[s] = edgesNow - sm.DivEdgesSeen;
             sm.DivEdgesSeen = edgesNow;
             if (_stepsBuf[s] > maxSteps) maxSteps = _stepsBuf[s];
         }
-        return maxSteps;
+        return allWait ? 0 : maxSteps;
     }
 
     /// <summary>Re-base a SM's edge count to the current phase, so enabling it (or changing its

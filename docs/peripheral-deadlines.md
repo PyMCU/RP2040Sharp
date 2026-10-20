@@ -42,7 +42,7 @@ have it (`Sync`, then `Touch` asks for its next event again):
 |---|---|
 | TIMER | the nearest armed alarm (one already due: the next microsecond); a sync charges the counter from the core-0 cycle of the last sweep (`SweepClock`), as the per-sweep tick did, so `TIMERAWL` reads are unchanged |
 | PWM | the first counter step, over the enabled free-running or gated-high slices, that wraps, turns at TOP or changes a channel output (8.4 dividers with the fraction carried) |
-| PIO | the next divider edge of an enabled state machine; the next sweep if its interrupt lines are about to change or the IRQ latch is behind the flags. A put-off tick still runs its heartbeat (`SkipTick` = `EndTick`) |
+| PIO | the next divider edge of an enabled state machine that does not wait on an access ([stalled state machines](#stalled-pio-state-machines)); the next sweep if its interrupt lines are about to change or the IRQ latch is behind the flags. A put-off tick still runs its heartbeat (`SkipTick` = `EndTick`) |
 | RTC, watchdog, ADC | the next second, the countdown reaching zero, the next START_MANY conversion |
 | USB | a SETUP to raise or a SOF bit to clear (next sweep), the next SOF, the next endpoint completion |
 | DMA, SPI | the next sweep while a transfer is paused on the beat budget / the TX FIFO holds words |
@@ -111,11 +111,56 @@ traces line by line.
   with `sleep_us(200)`: identical transcript with arrival cycles, 445-457 pad events, everything else.
 - `MicroPythonDifferentialTests.Pico_W_boot_and_wlan_are_the_same_in_every_mode` (1): the Pico W
   image with `ST_RP2040_CYW43`, boot and `WLAN(STA_IF).active(True)` at guard 75 (82 k calls).
+- `PicoWIdleTests.Wlan_idle_is_the_same_in_every_mode` (3): the same bring-up in 30,000-instruction
+  calls, then 100 ms of the idle REPL taking `1+1`, `w.active()`, `w.status()`, `w.ifconfig()`,
+  `w.config('mac')`, a 60-character print and `time.sleep_ms(3)`, at guard 75 with the Proteus symbol's
+  pads watched (no GP23/24/25/29) and with every pad, and at guard 300: 26,806-78,113 pad events.
 
 The flash unique ID (`SsiPeripheral.UniqueId`) and the CYW43439 MAC are random or per-process per
 machine; the harness pins them so two machines can be compared. The same comparison found
 `RoscPeripheral.RANDOMBIT` shared by every machine in the process (now per machine): pico_rand seeds
 from it, so the second Pico W run in a process brought WLAN up 2 cycles later than the first.
+
+## Stalled PIO state machines
+
+With WLAN up, the Pico W's idle REPL ran at about 1.5 host s per simulated s in Proteus' loop
+(run_until_edge, guard 75, 30,000-instruction calls): no sleeping stretch at all and 166,808 plain
+slices in 200 ms. cyw43's gSPI state machine (PIO1 SM0, CLKDIV 2) waits between transfers in
+`out pins, 1 side 0` on autopull with its TX FIFO empty, so PIO's next event was the next divider
+edge, two cycles away, on every sweep: both cores asleep, and `SweptCyclesUntilEvent` never let a
+stretch start.
+
+`PioPeripheral.WaitsOnAccess`: a state machine stalled on something only an access or another
+state machine can release re-runs the stalled instruction at every divider edge with nothing to show
+for it. That is an OUT on autopull or a blocking PULL with the TX FIFO empty, a blocking PUSH or a
+pending autopush with the RX FIFO full, a WAIT on an IRQ flag, and an IRQ WAIT whose flag is still set
+(here a re-run raises it again). The condition is tested as it stands, not from the `Stalled` flag (an
+IRQ write releases a WAIT without re-running it), and only while the re-run would write nothing new: its
+side-set already on the SM's pins and in the block's pad drive (two machines side-setting one pad to
+different levels are not quiet), and FDEBUG's sticky TXSTALL / RXSTALL already set (a cleared one is set
+again by the next re-run). GPIO and pin waits are not quiet: the pads move without telling the block.
+
+- `CyclesUntilEvent` leaves such a machine out (none left: `long.MaxValue`).
+- `CatchUp` (the bridge's sync before an access) moves their divider edges along with the block clock:
+  each edge was a re-run that changed nothing. The access then asks for the next event again, so a TXF
+  write, an RX FIFO read or an IRQ write makes the machine due at its next edge.
+- A tick in which every enabled machine waits runs no round (their edges still pass).
+- `PioPeripheral.StalledDeadlines` (on) turns all three off; the differential tests' eager reference
+  runs with it off, so they compare against every re-run at every edge.
+
+`PioStalledDeadlineTests` (8): a block deferred the way `DeferredTick` defers it against the same
+block ticked on every sweep, with random sweep sizes and CPU accesses: OUT on autopull fed by TXF
+writes (two seeds), a blocking PULL with FDEBUG cleared now and then, autopush drained by RXF reads,
+WAIT IRQ released by IRQ_FORCE, IRQ WAIT and IRQ clears, two machines handing an IRQ over; identical pad
+changes at the same sweep, SM state and registers at every access, RX words. A GPIO wait and two
+conflicting side-sets stay due at every edge. (Dropping the TXSTALL condition fails the PULL case.)
+
+Idle REPL after `active(True)`, 200 ms, warm JIT, `PicoWIdleTests.Idle_after_wlan_active_probe`:
+
+| | host s per simulated s | sleeping stretches | plain slices |
+|---|---:|---:|---:|
+| before (`StalledDeadlines` off) | 1.481 | 0 | 166,808 |
+| after | 0.010 | 24.8 M of 25.0 M cycles | 1,234 |
 
 ## Measurements
 
@@ -130,5 +175,6 @@ See the tables in [native-abi.md](native-abi.md#throughput).
   event-bounded guard; `PinLevelDifferentialTests` (75 cases) compares them in the three modes.
 - Core 1 awake: plain slices (bounded runs need core 1 unlaunched or asleep). Core 0 asleep with
   core 1 awake: plain slices.
-- PIO with an enabled state machine at a small divider: its next event is every edge, so it is
-  ticked every sweep and bounded runs end at every slice.
+- PIO with a running state machine at a small divider: its next event is every edge, so it is
+  ticked every sweep and bounded runs end at every slice. (A stalled one waiting on an access no
+  longer is: [stalled state machines](#stalled-pio-state-machines).)
