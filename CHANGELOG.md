@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: CPSIE/CPSID are ignored in unprivileged Thread mode
+
+ARMv6-M executes CPS only when `CurrentModeIsPrivileged()`. The core applied it from unprivileged code too, so a
+task running with `CONTROL.nPRIV = 1` could mask or unmask interrupts. MRS and MSR already honoured privilege;
+new tests pin that, and that MRS of every xPSR view reads EPSR (the T bit) as zero and IEPSR as IPSR.
+
 ### Added: Wi-Fi port forwarding into the guest (`st_rp2040_wifi_forward_tcp`, `st_rp2040_wifi_poll`)
 
 A Pico W can serve the PC: `st_rp2040_wifi_forward_tcp(chip, 8080, 80)` listens on `127.0.0.1:8080` (loopback only)
