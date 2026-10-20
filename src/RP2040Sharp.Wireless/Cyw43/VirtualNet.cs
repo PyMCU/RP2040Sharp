@@ -7,7 +7,7 @@ using System.Collections.Generic;
 namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
-/// A minimal virtual network behind the emulated radio: an L2/L3 gateway that answers ARP and serves
+/// A minimal virtual network behind the CYW43439 gSPI host-protocol translation: an L2/L3 gateway that answers ARP and serves
 /// DHCP so a CYW43439 STA that associates actually gets an IP (link status UP), the prerequisite for
 /// real sockets / Microdot. Ethernet frames the guest transmits arrive via <see cref="Sdpcm.OnHostEthernet"/>;
 /// replies go back through <see cref="Sdpcm.EnqueueEthernet"/>. This is the "virtualise behind the

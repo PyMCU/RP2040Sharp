@@ -7,8 +7,9 @@ using RP2040Sharp.Wireless.Ble;
 namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
-/// Emulated Infineon CYW43439 Wi-Fi chip, modelled at its host-visible gSPI register/protocol
-/// boundary (firmware-version independent). This is the growing root: today it answers the F0 bus
+/// The Infineon CYW43439's host interface, translated: the gSPI register/protocol boundary its host driver talks
+/// to (firmware-version independent), answered by a virtual network rather than by an emulation of the chip. The
+/// radio firmware the host downloads is parked, never executed; there is no RF and no chip internals. This is the growing root: today it answers the F0 bus
 /// layer — the byte-swapped startup handshake (the SPI_READ_TEST_REGISTER → 0xFEEDBEAD probe and the
 /// SPI_BUS_CONTROL mode switch). F1 backplane, firmware download and the F2/SDPCM/WLC layers attach
 /// on top of the same command decode.
@@ -125,7 +126,7 @@ public sealed class Cyw43439Device
     private uint _window;                              // backplane window base (addr & ~0x7FFF)
     private readonly Backplane _chip = new();
 
-    /// <summary>The emulated Bluetooth LE controller (HCI). Wire its <see cref="HciController.Radio"/>
+    /// <summary>The virtual Bluetooth LE controller behind the shared BT HCI bus (not the chip's own). Wire its <see cref="HciController.Radio"/>
     /// to a <see cref="VirtualBleRadio"/> to advertise/scan/connect against other devices.</summary>
     public readonly HciController Ble = new();
     /// <summary>The Bluetooth HCI-over-gSPI shared-bus transport (routes BT regs/rings in the backplane).</summary>

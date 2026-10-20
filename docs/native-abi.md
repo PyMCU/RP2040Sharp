@@ -51,7 +51,8 @@ can include both headers; values and callback signatures are those of the RP2350
 
 ### Wi-Fi (Pico W)
 
-With `ST_RP2040_CYW43` the CYW43439 has a virtual network behind it: one access point the host sets with
+With `ST_RP2040_CYW43` the core speaks the CYW43439's gSPI host protocol and translates it into a virtual network
+(the CYW43439 is not emulated: its radio firmware is parked, never executed; no RF): one access point the host sets with
 `st_rp2040_wifi_set_ap(chip, ssid, passphrase, channel, rssi)` (open with a NULL or empty passphrase, else WPA2-PSK),
 and a gateway at `192.168.4.1/24` that answers ARP, DHCP (the station gets `192.168.4.2`) and DNS (NXDOMAIN). The
 guest's own driver and lwIP run unmodified, so MicroPython's `WLAN.scan()`, `.connect(ssid, key)` and `.ifconfig()`

@@ -6,7 +6,7 @@ using System.Collections.Generic;
 namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
-/// A pure layer-2 switch joining several emulated CYW43439 stations on one virtual air — no gateway
+/// A pure layer-2 switch joining several CYW43439 stations (gSPI protocol translation) on one virtual air — no gateway
 /// services of its own. Used for the STA+AP topology where one Pico runs in AP mode (and provides its
 /// own DHCP) while another joins as a STA: frames are forwarded between chips by destination MAC, with
 /// each device delivered on the interface it actually uses (STA=0 / AP=1), so the guest TCP/IP stacks

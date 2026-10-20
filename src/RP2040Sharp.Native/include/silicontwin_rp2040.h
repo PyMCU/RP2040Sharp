@@ -184,8 +184,8 @@ void st_rp2040_set_serial_callback(st_rp2040 *chip, st_rp2040_serial_cb cb, void
 void st_rp2040_serial_write(st_rp2040 *chip, st_rp2040_serial_channel channel, const uint8_t *data, size_t len);
 
 /* ---- Wi-Fi (Pico W, ST_RP2040_CYW43) --------------------------------------------------------------------------
- * A chip created with ST_RP2040_CYW43 has a virtual network behind its CYW43439: one access point the host
- * configures here, and a gateway at 192.168.4.1 that answers ARP and DHCP (leases from 192.168.4.2, mask /24).
+ * A chip created with ST_RP2040_CYW43 speaks the CYW43439's gSPI host protocol to a virtual network (the radio firmware
+ * the guest downloads is parked, never executed; no RF, no chip internals): one access point the host configures here, and a gateway at 192.168.4.1 that answers ARP and DHCP (leases from 192.168.4.2, mask /24).
  * The guest's own driver and TCP/IP stack run unmodified (MicroPython: network.WLAN(network.STA_IF).scan(),
  * .connect(ssid, key), .ifconfig()). Protocol level only: no RF. Nothing reaches the host's real network except
  * through the forwards the host asks for (st_rp2040_wifi_forward_tcp: listeners on 127.0.0.1 only).

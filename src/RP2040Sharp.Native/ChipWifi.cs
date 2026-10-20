@@ -31,7 +31,8 @@ internal unsafe struct WifiStatus
 }
 
 /// <summary>
-/// The Pico W's radio as a C host sees it (ST_RP2040_CYW43): the CYW43439 on its pads, a virtual LAN behind it (a
+/// The Pico W's radio as a C host sees it (ST_RP2040_CYW43): the CYW43439's gSPI host protocol on its pads, translated into a
+/// virtual LAN (no chip emulation: the radio firmware is parked, never executed; a
 /// gateway with DHCP on 192.168.4.0/24, <see cref="VirtualNet"/>) and the access point the host configures with
 /// st_rp2040_wifi_set_ap. It follows what the station does (scan, join, wrong passphrase, unknown SSID, leave, DHCP
 /// lease, WL_ON power) into a status a host can poll and events it delivers after each run, never from inside one.

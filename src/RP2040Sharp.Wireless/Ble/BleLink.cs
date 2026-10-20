@@ -4,7 +4,7 @@
 namespace RP2040Sharp.Wireless.Ble;
 
 /// <summary>
-/// An established LE connection between two emulated controllers. Each side has its own connection
+/// An established LE connection between two virtual controllers. Each side has its own connection
 /// handle; ACL data sent by one is relayed to the other with the peer's handle rewritten in, so the
 /// guests' L2CAP/ATT/GATT layers talk to each other unmodified over the virtual radio.
 /// </summary>

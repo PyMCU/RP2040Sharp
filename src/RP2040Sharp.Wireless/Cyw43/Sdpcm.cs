@@ -89,7 +89,7 @@ public sealed class Sdpcm
     /// frames and bytes queued for the host (from the air). Monotonic.</summary>
     public long TxFrames, TxBytes, RxFrames, RxBytes;
 
-    /// <summary>A Wi-Fi network the emulated chip "sees" on the air. Populated by the virtual radio
+    /// <summary>A Wi-Fi network the virtual network presents to the host's scans. Populated by the virtual radio
     /// (Fase 5/6) so <c>scan()</c> returns real BSSes; an empty list yields an empty scan.</summary>
     /// <summary>
     /// An access point in the virtual air. <paramref name="Secured"/> marks it WPA2-PSK, which makes the
@@ -427,7 +427,7 @@ public sealed class Sdpcm
                     WriteString(buf, "CLM API: 12.2, Data: RP2040Sharp-virtual");
                     break;
                 case "ver":
-                    WriteString(buf, "wl0: RP2040Sharp virtual CYW43439 (emulated)");
+                    WriteString(buf, "wl0: RP2040Sharp virtual CYW43439 (gSPI protocol translation)");
                     break;
                 // Intentionally zeroed (count 0). clmload_status=0 is DLOAD_STATUS_SUCCESS, which the
                 // firmware needs after streaming the CLM blob; the event/mcast lists are legitimately empty.
