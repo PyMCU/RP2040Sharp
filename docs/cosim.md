@@ -122,9 +122,18 @@ iOS no-JIT constraints.
   `RP2350CoSim(machine, pinCount, attachPads, syncToNow)`), and so do the probes (`StretchedSlices`, `BoundedSlices`,
   `PlainSlices`, `CutSlices` against `SleepStretches`, `AwakeRuns`, ...). `Run(n)` slices at `Quantum` (512) from the
   call's start; RP2350's runs `RunChunk` (1024) chunks on absolute boundaries.
-- `SyncForHostInput` syncs inside a sweep as well (the RP2040 sweep cannot tick a cycle twice: a peripheral is
-  marked applied before its tick runs), where RP2350 returns; inside a CPU run it syncs to the sweeps so far and
-  does not cut the run.
+- `SyncForHostInput`: one contract on both chips, two mechanisms. The contract: the cycles already run see the old
+  level, the eager machine's state at that point is where the input meets the peripherals, and no cycle is ticked
+  twice. RP2350 flushes its coalesced accumulators outside a run or a plain slice, turns the input into a peripheral
+  write that ends a bounded or cut run, and does nothing inside a sweep (the accumulators are zeroed before it sweeps).
+  RP2040 has no accumulators: a sweep marks each peripheral applied before it ticks it, so `SyncPeripherals` inside a
+  sweep brings the others to `SweptFor`, which is where the eager machine has them, and inside a bounded run it bumps
+  `ScheduleEpoch`, so the run plans again at the next slice end instead of ending. Decided by
+  `RP2040McuLockstepTests.Host_input_answered_from_the_pin_event_matches_the_eager_machine`: a wire answering a SIO
+  edge (plain slices and bounded runs) and a PWM counter edge (from inside the PWM's own tick) into a PWM gate gives the
+  eager machine's counter, GPIO_IN samples, events and cycles with the RP2040 rule as it is. The accumulate-then-zero
+  bug RP2350 had in its fine Hazard3 ticks has no RP2040 counterpart: both sweeps (eager and `DeferredTick.OnSweep`)
+  set `Applied` before they call `Tick`.
 - Namespace `RP2040.CoSim`, as RP2350's `RP2350.CoSim`. `ClockTimeline` is RP2350's (segments of constant clk_sys,
   `CycleToPs`, `PsIn`, `NoteWrite`, `Track`); on the RP2040 it keeps one segment (`RP2040CoSim.Clock`). The mapping of
   the peripherals' swept cycles onto core 0's clock is `SweepTimeline`, which RP2350 does not need (its peripherals

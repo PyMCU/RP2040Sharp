@@ -242,6 +242,77 @@ public class RP2040McuLockstepTests(ITestOutputHelper output)
         Assert.Equal(Go(false), Go(true));
     }
 
+    // ── Host inputs answered from inside a run ──────────────────────────────────────────────────────
+
+    // GP3 is PWM slice 1's B input, gating its counter (DIVMODE 1, TOP 0xFFFF): how far the counter is is the time the
+    // gate was high, so a host input applied at the wrong time shows in CTR. The loop folds CTR and GPIO_IN into R7
+    // (r7 = r7 << 1 ^ value) on every pass and toggles GP2 (SIO) every 64 passes. With `pwmEdges`, GP0 is PWM slice 0's
+    // A output (TOP 999, CC 300), whose edges are reported from inside the sweep that steps the counter.
+    private static byte[] GatedCounterProgram(bool pwmEdges)
+    {
+        const uint Sio = 0xD0000000, Slice1 = PwmBase + 0x14;
+        var a = new ThumbAsm()
+            .Ldr(0, IoBank0 + 2 * 8 + 4).Movs(1, 5).Str(1, 0, 0)           // GP2: SIO
+            .Ldr(0, IoBank0 + 3 * 8 + 4).Ldr(1, 0x2004).Str(1, 0, 0);       // GP3: PWM (slice 1 B), OEOVER disable: an input
+        if (pwmEdges)
+            a.Ldr(0, IoBank0 + 4).Movs(1, 4).Str(1, 0, 0)                             // GP0: PWM (slice 0 A)
+             .Ldr(3, PwmBase).Ldr(1, 999).Str(1, 3, 0x10).Ldr(1, 300).Str(1, 3, 0x0C).Movs(1, 1).Str(1, 3, 0);
+        return a
+            .Ldr(2, Slice1).Ldr(1, 0xFFFF).Str(1, 2, 0x10).Movs(1, 0x11).Str(1, 2, 0)   // TOP, CSR = EN | DIVMODE gated
+            .Ldr(0, Sio).Movs(1, 4).Str(1, 0, 0x24)                                         // GPIO_OE_SET GP2
+            .Movs(4, 0).Movs(7, 0)
+            .Label("loop").Adds(4, 1).Lsls(5, 4, 26).B(ThumbAsm.NE, "skip").Movs(1, 4).Str(1, 0, 0x1C)   // GPIO_XOR GP2
+            .Label("skip").Ldr(5, 2, 8).Lsls(7, 7, 1).Eors(7, 5).Ldr(5, 0, 4).Lsls(7, 7, 1).Eors(7, 5).B("loop")
+            .Build();
+    }
+
+    // A bit-level device answering the chip from the PinChanged event, as a wire: GP3 follows GP2 (a SIO write, so the
+    // handler runs inside a CPU run: a plain slice, a bounded run) or GP0 (a PWM counter step, so it runs inside the
+    // sweep, from the PWM's own tick). RP2040Machine.SyncForHostInput brings the deferred peripherals to the sweeps so
+    // far, which is where the eager machine has them at that point, so the deferred machine gives the eager machine's
+    // counter, GPIO_IN samples, events and cycles, whatever the step: 750-cycle steps (one slice each) and 125,000-cycle
+    // steps in 512-instruction slices (bounded runs of core 0 between the edges).
+    [Theory]
+    [InlineData(false, 750, 16_384)]
+    [InlineData(false, 125_000, 512)]
+    [InlineData(true, 750, 16_384)]
+    [InlineData(true, 125_000, 512)]
+    public void Host_input_answered_from_the_pin_event_matches_the_eager_machine(bool fromSweep, int step, int slice)
+    {
+        const ulong Gp0 = 1UL << 0, Gp2 = 1UL << 2, Gp3 = 1UL << 3;
+        ulong from = fromSweep ? Gp0 : Gp2;
+        (uint R7, uint Ctr, long Cycles, List<(long, ulong, ulong, ulong)> Events, long Bounded) Go(bool defer)
+        {
+            using var mcu = Boot(defer, GatedCounterProgram(fromSweep));
+            mcu.MaxSliceInstructions = slice;
+            var bank = mcu.Banks[0];
+            var events = new List<(long, ulong, ulong, ulong)>();
+            bank.PinChanged += (in PinChange e) =>
+            {
+                events.Add((e.Cycle, e.Changed, e.OutputEnable, e.Levels));
+                if (e.Affects(from)) bank.SetInputs(Gp3, (e.Levels & from) != 0 ? Gp3 : 0);
+            };
+            int steps = (int)(3_000_000L / step);
+            for (int i = 0; i < steps; i++) mcu.Run(step);
+            var m = mcu.Machine;
+            var cosim = (RP2040.CoSim.RP2040CoSim)typeof(RP2040Mcu)
+                .GetField("_cosim", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(mcu)!;
+            return (m.Cpu.Registers.R7, m.Bus.ReadWord(PwmBase + 0x14 + 8), mcu.Cycles, events, cosim.BoundedSlices);
+        }
+        var eager = Go(false);
+        var deferred = Go(true);
+        int answered = eager.Events.Count(e => (e.Item2 & from) != 0);
+        output.WriteLine($"fromSweep={fromSweep} step {step}: {eager.Events.Count} events ({answered} answered), CTR {eager.Ctr}, " +
+                         $"bounded slices (deferred) {deferred.Bounded}");
+        Assert.True(answered > 100, "the wire answered");
+        Assert.True(eager.Ctr != 0, "the gate opened");
+        if (!fromSweep && step > 100 * slice) Assert.True(deferred.Bounded > 0, "bounded runs between the edges");
+        Assert.Equal(eager.Events, deferred.Events);
+        Assert.Equal(eager.Ctr, deferred.Ctr);
+        Assert.Equal(eager.R7, deferred.R7);
+        Assert.Equal(eager.Cycles, deferred.Cycles);
+    }
+
     // ── Inputs applied with peripheral time owed ─────────────────────────────────────────────────────
 
     // SPI0 with its pads routed and nothing else running: a word queued, then the machine run in raw slices (which
