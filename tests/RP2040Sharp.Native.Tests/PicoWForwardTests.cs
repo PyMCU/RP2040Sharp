@@ -249,10 +249,11 @@ public unsafe class PicoWForwardTests(ITestOutputHelper output)
             var echo = s.Drive(http.PostAsync(url + "/echo", new ByteArrayContent(payload)));
             Assert.Equal($"LEN 6000 SUM {payload.Sum(b => (int)b)}", s.Drive(echo.Content.ReadAsStringAsync()));
 
-            // A raw client: connect, request, read to the server's close, close; then again on a new connection.
+            // A raw client: connect, request, read to the server's close, close; then again on a new connection. A blocking
+            // socket on a thread of its own, as a browser is a process of its own: nothing waits for the thread pool.
             for (var round = 0; round < 2; round++)
             {
-                var text = s.Drive(RawHttpW.Get(port));
+                var text = s.Drive(RawHttpW.OnThread(port, "GET /raw HTTP/1.1\r\nHost: pico\r\n\r\n"));
                 Assert.StartsWith("HTTP/1.1 200 OK", text);
                 Assert.Contains("Hello #", text);
             }
@@ -309,12 +310,14 @@ public unsafe class PicoWForwardTests(ITestOutputHelper output)
             Assert.Equal(-1, Forward(w2, p, 80));                                // another chip, the same port
             Assert.Contains("in use", Error(w2));
             using (var c = new TcpClient()) c.Connect(IPAddress.Loopback, p);    // listening on loopback
-            // No station yet: the connection waits for the guest; the client giving up ends it.
+            // No station yet: the connection waits for the guest; the client giving up ends it. The accept and the
+            // client's FIN reach the forwarder through socket completions on the thread pool, which the parallel tests'
+            // long work items can hold back for seconds (12.7 s seen in RP2350Sharp's suite): a generous host-time limit.
             var sw = Stopwatch.StartNew();
             while (WifiStatusOf(w).TcpAccepted == 0 || WifiStatusOf(w).TcpOpen != 0)
             {
                 Assert.True(Poll(w) >= 0, Error(w));
-                Assert.True(sw.Elapsed.TotalSeconds < 10, "the closed client's connection never ended");
+                Assert.True(sw.Elapsed.TotalSeconds < 60, "the closed client's connection never ended");
                 Thread.Sleep(1);
             }
             var st = WifiStatusOf(w);
@@ -377,17 +380,30 @@ public class PicoWForwardHeldPoolTests
         Assert.EndsWith("\r\n\r\nHello #1 from 192.168.4.1", text);
     }
 }
-/// <summary>A minimal HTTP client on a raw socket (async code cannot live in the unsafe test class).</summary>
+
+/// <summary>A minimal HTTP client on a raw socket (kept out of the unsafe test class).</summary>
 internal static class RawHttpW
 {
-    internal static async Task<string> Get(int port)
+    /// <summary>Send <paramref name="request"/> and read the answer to the server's FIN with a blocking socket on a
+    /// dedicated thread: nothing waits for the thread pool.</summary>
+    internal static Task<string> OnThread(int port, string request)
     {
-        using var c = new TcpClient();
-        await c.ConnectAsync(IPAddress.Loopback, port);
-        var ns = c.GetStream();
-        await ns.WriteAsync("GET /raw HTTP/1.1\r\nHost: pico\r\n\r\n"u8.ToArray());
-        using var ms = new MemoryStream();
-        await ns.CopyToAsync(ms);   // to the server's FIN
-        return Encoding.ASCII.GetString(ms.ToArray());
+        var done = new TaskCompletionSource<string>();
+        new Thread(() =>
+        {
+            try
+            {
+                using var c = new TcpClient();
+                c.ReceiveTimeout = c.SendTimeout = 60_000;
+                c.Connect(IPAddress.Loopback, port);
+                var ns = c.GetStream();
+                ns.Write(Encoding.ASCII.GetBytes(request));
+                using var ms = new MemoryStream();
+                ns.CopyTo(ms);
+                done.SetResult(Encoding.ASCII.GetString(ms.ToArray()));
+            }
+            catch (Exception e) { done.SetException(e); }
+        }) { IsBackground = true, Name = "RawHttp" }.Start();
+        return done.Task;
     }
 }
