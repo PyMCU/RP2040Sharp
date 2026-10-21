@@ -58,3 +58,53 @@ Tests: `tests/RP2040Sharp.Native.Tests/PicoWForwardTests.cs` (a real `HttpClient
 three parallel GETs, a POST that switches GP15 seen by the pin callback, a 20 kB response, a 6 kB request body, close
 and reopen, counters and events, the port free after destroy, argument checks) and `abi_selftest.c` (the same from C
 with a socket of the test process).
+
+## Outbound bridges (W3)
+
+`st_rp2040_wifi_bridge_tcp(chip, 1883, "127.0.0.1", 1883)` relays every connection the guest opens to the gateway's port
+1883 (`192.168.4.1:1883`) to `127.0.0.1:1883` on the PC, the way a NAT router relays a station's connection: a
+MicroPython `umqtt.simple` client on the board talks to a Mosquitto (or any) broker on the PC.
+`st_rp2040_wifi_dns_add(chip, "broker.local", "192.168.4.1")` gives the gateway's DNS a name for it, so the firmware can
+dial the bridge by name.
+
+| Call | Does |
+|---|---|
+| `int st_rp2040_wifi_bridge_tcp(chip, gateway_port, host, port)` | Relays the guest's connections to `192.168.4.1:gateway_port` to `host:port`. `host`: a name or an IPv4 / IPv6 literal (brackets allowed around IPv6), at most 253 bytes, resolved by the PC at each connection. Ports 1..65535; `port` 0 removes the bridge of `gateway_port` (its connections are reset; `host` is then ignored and may be NULL). Returns 0, or -1 with `last_error`: no radio, a port out of range, a bad host, already bridged on this chip, not bridged (a removal), more than 16 bridges. |
+| `int st_rp2040_wifi_dns_add(chip, name, ipv4)` | The gateway's DNS answers `name` with `ipv4` (a dotted quad); `ipv4` NULL or `""` removes the name. `name`: 1..253 bytes of letters, digits, `-`, `_` and `.`, labels of 1..63, compared without case, a trailing `.` dropped. Adding a name again replaces its address; at most 64 names. Returns 0, or -1 with `last_error`. |
+
+- **The guest reaches only what the host configures.** A gateway port is relayed to its one `host:port`; nothing the
+  guest sends chooses the destination, segments to any address other than `192.168.4.1` never reach a bridge, and the
+  rest of the PC's network stays out of reach as before. Without a bridge nothing changes.
+- **Handshake.** The guest's SYN starts the host connection (non-blocking, checked at every pump, so it never waits on
+  the thread pool; only a name is resolved on a background task) and is answered with a SYN-ACK only once that
+  connection is up, so the guest's `connect()` succeeds when its peer is really there. When it cannot be
+  (refused, no answer within 10 s of host time, a name the PC cannot resolve, 64 bridged connections open) the guest
+  gets a RST|ACK and its `connect()` fails at once (MicroPython: `OSError: ECONNRESET`), counted in `bridge_failed`
+  with the reason in `bridge_error` and `ST_RP2040_WIFI_EV_BRIDGE_FAILED`. To a host on this PC (a loopback address) no SYN is
+  retried, so a closed port is refused in milliseconds instead of Windows' 2 s of retries, by which time a guest that
+  runs faster than real time may have given up by itself.
+- **Past the handshake** a bridged connection is the same TCP as a forward's (`TcpForwarder`): the guest's MSS and
+  window, at most 8 segments in flight, go-back-N retransmission on simulated time, zero-window probes (a guest that
+  answers them with a closed window is kept, however long it does not read), FIN both ways with half-close, RST
+  both ways, ACKs at the next pump, up to 64 bridged connections per chip.
+- **Pumped with the forwards**: by `st_rp2040_wifi_poll` and by the run calls at most once per millisecond of host time;
+  a chip without forwards or bridges still pays one null check. `st_rp2040_destroy` resets the bridged connections.
+- **DNS and mDNS.** lwIP sends the names ending in `.local` to mDNS (`224.0.0.251:5353`) instead of the DNS server;
+  the gateway answers both for the names added (an mDNS query for another name gets no answer, as on a LAN without
+  that host; a DNS query gets NXDOMAIN, as before).
+- **Status** (the struct grew at its end to 208 bytes; a library older than this fills `size` = 160): `bridges`,
+  `bridge_open` (opened by the guest and not finished, including those still connecting), `bridge_connected`,
+  `bridge_failed`, `bridge_to_host`, `bridge_to_guest` (payload bytes), and `bridge_gateway_port`, `bridge_host_port`,
+  `bridge_guest_port` (the connection of the last bridge event) and `bridge_error`
+  (`ST_RP2040_WIFI_BRIDGE_ERR_REFUSED` 1, `_UNREACHABLE` 2, `_NO_HOST` 3, `_FULL` 4). Events: `ST_RP2040_WIFI_EV_BRIDGE_OPEN` (10: the
+  relay is up both ways), `ST_RP2040_WIFI_EV_BRIDGE_CLOSE` (11: it ended, by either side or reset; none for a connection that
+  never opened) and `ST_RP2040_WIFI_EV_BRIDGE_FAILED` (12).
+- `VirtualNet.BridgeTcp` (the managed API, several stations on one LAN) now goes through the same relay; it used to
+  connect synchronously on the guest's transmission and relay without retransmission.
+
+Tests: `tests/RP2040Sharp.Native.Tests/PicoWBridgeTests.cs` (MicroPython v1.28.0 `RPI_PICO_W` run as Proteus runs it: an 8000-byte echo both ways with a real
+TCP echo server on 127.0.0.1 reached by a DNS name, a refused host port, NXDOMAIN; `umqtt.simple` from micropython-lib,
+pinned to commit 5e49b1bd41d312d9d2a8e4f19d7bd6a918896abc, connecting to `broker.local:1883`, publishing telemetry to an
+MQTT 3.1.1 broker of the test on 127.0.0.1, subscribing, and switching GP15 on a message the test publishes; argument
+checks, the 208-byte layout and a 160-byte caller) and `abi_selftest.c` (the same from C: an echo server of the test
+process and a refused port).

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added: outbound TCP bridges and DNS names for the Wi-Fi (W3)
+
+`st_rp2040_wifi_bridge_tcp(chip, gateway_port, host, port)` relays the guest's connections to `192.168.4.1:gateway_port`
+to `host:port` on the PC's network, so a Pico W running MicroPython reaches an MQTT broker (or any TCP service) on
+the PC; `port` 0 removes the bridge. `st_rp2040_wifi_dns_add(chip, name, ipv4)` gives the gateway's DNS a name (`ipv4`
+NULL removes it); names ending in `.local`, which lwIP sends to mDNS, are answered there too. The guest reaches only
+the `host:port` the host configured for each gateway port. Its SYN is answered once the host connection is up, and a
+host that refuses, does not answer within 10 s of host time, or has a name the PC cannot resolve resets the guest's
+`connect()` at once (`ST_RP2040_WIFI_EV_BRIDGE_FAILED`, `bridge_error`); to a loopback host no SYN is retried, so a closed port
+on this PC is refused in milliseconds. Past the handshake a bridged connection uses the forwards' TCP (window,
+retransmission, half-close, ACKs at the next pump) and is pumped with them by `st_rp2040_wifi_poll` and the run calls; a
+chip without bridges pays the same null check as before. `st_rp2040_wifi_info` grew at its end from 160 to 208 bytes (`bridges`,
+`bridge_open`, `bridge_connected`, `bridge_failed`, `bridge_to_host`, `bridge_to_guest`, the ports of the last bridge
+event, `bridge_error`); new events `ST_RP2040_WIFI_EV_BRIDGE_OPEN` (10), `_CLOSE` (11), `_FAILED` (12). `VirtualNet.BridgeTcp`
+now uses the same relay (it connected synchronously and did not retransmit), and the forwards' zero-window probes no
+longer reset a guest that answers them. Tested with MicroPython v1.28.0 and umqtt.simple publishing to and receiving
+from an MQTT broker on 127.0.0.1 (`PicoWBridgeTests`, `abi_selftest.c`).
+
 ### Fixed: the virtual USB host waits 20 SOFs after opening the port before it sends
 
 `UsbCdcHost` delivered queued host data in the same millisecond as `SET_CONTROL_LINE_STATE` (DTR), which a real host
