@@ -661,6 +661,10 @@ public sealed class RP2040Machine : IDisposable
         data.CopyTo(new Span<byte>(Bus.PtrFlash + offset, data.Length));
     }
 
+    /// <summary>The flash backing store itself (offset 0 = 0x10000000), for host-side tools such as
+    /// <see cref="Fs.FatVolume"/>. Writes land in flash at once; the running firmware is not told.</summary>
+    public unsafe Span<byte> FlashMemory => new(Bus.PtrFlash, (int)Bus.FlashSize);
+
     /// <summary>Load a binary image into Flash starting at 0x10000000.</summary>
     public unsafe void LoadFlash(ReadOnlySpan<byte> image)
     {
@@ -902,6 +906,7 @@ public sealed class RP2040Machine : IDisposable
         if (count < 0 || offset + count > Bus.FlashSize) count = Bus.FlashSize - offset;
         if (count > 0)
             new Span<byte>(Bus.PtrFlash + offset, (int)count).Fill(0xFF);
+        Ssi.EraseCount++;
     }
 
     /// <summary>
@@ -919,6 +924,7 @@ public sealed class RP2040Machine : IDisposable
             count = Bus.FlashSize - flashOffset;
         for (var i = 0L; i < count; i++)
             Bus.PtrFlash[flashOffset + i] = Bus.ReadByte(srcAddr + (uint)i);
+        if (count > 0) Ssi.ProgramByteCount += count;
     }
 
     /// <summary>

@@ -374,6 +374,7 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
                     if (offset < _flashSize)
                         _flashPtr[offset] = _txBuf[i];
                 }
+                ProgramByteCount += _txBuf.Count - 4;
                 _writeEnabled = false;
                 break;
             }
@@ -385,8 +386,14 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     private uint GetAddress24() =>
         ((uint)_txBuf[1] << 16) | ((uint)_txBuf[2] << 8) | _txBuf[3];
 
+    /// <summary>Erase commands that reached the flash (any size), through the SSI or the bootrom flash hooks.</summary>
+    public long EraseCount;
+    /// <summary>Bytes programmed into the flash, through the SSI or the bootrom flash hooks.</summary>
+    public long ProgramByteCount;
+
     private void FlashErase(uint addr, uint size)
     {
+        EraseCount++;
         // Align the start address down to the erase-unit boundary (size must be a power of 2)
         var start = addr & ~(size - 1);
         // The 24-bit address can lie beyond a smaller flash: nothing to erase, and (end - start) would
