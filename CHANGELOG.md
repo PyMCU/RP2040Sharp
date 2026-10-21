@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added: `st_rp2040_set_flash_unique_id`, and a deterministic default unique id
+
+The flash's `0x4B` (Read Unique ID) answer, which is what `machine.unique_id()` reads on the RP2040, was a random GUID per
+chip: unique, but different on every run, so two simulations of the same firmware (the MicroPython USB serial number and
+its random seed come from it) could not be compared. The default is now a hash of a per-process creation counter and the
+flash size: unique per chip, and the same on every run for the same creation order. The host can set it:
+`void st_rp2040_set_flash_unique_id(st_rp2040 *chip, const uint8_t id[8])` (NULL rejected with `last_error`, a dead handle
+ignored), `SsiPeripheral.SetUniqueId` and the `flashUniqueId` argument of `RP2040Machine`; `SsiPeripheral.UniqueId` is
+now a property that validates the length. The firmware reads the id once at start-up: set it before the first run.
+Tested with MicroPython v1.28.0 on the Pico and the Pico W through the C ABI (`UniqueIdTests`: non-zero, different
+between two chips, equal to what the setter gave), `SsiUniqueIdTests`, `abi_selftest.c`. The 0x9F (JEDEC) and SFDP
+commands read 0 here as before; the RP2040 SDK does not issue them.
+
 ### Added: outbound TCP bridges and DNS names for the Wi-Fi (W3)
 
 `st_rp2040_wifi_bridge_tcp(chip, gateway_port, host, port)` relays the guest's connections to `192.168.4.1:gateway_port`
