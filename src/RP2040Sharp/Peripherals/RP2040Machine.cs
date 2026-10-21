@@ -120,7 +120,8 @@ public sealed class RP2040Machine : IDisposable
     /// None (the default) leaves every block transaction-level and the machine exactly as before.</param>
     public RP2040Machine(uint flashSize = 2 * 1024 * 1024,
                          RP2040BootromRevision bootrom = RP2040BootromRevision.B1,
-                         PinLevelBus pinLevelBuses = PinLevelBus.None)
+                         PinLevelBus pinLevelBuses = PinLevelBus.None,
+                         byte[]? flashUniqueId = null)
     {
         _bootromRevision = bootrom;
         PinLevelBuses = pinLevelBuses & PinLevelBus.All;
@@ -275,6 +276,7 @@ public sealed class RP2040Machine : IDisposable
         // Wire the SSI flash command engine to the flash memory and to the IO_QSPI
         // SS pin so CS assert/deassert signals from flash_cs_force() reach the SSI.
         unsafe { Ssi.AttachFlash(Bus.PtrFlash, Bus.FlashSize); }
+        if (flashUniqueId is not null) Ssi.SetUniqueId(flashUniqueId);   // else the per-instance default
         IoQspi.AttachSsi(Ssi);
 
         // ── AHB bridge (0x5): DMA + PIO ──────────────────────────────────
