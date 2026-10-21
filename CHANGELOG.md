@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: a forwarded connection lost the guest's answer when the guest reset it after closing
+
+A connection the guest had closed (FIN) and then reset was aborted at once, with a reset to the host socket, even when
+the guest's last bytes, already acknowledged to it, were still queued for the writer task. That task runs on the thread
+pool while the guest's clock runs on, and MicroPython resets a half-closed connection 10 simulated seconds after its FIN:
+on a busy pool the browser got "connection forcibly closed" and no page. A reset after the guest's FIN now ends the
+connection as the FIN did (the rest is written, then a FIN); a reset before it still aborts both sides. The same holds for
+outbound bridges. Tested by `PicoWForwardHeldPoolTests`, which holds the thread pool while the guest answers.
 ### Added: `st_rp2040_set_flash_unique_id`, and a deterministic default unique id
 
 The flash's `0x4B` (Read Unique ID) answer, which is what `machine.unique_id()` reads on the RP2040, was a random GUID per
