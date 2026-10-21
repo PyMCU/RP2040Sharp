@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: the virtual USB host waits 20 SOFs after opening the port before it sends
+
+`UsbCdcHost` delivered queued host data in the same millisecond as `SET_CONTROL_LINE_STATE` (DTR), which a real host
+application does not do: it writes once its port is open. Data arriving inside the firmware's own post-DTR window can
+starve TinyUSB's `tud_task` while SOF events fill its 16-entry event queue, and an overflow drops events (on the
+RP2350's RISC-V cores it ends in TinyUSB's unconditional `ebreak`; that is upstream behaviour, not an emulator bug).
+The host now holds host-to-device data for `UsbCdcHost.PortOpenFrames` (20) SOFs after the port opens
+(`HoldingAfterPortOpen`); a bus reset clears the hold. `Cyw43MqttFleetTests` lets the window pass before its first
+byte. `UsbCdcHostPortOpenTests` cover the hold.
+
 ### Fixed: emulated time no longer restarts at 0 after a watchdog reset or `st_rp2040_fs_commit(chip, 1)`
 
 `RP2040Machine.SystemReset` (the watchdog: timer expiry, `CTRL.TRIGGER`, `watchdog_reboot()`, MicroPython's

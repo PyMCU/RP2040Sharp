@@ -79,6 +79,9 @@ public class Cyw43MqttFleetTests(ITestOutputHelper output) : IDisposable
         StepAll(400_000, () => rx.All(r => r.ToString().Contains(">>>")));
         rx.Should().OnlyContain(r => r.ToString().Contains(">>>"), "every board must reach its REPL");
 
+        // A host writes after its port is open: let UsbCdcHost.PortOpenFrames pass before the first byte (the REPL prompt
+        // can appear inside that window, and a Ctrl-A coalesced with the connect-time CR LF is not taken as raw REPL).
+        StepAll(400_000, () => false);
         // Install the MQTT client library on each board.
         for (var i = 0; i < names.Length; i++)
         {
