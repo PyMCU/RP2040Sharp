@@ -45,9 +45,34 @@ dotnet publish src/RP2040Sharp.Native -c Release -r win-x64 -p:StNativeLib=true 
 | `st_rp2040_set_pin_callback`, `st_rp2040_set_serial_callback`, `st_rp2040_serial_write` | Channels UART0, UART1 and USB CDC: an emulated USB host (`UsbCdcHost`) enumerates the device and asserts DTR, so the MicroPython REPL works over CDC |
 | `st_rp2040_wifi_set_ap`, `st_rp2040_wifi_status`, `st_rp2040_set_wifi_callback` | Pico W (`ST_RP2040_CYW43`) only: the virtual access point and the link status, below |
 | `st_rp2040_wifi_forward_tcp`, `st_rp2040_wifi_poll` | Pico W only: port forwarding from `127.0.0.1:host_port` to a server on the station, and its pump ([wireless.md](wireless.md)) |
+| `st_rp2040_fs_status`, `st_rp2040_fs_put`, `st_rp2040_fs_commit` | CircuitPython: files copied onto CIRCUITPY the way a PC does, into the FAT volume in flash, then a reboot (below) |
 
 Type names carry the chip (`st_rp2040_pin_cb`, `ST_RP2040_STATUS_OK`...) so that a translation unit
 can include both headers; values and callback signatures are those of the RP2350 header.
+
+### Files onto CIRCUITPY
+
+CircuitPython keeps its CIRCUITPY drive read-only to its own code while USB is connected, so a host cannot write files
+through the raw REPL (`OSError: [Errno 30] Read-only filesystem`). These calls do what a PC does when it copies files
+onto the drive: they write them into the FAT volume in emulated flash (`FatVolume`, `src/RP2040Sharp/Peripherals/Fs`,
+no third-party code), then reboot the chip so CircuitPython runs the new `code.py`. Same calls and struct layout as
+`st_rp2350_fs_*` (RP2350Sharp `docs/circuitpy-files.md`); the struct is `st_rp2040_fs_info`, the flag
+`ST_RP2040_FS_BOOT_OUT`.
+
+- **Finding the volume.** CircuitPython keeps no partition table: it puts CIRCUITPY after its image, up to the end of
+  flash, and formats it with FatFs (no MBR) on its first boot. The search starts at the end of the image
+  `st_rp2040_load_uf2` loaded (its highest RP2040-family block; absolute and data family blocks do not count), rounded
+  up to 4 KiB, and takes the first erase sector with a consistent FAT12/FAT16 boot sector (`0x55AA`, jump, BPB fields,
+  a volume inside the flash, FATs large enough, FAT[0] repeating the media byte). CircuitPython 9.2.1 on the 2 MiB Pico:
+  1 MiB FAT12 at `0x100000`.
+- **Writing.** FAT12 and FAT16, long file names, directories created as needed, an existing file replaced (its old
+  clusters freed), all FAT copies kept equal. All or nothing: on an error (no volume yet, the volume or root directory
+  full, a name over 255 or a path over 256 characters, a path through a file) flash is untouched and
+  `st_rp2040_last_error` says why. A commit empties the queue either way.
+- **When.** `st_rp2040_fs_put` queues at any time. On a fresh flash, run until `st_rp2040_fs_status` returns 1 with
+  `ST_RP2040_FS_BOOT_OUT` and `flash_erases + flash_programmed` (counted for the SSI and the bootrom flash calls) has not
+  moved for about 100 ms of simulated time, then `st_rp2040_fs_commit(chip, 1)`. Writing under a running CircuitPython
+  without that reboot is unsafe: it caches flash sectors in RAM and writes them back.
 
 ### Wi-Fi (Pico W)
 

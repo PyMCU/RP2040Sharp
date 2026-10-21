@@ -101,6 +101,34 @@ static void hammer_dead_handle(st_rp2040 *dead, const char *label) {
         CHECK(st_rp2040_wifi_set_ap(dead, "x", NULL, 0, 0) == -1 && st_rp2040_wifi_status(dead, &ws) == -1, what);
         st_rp2040_set_wifi_callback(dead, NULL, NULL);
     }
+    {
+        st_rp2040_fs_info fs;
+        memset(&fs, 0, sizeof fs);
+        fs.size = sizeof fs;
+        snprintf(what, sizeof what, "%s: fs_status / fs_put / fs_commit = -1", label);
+        CHECK(st_rp2040_fs_status(dead, &fs) == -1 && st_rp2040_fs_put(dead, "code.py", buf, 4) == -1 &&
+              st_rp2040_fs_commit(dead, 1) == -1, what);
+    }
+}
+
+/* st_rp2040_fs_*: the struct layout and the clean failures on a chip with nothing formatted. */
+static void fs_arguments(void) {
+    st_rp2040_fs_info fs;
+    st_rp2040 *c = st_rp2040_create(0);
+    CHECK(sizeof(st_rp2040_fs_info) == 48 && offsetof(st_rp2040_fs_info, flags) == 28 &&
+          offsetof(st_rp2040_fs_info, flash_erases) == 32, "st_rp2040_fs_info layout: 48 bytes");
+    memset(&fs, 0, sizeof fs);
+    fs.size = 7;
+    CHECK(st_rp2040_fs_status(c, &fs) == -1 && st_rp2040_fs_status(c, NULL) == -1, "fs_status: size 7 / NULL -> -1");
+    fs.size = sizeof fs;
+    CHECK(st_rp2040_fs_status(c, &fs) == 0 && fs.size == 48 && fs.fat_bits == 0, "blank flash: no volume (0)");
+    CHECK(st_rp2040_fs_put(c, NULL, (const uint8_t *)"x", 1) == -1, "fs_put: NULL path -> -1");
+    CHECK(st_rp2040_fs_put(c, "a?b.py", (const uint8_t *)"x", 1) == -1, "fs_put: '?' -> -1");
+    CHECK(st_rp2040_fs_put(c, "lib/x.py", (const uint8_t *)"V = 7", 5) == 0 && st_rp2040_fs_status(c, &fs) == 0 &&
+          fs.staged_files == 1, "fs_put: one file queued");
+    CHECK(st_rp2040_fs_commit(c, 0) == -1 && strstr(st_rp2040_last_error(c), "no FAT volume") != NULL &&
+          st_rp2040_status(c) == ST_RP2040_STATUS_OK, "commit without a volume -> -1 + reason, chip OK");
+    st_rp2040_destroy(c);
 }
 
 /* ---- host side of the callbacks ---- */
@@ -409,6 +437,9 @@ int main(int argc, char **argv) {
 
     puts("[wifi]");
     wifi_arguments();
+
+    puts("[files onto CIRCUITPY]");
+    fs_arguments();
 
     if (argc < 2) { printf("%d checks, %d failed (no firmware: REPL scenarios skipped)\n", st_checks, st_failed); return st_failed != 0; }
 

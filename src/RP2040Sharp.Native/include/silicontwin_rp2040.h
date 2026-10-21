@@ -297,6 +297,43 @@ int  st_rp2040_wifi_poll(st_rp2040 *chip);
  * differs because st_rp2040_wifi_status is the function), same layout, same ST_*WIFI_* numbers, so a host that drives
  * both chips can share one handler. */
 
+/* ---- Files onto CIRCUITPY (CircuitPython) ---------------------------------------------------------------------------
+ * As in silicontwin_rp2350.h (st_rp2350_fs_*; docs/native-abi.md): what a PC does when it copies files onto the CIRCUITPY
+ * drive, which CircuitPython keeps read-only to its own code while USB is connected. The FAT12/FAT16 volume is searched
+ * from the end of the image st_rp2040_load_uf2 loaded (rounded up to 4 KiB): the first erase sector holding a consistent
+ * FAT boot sector. It exists once CircuitPython has formatted CIRCUITPY on its first boot (on the 2 MiB Pico: 1 MiB at
+ * flash offset 0x100000). Queue files with st_rp2040_fs_put, then st_rp2040_fs_commit(chip, 1) writes them and reboots
+ * the chip. Before the first commit on a fresh flash, run until st_rp2040_fs_status returns 1 with ST_RP2040_FS_BOOT_OUT
+ * and the flash counters have stopped moving. */
+
+enum {
+    ST_RP2040_FS_BOOT_OUT = 1  /* st_rp2040_fs_info.flags: the root holds boot_out.txt */
+};
+
+/* Growable as st_rp2040_wifi_info: set `size` to sizeof(st_rp2040_fs_info). 48 bytes, the layout of st_fs_status. */
+typedef struct st_rp2040_fs_info {
+    uint32_t size;             /* in: bytes the caller provides (at least 8); out: bytes filled */
+    uint32_t fat_bits;         /* 12 or 16; 0 = no volume found (not formatted yet) */
+    uint32_t volume_offset;    /* flash offset of its boot sector */
+    uint32_t volume_bytes;
+    uint32_t cluster_bytes;
+    uint32_t free_bytes;
+    uint32_t staged_files;     /* files st_rp2040_fs_put has queued for the next commit */
+    uint32_t flags;            /* ST_RP2040_FS_BOOT_OUT */
+    uint64_t flash_erases;     /* erase commands the firmware sent the flash since create (SSI or bootrom) */
+    uint64_t flash_programmed; /* bytes the firmware programmed into flash since create */
+} st_rp2040_fs_info;
+
+/* 1 = a volume was found, 0 = none (yet), -1 = bad handle, faulted chip, NULL, size < 8. */
+int st_rp2040_fs_status(st_rp2040 *chip, st_rp2040_fs_info *info);
+/* Queue `path` (UTF-8, '/'-separated, directories created as needed; 255 characters per name, 256 per path) with `len`
+ * bytes of `data` (NULL allowed when len is 0). A path queued again replaces the earlier one. 0, or -1 (st_rp2040_last_error). */
+int st_rp2040_fs_put(st_rp2040 *chip, const char *path, const uint8_t *data, size_t len);
+/* Write the queued files, all or nothing, then reboot the chip as a watchdog reset does when `reset` is nonzero. On a
+ * failure (no volume yet, volume or root directory full, a path through a file) nothing is written, there is no reset
+ * and -1 is returned. The queue is emptied either way. 0 on success. Not from inside a callback. */
+int st_rp2040_fs_commit(st_rp2040 *chip, int reset);
+
 #ifdef ST_ENABLE_TEST_HOOKS
 /* TEST ONLY: exists only in a library built with -p:StTestHooks=true, never in packages.
  * Makes the core throw so the fault path can be exercised: mode 1 = exception inside the next run,

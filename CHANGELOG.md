@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added: files onto CIRCUITPY from the host (`st_rp2040_fs_status`, `st_rp2040_fs_put`, `st_rp2040_fs_commit`)
+
+CircuitPython keeps CIRCUITPY read-only to its own code while USB is connected, so a host cannot copy a project onto
+the board through the raw REPL. The core now does what a PC does when it copies files to the drive: `FatVolume`
+(the same code as RP2350Sharp's) writes them into the FAT12/FAT16 volume in emulated flash, all or nothing, with long
+file names, subdirectories and replaced files freeing their old clusters; `st_rp2040_fs_commit(chip, 1)` then reboots
+the chip like a watchdog reset. The volume is found after the end of the UF2's RP2040 blocks, not at a fixed offset.
+`st_rp2040_fs_status` fills a growable `st_rp2040_fs_info` (48 bytes, the layout of RP2350's `st_fs_status`) with the
+volume, `ST_RP2040_FS_BOOT_OUT` and new flash erase/program counters (`SsiPeripheral.EraseCount`, `ProgramByteCount`,
+counted for the SSI and the bootrom flash calls). .NET hosts use `CircuitPythonFs.PutFiles` and
+`RP2040Machine.FlashMemory`. See `docs/native-abi.md`. Tests: `FatVolumeTests` (synthetic images),
+`CircuitPyFilesTests` in the native suite (CircuitPython 9.2.1 for the Pico through the ABI) and `abi_selftest.c`.
+
 ### Fixed: the USB host waits the reset recovery time before SET_ADDRESS
 
 `UsbCdcHost` wrote SET_ADDRESS into DPRAM from inside the firmware's write that clears `SIE_STATUS.BUS_RESET`

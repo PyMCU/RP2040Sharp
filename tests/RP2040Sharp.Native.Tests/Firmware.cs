@@ -326,6 +326,16 @@ internal static class Firmware
         return p is not null && File.Exists(p) ? p : null;
     }
 
+    /// <summary>CircuitPython 9.2.1 for the Pico (raspberry_pi_pico): RP2040_CIRCUITPYTHON_UF2, else the integration tests'
+    /// firmware cache. Never downloaded here.</summary>
+    public static string? CircuitPythonPico()
+    {
+        var env = Environment.GetEnvironmentVariable("RP2040_CIRCUITPYTHON_UF2");
+        if (!string.IsNullOrEmpty(env)) return File.Exists(env) ? env : null;
+        var p = Path.Combine(Path.GetTempPath(), "rp2040sharp-firmware-cache", "circuitpython-9.2.1.uf2");
+        return File.Exists(p) ? p : null;
+    }
+
     /// <summary>MicroPython v1.28.0 for the Pico W (RPI_PICO_W): RP2040_MICROPYTHON_PICOW_UF2, else the integration
     /// tests' firmware cache. Never downloaded here.</summary>
     public static string? MicroPythonPicoW()

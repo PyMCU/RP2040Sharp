@@ -4,11 +4,31 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using RP2040.CoSim;
 using RP2040.Peripherals;
+using RP2040.Peripherals.Fs;
 using RP2040.Peripherals.PinLevel;
 using RP2040.Peripherals.Usb;
 using RP2040Sharp.Wireless.Cyw43;
 
 namespace SiliconTwin.Native;
+
+/// <summary>st_rp2040_fs_info: the CIRCUITPY volume as st_rp2040_fs_status sees it (growable, like st_rp2040_wifi_info).
+/// 48 bytes, the layout of st_fs_status in silicontwin_rp2350.h.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct FsStatus
+{
+    public const uint BootOut = 1;   // ST_RP2040_FS_BOOT_OUT
+
+    public uint Size;
+    public uint FatBits;
+    public uint VolumeOffset;
+    public uint VolumeBytes;
+    public uint ClusterBytes;
+    public uint FreeBytes;
+    public uint StagedFiles;
+    public uint Flags;
+    public ulong FlashErases;
+    public ulong FlashProgrammed;
+}
 
 /// <summary>One emulated RP2040 behind an opaque C handle.</summary>
 internal sealed unsafe class Chip
@@ -25,6 +45,14 @@ internal sealed unsafe class Chip
     /// <summary>The Pico W radio and its virtual LAN (ST_RP2040_CYW43), null on a plain Pico.</summary>
     public readonly ChipWifi? Wifi;
     public Cyw43439Device? Cyw43 => Wifi?.Device;
+
+    /// <summary>Flash offset just past the highest byte of the image's RP2040 blocks (absolute and data family blocks
+    /// excluded): where the firmware ends and the search for its FAT volume starts (FatVolume.Locate). 0 until a UF2
+    /// is loaded.</summary>
+    public uint FirmwareEnd;
+
+    /// <summary>Files st_rp2040_fs_put queued for the next st_rp2040_fs_commit, by path (a later put replaces).</summary>
+    public readonly List<(string Path, byte[] Data)> FsStaged = [];
     private readonly ushort[] _adc = new ushort[4];
 
     /// <summary>Every pad change with its own cycle, reported in cycle order after each call (RP2040CoSim.Pads).</summary>
@@ -378,6 +406,7 @@ internal sealed unsafe class Chip
             b.Slice(32, (int)size).CopyTo(image.AsSpan((int)(addr - FlashBase)));
         }
         Machine.LoadFlash(image);
+        FirmwareEnd = end;
         return blocks;
     }
 
@@ -793,6 +822,97 @@ internal static unsafe class Exports
         }
         catch (Exception e) { chip.Fault("st_rp2040_wifi_poll", e); return -1; }
         finally { EndRun(chip); }
+    }
+
+    // ---- CIRCUITPY from the host (st_rp2040_fs_*) ----------------------------------------------------------------------
+    // What a PC does when it copies files onto the CIRCUITPY drive, done on the FAT volume in emulated flash (FatVolume).
+
+    private const nuint MaxFsFileBytes = 16u * 1024 * 1024;   // no file larger than the largest flash fits anyway
+
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_fs_status", CallConvs = [typeof(CallConvCdecl)])]
+    public static int FsStatusOf(nint h, FsStatus* status)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return -1;
+        try
+        {
+            if (status == null) { chip.Reject("st_rp2040_fs_status: status is NULL"); return -1; }
+            if (status->Size < 8) { chip.Reject("st_rp2040_fs_status: status->size " + status->Size + " is below 8 (set it to sizeof(st_rp2040_fs_info))"); return -1; }
+            var s = new FsStatus
+            {
+                StagedFiles = (uint)chip.FsStaged.Count,
+                FlashErases = (ulong)chip.Machine.Ssi.EraseCount,
+                FlashProgrammed = (ulong)chip.Machine.Ssi.ProgramByteCount,
+            };
+            FatVolume.Summary? vol = null;
+            try { vol = FatVolume.Probe(chip.Machine.FlashMemory, (int)chip.FirmwareEnd); }
+            catch (FatException) { }   // a root directory the firmware is still writing: reported as no volume yet
+            if (vol is { } v)
+            {
+                s.FatBits = (uint)v.FatBits;
+                s.VolumeOffset = (uint)v.Offset;
+                s.VolumeBytes = (uint)v.VolumeBytes;
+                s.ClusterBytes = (uint)v.ClusterBytes;
+                s.FreeBytes = (uint)Math.Min(v.FreeBytes, uint.MaxValue);
+                if (v.RootNames.Any(n => n.Equals("boot_out.txt", StringComparison.OrdinalIgnoreCase))) s.Flags |= FsStatus.BootOut;
+            }
+            uint filled = Math.Min(status->Size, (uint)sizeof(FsStatus));
+            s.Size = filled;
+            Buffer.MemoryCopy(&s, status, filled, filled);
+            return vol != null ? 1 : 0;
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_fs_status", e); return -1; }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_fs_put", CallConvs = [typeof(CallConvCdecl)])]
+    public static int FsPut(nint h, byte* path, byte* data, nuint len)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return -1;
+        try
+        {
+            if (path == null) { chip.Reject("st_rp2040_fs_put: path is NULL"); return -1; }
+            if (data == null && len != 0) { chip.Reject("st_rp2040_fs_put: data is NULL"); return -1; }
+            if (len > MaxFsFileBytes) { chip.Reject("st_rp2040_fs_put: length " + len + " exceeds the 16 MiB limit"); return -1; }
+            var p = Utf8String(path, 4096);
+            if (p == null) { chip.Reject("st_rp2040_fs_put: path is not NUL-terminated UTF-8 within 4096 bytes"); return -1; }
+            var why = FatVolume.CheckPath(p);
+            if (why != null) { chip.Reject("st_rp2040_fs_put: " + why); return -1; }
+            var bytes = new ReadOnlySpan<byte>(data, (int)len).ToArray();
+            int i = chip.FsStaged.FindIndex(f => FatVolume.SamePath(f.Path, p));
+            if (i >= 0) chip.FsStaged[i] = (p, bytes); else chip.FsStaged.Add((p, bytes));
+            return 0;
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_fs_put", e); return -1; }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_fs_commit", CallConvs = [typeof(CallConvCdecl)])]
+    public static int FsCommit(nint h, int reset)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return -1;
+        if (chip.Running) { chip.Reject("st_rp2040_fs_commit: called re-entrantly from a callback"); return -1; }
+        var staged = chip.FsStaged.ToArray();
+        chip.FsStaged.Clear();   // a commit consumes the staged files, whatever its result
+        try
+        {
+            if (staged.Length > 0) CircuitPythonFs.PutFiles(chip.Machine, (int)chip.FirmwareEnd, staged, reset != 0);
+            else if (reset != 0) chip.Machine.SystemReset();
+            return 0;
+        }
+        catch (FatException e) { chip.Reject("st_rp2040_fs_commit: " + e.Message + " (nothing was written)"); return -1; }
+        catch (Exception e) { chip.Fault("st_rp2040_fs_commit", e); return -1; }
+    }
+
+    /// <summary>The NUL-terminated UTF-8 string at <paramref name="p"/>, or null if no NUL within <paramref name="max"/> bytes
+    /// or not valid UTF-8.</summary>
+    private static string? Utf8String(byte* p, int max)
+    {
+        int n = 0;
+        while (n < max && p[n] != 0) n++;
+        if (n == max) return null;
+        try { return new System.Text.UTF8Encoding(false, true).GetString(p, n); }
+        catch (ArgumentException) { return null; }
     }
 
 #if ST_ENABLE_TEST_HOOKS

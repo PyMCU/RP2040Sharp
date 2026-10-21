@@ -60,6 +60,23 @@ internal static unsafe class Abi
 
     public static void SerialWrite(nint h, int channel, string text) => SerialWrite(h, channel, Encoding.ASCII.GetBytes(text));
 
+    public static int FsStatus(nint h, out FsStatus status, uint size = 48)
+    {
+        var s = new FsStatus { Size = size };
+        int r = ((delegate* unmanaged[Cdecl]<nint, FsStatus*, int>)&Exports.FsStatusOf)(h, &s);
+        status = s;
+        return r;
+    }
+
+    public static int FsPut(nint h, string? path, byte[]? data)
+    {
+        var f = (delegate* unmanaged[Cdecl]<nint, byte*, byte*, nuint, int>)&Exports.FsPut;
+        var p = path is null ? null : Encoding.UTF8.GetBytes(path + "\0");
+        fixed (byte* pp = p) fixed (byte* pd = data) return f(h, pp, pd, (nuint)(data?.Length ?? 0));
+    }
+
+    public static int FsCommit(nint h, int reset) => ((delegate* unmanaged[Cdecl]<nint, int, int>)&Exports.FsCommit)(h, reset);
+
 #if ST_ENABLE_TEST_HOOKS
     public static int TestInjectFault(nint h, int mode) => ((delegate* unmanaged[Cdecl]<nint, int, int>)&Exports.TestInjectFault)(h, mode);
 #endif
