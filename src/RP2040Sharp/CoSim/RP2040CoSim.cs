@@ -33,7 +33,8 @@ public enum StopReason
     Target,
     /// <summary>A watched pad changed (<see cref="CoSimFlags.StopOnWatchedEdge"/>).</summary>
     WatchedEdge,
-    /// <summary>A watchdog reboot restarted core 0's counter during a targeted run: the target no longer applies.</summary>
+    /// <summary>No longer returned: a watchdog reboot keeps core 0's counter running (RP2040Machine.SystemReset), so a
+    /// target still applies after one. Kept so existing hosts still compile.</summary>
     Reset,
 }
 
@@ -211,8 +212,6 @@ public sealed class RP2040CoSim
                 {
                     long now = m.Cpu.Cycles;
                     if (now >= target) { reason = StopReason.Target; break; }
-                    // A watchdog reboot restarts core 0's counter: the run ends there rather than run it all again.
-                    if (now < startCycle) { reason = StopReason.Reset; break; }
                     // Both cores stopped (locked up): time still passes, so burn the rest of the way.
                     if (m.Cpu.IsLockedUp && (!m.Core1Launched || m.Cpu1.IsLockedUp))
                     {

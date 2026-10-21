@@ -638,7 +638,7 @@ public sealed class RP2040Machine : IDisposable
         return k;
     }
 
-    /// <summary>The machine's clock went back (watchdog reboot resets the core cycle counter): restart the engines on it.</summary>
+    /// <summary>A system reset: restart the pin-level engines (their transfers end with the chip's) at the current time.</summary>
     private void RebaseEngines()
     {
         if (PinLevelBuses == PinLevelBus.None) return;
@@ -1496,16 +1496,25 @@ public sealed class RP2040Machine : IDisposable
 
     /// <summary>
     /// Full system reset as raised by the watchdog (timer expiry, <c>CTRL.TRIGGER</c>, <c>watchdog_reboot()</c>,
-    /// <c>rp2040.reboot()</c>): both cores restart from the BootROM vector with clean core state; flash, SRAM and
-    /// the watchdog SCRATCH/REASON registers are preserved (firmware reads them to learn why it rebooted).
-    /// Invoked from the watchdog Tick, i.e. between core <see cref="Run"/> batches, so touching CPU state is safe.
+    /// <c>rp2040.reboot()</c>, <c>machine.reset()</c>) and by st_rp2040_fs_commit with a reset: both cores restart
+    /// from the BootROM vector with clean core state; flash, SRAM and the watchdog SCRATCH/REASON registers are
+    /// preserved (firmware reads them to learn why it rebooted). Called from the watchdog (also from inside the store
+    /// that wrote CTRL.TRIGGER) or the host.
+    /// <para>The chip's clock keeps running: each core's cycle counter — the machine's timebase (st_rp2040_cycles,
+    /// st_rp2040_time_ps, the pad-event stamps, the pin-level engines) — carries on from where it was, as
+    /// <c>AIRCR.SYSRESETREQ</c> already did, so host-visible time never goes backwards. The pin-level engines are
+    /// restarted at the current time; SysTick restarts with the PPB.</para>
     /// </summary>
     public void SystemReset()
     {
         ResetCount++;
+        var t0 = Cpu.Cycles;
+        var t1 = Cpu1.Cycles;
         Cpu.Registers = default;
         Cpu1.Registers = default;
         Reset();
+        Cpu.Cycles = t0;
+        Cpu1.Cycles = t1;
         Ppb.Reset();
         Ppb1.Reset();
         Usb.Reset();
