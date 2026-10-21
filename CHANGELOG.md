@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: emulated time no longer restarts at 0 after a watchdog reset or `st_rp2040_fs_commit(chip, 1)`
+
+`RP2040Machine.SystemReset` (the watchdog: timer expiry, `CTRL.TRIGGER`, `watchdog_reboot()`, MicroPython's
+`machine.reset()`, CircuitPython's `microcontroller.reset()`; and `st_rp2040_fs_commit(chip, 1)`) reset both cores
+through `CortexM0Plus.Reset`, which zeroes the cycle counter. That counter is the machine's timebase, so
+`st_rp2040_cycles` and `st_rp2040_time_ps` went back to 0, a pad change after the reboot carried a cycle from before
+it, and `RP2040CoSim.RunUntilEdge` returned a negative cycle count for the call. The cores' counters now carry on
+through the reset, as `AIRCR.SYSRESETREQ` already did; SysTick restarts with the PPB and the pin-level engines restart
+at the current time. `StopReason.Reset` is no longer returned (a target still applies after a reset). Host-requested
+resets (`RP2040Mcu.Reset`) keep their behaviour. Tests: `ResetTimelineTests` (native suite: monotonic time and pad
+stamps across `fs_commit` with a reset, and across a watchdog reset and `SYSRESETREQ` stored by firmware).
+
 ### Added: files onto CIRCUITPY from the host (`st_rp2040_fs_status`, `st_rp2040_fs_put`, `st_rp2040_fs_commit`)
 
 CircuitPython keeps CIRCUITPY read-only to its own code while USB is connected, so a host cannot copy a project onto

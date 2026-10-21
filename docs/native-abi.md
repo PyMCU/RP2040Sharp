@@ -38,7 +38,7 @@ dotnet publish src/RP2040Sharp.Native -c Release -r win-x64 -p:StNativeLib=true 
 | `st_rp2040_run(n)` | `n` instructions per core, peripherals ticked every 512 at most |
 | `st_rp2040_run_until_edge(max, guard, watch)` | Same semantics as RP2350: slices of `guard` (twice that while both cores sleep) whenever `watch` and `guard` are nonzero, including before firmware routes the pads; stops after the slice in which a watched pad's level or OE changed. The result is that of peripherals ticked at the end of every slice; deferred ticks, sleeping stretches and bounded awake runs take several slices at once with exactly that result ([peripheral-deadlines.md](peripheral-deadlines.md)). With pin-level buses and a guard above 1, the event-bounded guard ends a slice of core 0 at the next engine edge on a watched pad and right after an instruction that moved one ([pin-level-buses.md](pin-level-buses.md#pad-events-and-the-event-bounded-guard)) |
 | `st_rp2040_cycles_until_edge` | Cycles until the next step of a pin-level engine with work on a watched pad, `UINT64_MAX` when none has one coming (as on RP2350: the Proteus host's EdgeWait) |
-| `st_rp2040_cycles`, `st_rp2040_time_ps`, `st_rp2040_cycle_to_ps`, `st_rp2040_clk_sys_hz` | Core-0 cycles at a fixed 125 MHz (the core does not model clock changes): 8000 ps per cycle |
+| `st_rp2040_cycles`, `st_rp2040_time_ps`, `st_rp2040_cycle_to_ps`, `st_rp2040_clk_sys_hz` | Core-0 cycles at a fixed 125 MHz (the core does not model clock changes): 8000 ps per cycle. Monotonic: a watchdog reset, `AIRCR.SYSRESETREQ` or `st_rp2040_fs_commit(chip, 1)` reboots the chip but its clock runs on |
 | `st_rp2040_instructions(core)` | Conservative retired count, as on RP2350 |
 | `st_rp2040_pin_get`, `st_rp2040_pin_get_pull`, `st_rp2040_pin_set_input` | `-1` releases a pad: it reads its pull and follows later pull changes. `pin_set_input` first applies the peripheral time still pending, so no tick samples the new level retroactively; a pad already held at the level (or already released) is left alone, without that sync, as on RP2350 |
 | `st_rp2040_adc_set_voltage` | Channels 0..3 (GP26..29); the temperature sensor reads 27 °C |
@@ -72,7 +72,8 @@ no third-party code), then reboot the chip so CircuitPython runs the new `code.p
 - **When.** `st_rp2040_fs_put` queues at any time. On a fresh flash, run until `st_rp2040_fs_status` returns 1 with
   `ST_RP2040_FS_BOOT_OUT` and `flash_erases + flash_programmed` (counted for the SSI and the bootrom flash calls) has not
   moved for about 100 ms of simulated time, then `st_rp2040_fs_commit(chip, 1)`. Writing under a running CircuitPython
-  without that reboot is unsafe: it caches flash sectors in RAM and writes them back.
+  without that reboot is unsafe: it caches flash sectors in RAM and writes them back. The reboot does not restart the
+  chip's time: `st_rp2040_cycles`, `st_rp2040_time_ps` and the pad-event cycles continue from where they were.
 
 ### Wi-Fi (Pico W)
 
