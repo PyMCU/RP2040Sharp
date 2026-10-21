@@ -20,6 +20,12 @@ namespace RP2040Sharp.Wireless.Cyw43;
 /// client: SYN (retried while nothing listens yet), MSS, the guest's window, go-back-N retransmission, FIN both ways
 /// (half-close kept) and RST. A browser on the PC can then open a page served by MicroPython + Microdot.
 ///
+/// <para>The other direction too, outbound bridges (<see cref="AddBridge"/>): a station connecting to the gateway's
+/// <c>gatewayPort</c> is relayed to the one real <c>host:port</c> the host configured for it (an MQTT broker on the PC).
+/// The gateway is then the TCP server of the guest's connection: its SYN is answered only once the host connection is
+/// up, or reset when that fails (refused, unreachable, unknown name, table full), so the guest's connect() sees what it
+/// would behind a router. Past the handshake both kinds of connection share the same data path.</para>
+///
 /// Threads: socket I/O runs on background tasks that only fill or drain thread-safe queues; every TCP state change and
 /// every frame into the guest happens on the simulation thread, in <see cref="Pump"/> (the run loop's turn, at a host-time
 /// cadence) or while the guest transmits (<see cref="HandleGuestSegment"/>). Retransmission timers count simulated time
@@ -29,11 +35,22 @@ public sealed class TcpForwarder : IDisposable
 {
     public enum Event { Open = 1, Close = 2, Refused = 3 }
 
+    /// <summary>Why a bridged connection could not reach its host (<see cref="Event.Refused"/> of a bridge).</summary>
+    public enum BridgeError : ushort { None = 0, Refused = 1, Unreachable = 2, NoHost = 3, Full = 4 }
+
     /// <summary>The connection an event is about: the forward's ports and the host client's (browser's) port.</summary>
     public readonly record struct ConnInfo(ushort HostPort, ushort GuestPort, ushort PeerPort);
 
+    /// <summary>A bridged connection an event is about: the gateway port the guest dialled, the host port it is relayed
+    /// to, the guest's own port, and (for <see cref="Event.Refused"/>) why it failed.</summary>
+    public readonly record struct BridgeInfo(ushort GatewayPort, ushort HostPort, ushort GuestPort, BridgeError Error);
+
     public const int MaxForwards = 16;
     public const int MaxConnections = 64;
+    public const int MaxBridges = 16;
+    /// <summary>Host time a connection to a bridge's host may take (the system's own timeout is about 21 s). Host time,
+    /// not simulated: the host's network answers in real time, and an idle guest runs faster than that.</summary>
+    private static readonly TimeSpan HostConnectTimeout = TimeSpan.FromSeconds(10);
 
     // Gateway-side ports of the forwarded connections; below VirtualNet.TcpConnect's default 50000.
     private const ushort FirstPort = 40000, PortSpan = 9000;
@@ -54,6 +71,8 @@ public sealed class TcpForwarder : IDisposable
     private readonly List<Listener> _listeners = [];
     private readonly ConcurrentQueue<(Listener L, Socket S)> _accepted = new();
     private readonly Dictionary<ushort, Conn> _conns = new();
+    private readonly Dictionary<ushort, Bridge> _bridges = new();
+    private readonly Dictionary<ulong, Conn> _bridged = new();   // (guest IP, guest port, gateway port)
     private readonly List<Conn> _scratch = [];
     private int _signal;
     private ushort _nextPort;
@@ -67,6 +86,11 @@ public sealed class TcpForwarder : IDisposable
     /// <see cref="ConnectDeadline"/>). Raised on the simulation thread.</summary>
     public Action<Event, ConnInfo>? OnEvent;
 
+    /// <summary>A bridged connection reached its host (<see cref="Event.Open"/>), ended after that
+    /// (<see cref="Event.Close"/>), or was reset because its host could not be reached (<see cref="Event.Refused"/>,
+    /// <see cref="BridgeInfo.Error"/> says why). Raised on the simulation thread.</summary>
+    public Action<Event, BridgeInfo>? OnBridgeEvent;
+
     public int Forwards => _listeners.Count;
     /// <summary>Connections accepted from the host and not finished yet.</summary>
     public int OpenConnections => _conns.Count;
@@ -77,8 +101,21 @@ public sealed class TcpForwarder : IDisposable
     /// <summary>Payload bytes the guest's servers sent back to the host clients.</summary>
     public long FromGuestBytes { get; private set; }
 
+    /// <summary>Gateway ports bridged.</summary>
+    public int Bridges => _bridges.Count;
+    /// <summary>Bridged connections the guest opened and that have not finished (including those still connecting).</summary>
+    public int BridgedConnections => _bridged.Count;
+    /// <summary>Guest connections relayed to their host (handshake done on both sides).</summary>
+    public long BridgeConnected { get; private set; }
+    /// <summary>Guest connections reset because the host could not be reached, or the table was full.</summary>
+    public long BridgeFailed { get; private set; }
+    /// <summary>Payload bytes the guest sent through the bridges to their hosts.</summary>
+    public long ToHostBytes { get; private set; }
+    /// <summary>Payload bytes from the bridges' hosts delivered into the guest (first transmissions).</summary>
+    public long FromHostBytes { get; private set; }
+
     /// <summary>True when a pump would have something to do: host traffic queued, or connections alive.</summary>
-    public bool Busy => Volatile.Read(ref _signal) != 0 || _conns.Count > 0;
+    public bool Busy => Volatile.Read(ref _signal) != 0 || _conns.Count > 0 || _bridged.Count > 0;
 
     internal TcpForwarder(VirtualNet net) => _net = net;
 
@@ -88,15 +125,31 @@ public sealed class TcpForwarder : IDisposable
         public readonly Socket Sock = sock;
     }
 
-    private enum State { SynSent, Established }
-
-    private sealed class Conn(Listener l, Socket sock, ushort port, ushort peer)
+    private sealed class Bridge(ushort gatewayPort, string host, ushort port)
     {
-        public readonly Listener L = l;
+        public readonly ushort GatewayPort = gatewayPort, Port = port;
+        public readonly string Host = host;
+    }
+
+    // Forwards: SynSent -> Established. Bridges: Connecting (the host connection) -> SynReceived -> Established.
+    private enum State { SynSent, Established, Connecting, SynReceived }
+
+    private sealed class Conn(Socket sock, ushort port, ushort guestPort, byte[] guestIp, ushort peer)
+    {
+        public Listener? L;                  // a forward's connection
+        public Bridge? B;                    // or a bridged one
+        public ulong Key;                    // a bridged connection's key in _bridged
         public readonly Socket Sock = sock;
-        public readonly ushort Port = port, Peer = peer;
+        public readonly ushort Port = port, GuestPort = guestPort, Peer = peer;   // Port: the gateway's side
+        public readonly byte[] GuestIp = guestIp;
         public State St;
         public byte[]? Mac;
+        public volatile bool HostUp, HostDown;   // a bridge's host connection: done, or failed (Error says why)
+        public volatile IPAddress? Addr;         // its address, once resolved
+        public bool ConnectStarted;
+        public long HostDeadline;                // Stopwatch ticks: HostConnectTimeout after the guest's SYN
+        public BridgeError Error;
+        public bool Opened;
         public uint Iss, SndUna, SndNxt, SndMax, RcvNxt, FinSeq;
         public int Mss = DefaultMss, GuestWnd, LastAdvWnd = WindowMax, Retries;
         public bool SynSent, HostFin, FinSent, FinSeqSet, FinAcked, GuestFin, RtoArmed, Probe, AckDue;
@@ -113,7 +166,8 @@ public sealed class TcpForwarder : IDisposable
         public int OutPending;
         private int _halves;
 
-        public ConnInfo Info => new(L.HostPort, L.GuestPort, Peer);
+        public ConnInfo Info => new(L!.HostPort, L.GuestPort, Peer);
+        public BridgeInfo BInfo => new(B!.GatewayPort, B.Port, GuestPort, Error);
 
         public void HalfDone()
         {
@@ -172,6 +226,35 @@ public sealed class TcpForwarder : IDisposable
         return true;
     }
 
+    /// <summary>Relay the stations' connections to the gateway's <paramref name="gatewayPort"/> to
+    /// <paramref name="host"/>:<paramref name="port"/> (a name or an address literal, resolved at each connection). The
+    /// guest reaches nothing else through it. Throws <see cref="InvalidOperationException"/> with a one-line reason when
+    /// the port is bridged already or the limit is reached.</summary>
+    public void AddBridge(ushort gatewayPort, string host, ushort port)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (gatewayPort == 0 || port == 0) throw new InvalidOperationException("port 0 is not a port");
+        if (string.IsNullOrEmpty(host)) throw new InvalidOperationException("the host is empty");
+        if (_bridges.ContainsKey(gatewayPort))
+            throw new InvalidOperationException("gateway port " + gatewayPort + " is already bridged on this chip (port 0 removes it)");
+        if (_bridges.Count >= MaxBridges) throw new InvalidOperationException("at most " + MaxBridges + " bridges per chip");
+        _bridges[gatewayPort] = new Bridge(gatewayPort, host, port);
+    }
+
+    /// <summary>Stop bridging <paramref name="gatewayPort"/>: its connections are reset. False when it was not bridged.</summary>
+    public bool RemoveBridge(ushort gatewayPort)
+    {
+        if (!_bridges.Remove(gatewayPort, out var b)) return false;
+        foreach (var c in Snapshot())
+            if (c.B == b)
+            {
+                if (c.St == State.Connecting) Send(c, RST | ACK, 0, []);
+                else SendRst(c);
+                Finish(c, reset: true, Event.Close);
+            }
+        return true;
+    }
+
     private async Task AcceptLoop(Listener l)
     {
         try
@@ -195,6 +278,76 @@ public sealed class TcpForwarder : IDisposable
     }
 
     private void Signal() => Volatile.Write(ref _signal, 1);
+
+    // The host connection does not wait on the thread pool: a guest whose simulated clock runs ahead of real time gives
+    // up its SYN after some simulated seconds, and a busy pool (a host running many chips) can hold an async connect's
+    // completion back that long. So a literal address is connected non-blocking at once and checked with Poll(0) at
+    // every pump; only a name is resolved on a background task first.
+
+    private async Task ResolveLoop(Conn c, Bridge b)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(HostConnectTimeout);
+            var addrs = await Dns.GetHostAddressesAsync(b.Host, cts.Token).ConfigureAwait(false);
+            if (addrs.Length == 0) throw new SocketException((int)SocketError.HostNotFound);
+            c.Addr = Array.Find(addrs, a => a.AddressFamily == AddressFamily.InterNetwork) ?? addrs[0];
+        }
+        catch (Exception e)
+        {
+            c.Error = e is SocketException se ? ErrorOf(se.SocketErrorCode) : BridgeError.NoHost;
+            c.HostDown = true;
+        }
+        Signal();
+    }
+
+    /// <summary>Start the non-blocking connect to <paramref name="addr"/>. Simulation thread.</summary>
+    private static void StartConnect(Conn c, IPAddress addr, ushort port)
+    {
+        c.ConnectStarted = true;
+        try
+        {
+            if (IPAddress.IsLoopback(addr)) NoSynRetransmissions(c.Sock);
+            c.Sock.Blocking = false;
+            c.Sock.Connect(new IPEndPoint(addr, port));
+            c.HostUp = true;
+        }
+        catch (SocketException e) when (e.SocketErrorCode is SocketError.WouldBlock or SocketError.InProgress or SocketError.AlreadyInProgress)
+        { /* pending: CheckConnect at the next pumps */ }
+        catch (SocketException e) { c.Error = ErrorOf(e.SocketErrorCode); c.HostDown = true; }
+        catch (Exception) { c.Error = BridgeError.Unreachable; c.HostDown = true; }
+    }
+
+    /// <summary>Has the pending connect finished? Never blocks.</summary>
+    private static void CheckConnect(Conn c)
+    {
+        try
+        {
+            bool writable = c.Sock.Poll(0, SelectMode.SelectWrite), failed = c.Sock.Poll(0, SelectMode.SelectError);
+            if (!writable && !failed) return;
+            var err = (SocketError)(int)c.Sock.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Error)!;
+            if (err == SocketError.Success && !failed) c.HostUp = true;
+            else { c.Error = ErrorOf(err == SocketError.Success ? SocketError.ConnectionRefused : err); c.HostDown = true; }
+        }
+        catch (Exception) { c.Error = BridgeError.Unreachable; c.HostDown = true; }
+    }
+
+    private static BridgeError ErrorOf(SocketError e) => e switch
+    {
+        SocketError.ConnectionRefused => BridgeError.Refused,
+        SocketError.HostNotFound or SocketError.NoData or SocketError.TryAgain => BridgeError.NoHost,
+        _ => BridgeError.Unreachable,
+    };
+
+    /// <summary>Windows answers a refused connection to this PC only after retrying the SYN for about 2 s, by which time a
+    /// guest running faster than real time may have given up on its own; on loopback no SYN is ever lost, so none is
+    /// retried (SIO_TCP_INITIAL_RTO, TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS). Elsewhere, and on other systems, nothing changes.</summary>
+    private static void NoSynRetransmissions(Socket s)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try { s.IOControl(unchecked((int)0x98000011), [0xFF, 0xFF, 0xFE, 0x00], null); }   // Rtt unspecified, no SYN retries
+        catch (Exception) { /* an older Windows: the default retries */ }
+    }
 
     private async Task ReadLoop(Conn c)
     {
@@ -242,7 +395,7 @@ public sealed class TcpForwarder : IDisposable
         Volatile.Write(ref _signal, 0);
         var now = Clock();
         while (_accepted.TryDequeue(out var a)) Open(a.L, a.S, now);
-        if (_conns.Count == 0) return;
+        if (_conns.Count == 0 && _bridged.Count == 0) return;
         foreach (var c in Snapshot()) Service(c, now);
     }
 
@@ -250,6 +403,7 @@ public sealed class TcpForwarder : IDisposable
     {
         _scratch.Clear();
         _scratch.AddRange(_conns.Values);
+        _scratch.AddRange(_bridged.Values);
         return _scratch;
     }
 
@@ -258,7 +412,7 @@ public sealed class TcpForwarder : IDisposable
         if (!_listeners.Contains(l) || _conns.Count >= MaxConnections) { Reset(s); Failed++; return; }
         ushort peer = 0;
         try { peer = (ushort)((IPEndPoint)s.RemoteEndPoint!).Port; } catch { /* already gone */ }
-        var c = new Conn(l, s, AllocPort(), peer) { Deadline = now + ConnectDeadline, TimerAt = now };
+        var c = new Conn(s, AllocPort(), l.GuestPort, _net.ClientIp, peer) { L = l, Deadline = now + ConnectDeadline, TimerAt = now };
         c.Iss = _nextIss;
         _nextIss += 0x0100_0000;
         c.SndUna = c.SndNxt = c.SndMax = c.Iss;
@@ -274,7 +428,7 @@ public sealed class TcpForwarder : IDisposable
         {
             var p = (ushort)(FirstPort + _nextPort);
             _nextPort = (ushort)((_nextPort + 1) % PortSpan);
-            if (!_conns.ContainsKey(p)) return p;
+            if (!_conns.ContainsKey(p) && !_bridges.ContainsKey(p)) return p;
         }
     }
 
@@ -293,6 +447,35 @@ public sealed class TcpForwarder : IDisposable
             return;
         }
         if (eof && c.Inbox.IsEmpty) c.HostFin = true;
+
+        if (c.St == State.Connecting)
+        {
+            if (!c.HostUp && !c.HostDown)
+            {
+                if (!c.ConnectStarted) { if (c.Addr is { } addr) StartConnect(c, addr, c.B!.Port); }
+                else CheckConnect(c);
+                if (!c.HostUp && !c.HostDown && Stopwatch.GetTimestamp() > c.HostDeadline) { c.Error = BridgeError.Unreachable; c.HostDown = true; }
+            }
+            if (c.HostDown) { FailBridged(c, c.Error); return; }
+            if (!c.HostUp) return;
+            c.Sock.NoDelay = true;
+            // The host accepted: now the guest's SYN is answered. Host bytes wait in the inbox for the handshake.
+            c.St = State.SynReceived;
+            c.TimerAt = now;
+            _ = ReadLoop(c);
+            _ = WriteLoop(c);
+        }
+        if (c.St == State.SynReceived)
+        {
+            if (now >= c.TimerAt)
+            {
+                if (++c.Retries > MaxRetries) { SendRst(c); FailBridged(c, BridgeError.Unreachable); return; }   // the guest went away
+                SendSynAck(c);
+                c.TimerAt = now + c.Rto;
+                c.Rto = Math.Min(c.Rto * 2, MaxSynRto);
+            }
+            return;
+        }
 
         if (c.St == State.SynSent)
         {
@@ -362,7 +545,11 @@ public sealed class TcpForwarder : IDisposable
             var n = Math.Min(Math.Min(c.Mss, c.Len - sent), wnd - sent);
             Send(c, PSH | ACK, c.SndNxt, c.Buf.AsSpan(sent, n));
             var end = c.SndNxt + (uint)n;
-            if ((int)(end - c.SndMax) > 0) { ToGuestBytes += (int)(end - c.SndMax); c.SndMax = end; }
+            if ((int)(end - c.SndMax) > 0)
+            {
+                if (c.B is null) ToGuestBytes += (int)(end - c.SndMax); else FromHostBytes += (int)(end - c.SndMax);
+                c.SndMax = end;
+            }
             c.SndNxt = end;
             sent += n;
         }
@@ -382,13 +569,24 @@ public sealed class TcpForwarder : IDisposable
         }
     }
 
-    /// <summary>A TCP segment from the guest. True when it belongs to a forwarded connection (consumed).</summary>
+    /// <summary>A TCP segment from the guest. True when it belongs to a forwarded or bridged connection (consumed).</summary>
     internal bool HandleGuestSegment(byte[] f, int ipOff, int tcpOff)
     {
-        if (_conns.Count == 0) return false;
+        if (_conns.Count == 0 && _bridges.Count == 0 && _bridged.Count == 0) return false;
         var dst = Be16(f, tcpOff + 2);
-        if (!_conns.TryGetValue(dst, out var c) || Be16(f, tcpOff) != c.L.GuestPort) return false;
-        for (var i = 0; i < 4; i++) if (f[ipOff + 12 + i] != _net.ClientIp[i]) return false;
+        if (!_conns.TryGetValue(dst, out var c) || Be16(f, tcpOff) != c.GuestPort || !IpAt(f, ipOff + 12, _net.ClientIp))
+        {
+            // A bridged port: only segments addressed to the gateway itself, so a guest dialling any other address
+            // never reaches a host through a bridge.
+            if (!IpAt(f, ipOff + 16, _net.GatewayIp)) return false;
+            var key = BridgeKey(f, ipOff, tcpOff);
+            if (!_bridged.TryGetValue(key, out c))
+            {
+                if (!_bridges.TryGetValue(dst, out var b)) return false;
+                OpenBridged(b, key, f, ipOff, tcpOff);
+                return true;
+            }
+        }
         var seq = Be32(f, tcpOff + 4);
         var ack = Be32(f, tcpOff + 8);
         var flags = f[tcpOff + 13];
@@ -400,9 +598,26 @@ public sealed class TcpForwarder : IDisposable
 
         if ((flags & RST) != 0)
         {
-            // Before the handshake: nothing listens on the guest port yet; the SYN timer tries again.
-            if (c.St == State.Established) Finish(c, reset: true, Event.Close);
+            // Before the handshake: nothing listens on the guest port yet; the SYN timer tries again. A bridged
+            // connection the guest resets is gone in any state.
+            if (c.St == State.Established || c.B is not null) Finish(c, reset: true, Event.Close);
             return true;
+        }
+        if (c.St == State.Connecting) return true;   // the guest's SYN again: answered once the host connection is up
+        if (c.St == State.SynReceived)
+        {
+            if ((flags & SYN) != 0) { SendSynAck(c); return true; }   // its SYN again: our SYN-ACK did not land
+            if ((flags & ACK) == 0 || ack != c.Iss + 1) return true;
+            c.SndUna = c.SndNxt = c.SndMax = c.Iss + 1;
+            c.GuestWnd = win;
+            c.St = State.Established;
+            c.Rto = InitialRto;
+            c.Retries = 0;
+            c.RtoArmed = false;
+            c.Opened = true;
+            BridgeConnected++;
+            OnBridgeEvent?.Invoke(Event.Open, c.BInfo);
+            // the same segment may carry data already: on below
         }
         if (c.St == State.SynSent)
         {
@@ -437,6 +652,7 @@ public sealed class TcpForwarder : IDisposable
                 c.Rto = InitialRto;
                 c.RtoArmed = false;
             }
+            else if (win == 0 && adv == 0) c.Retries = 0;   // a probe answered with a closed window: the guest is alive
             c.GuestWnd = win;
         }
         if (payloadLen > 0)
@@ -444,7 +660,7 @@ public sealed class TcpForwarder : IDisposable
             if (seq == c.RcvNxt && !c.GuestFin)
             {
                 c.RcvNxt += (uint)payloadLen;
-                FromGuestBytes += payloadLen;
+                if (c.B is null) FromGuestBytes += payloadLen; else ToHostBytes += payloadLen;
                 Interlocked.Add(ref c.OutPending, payloadLen);
                 c.Out.Writer.TryWrite(f[payloadOff..(payloadOff + payloadLen)]);
             }
@@ -483,10 +699,91 @@ public sealed class TcpForwarder : IDisposable
 
     private void Finish(Conn c, bool reset, Event ev)
     {
-        if (!_conns.Remove(c.Port)) return;
+        if (c.B is null ? !_conns.Remove(c.Port) : !_bridged.Remove(c.Key)) return;
         if (reset) c.Abort();
         else c.Out.Writer.TryComplete();   // graceful: the tasks flush and close the socket
-        OnEvent?.Invoke(ev, c.Info);
+        if (c.B is null) OnEvent?.Invoke(ev, c.Info);
+        else if (ev != Event.Close || c.Opened) OnBridgeEvent?.Invoke(ev, c.BInfo);   // no Close for one never opened
+    }
+
+    // ---- bridges: the guest's side of the handshake ------------------------------------------------------------
+
+    /// <summary>A segment for a bridged gateway port that no connection has: a SYN opens one, anything else is
+    /// answered with a reset (a connection that ended, or never was).</summary>
+    private void OpenBridged(Bridge b, ulong key, byte[] f, int ipOff, int tcpOff)
+    {
+        var flags = f[tcpOff + 13];
+        if ((flags & RST) != 0) return;
+        var mac = f[6..12];
+        var ip = f[(ipOff + 12)..(ipOff + 16)];
+        var guestPort = Be16(f, tcpOff);
+        var seq = Be32(f, tcpOff + 4);
+        var dataOff = (f[tcpOff + 12] >> 4) * 4;
+        if ((flags & (SYN | ACK)) != SYN)
+        {
+            if ((flags & ACK) != 0) SendRaw(mac, ip, b.GatewayPort, guestPort, RST, Be32(f, tcpOff + 8), 0);
+            else
+            {
+                var len = Math.Max(0, Math.Min(ipOff + Be16(f, ipOff + 2), f.Length) - tcpOff - dataOff)
+                          + ((flags & SYN) != 0 ? 1 : 0) + ((flags & FIN) != 0 ? 1 : 0);
+                SendRaw(mac, ip, b.GatewayPort, guestPort, RST | ACK, 0, seq + (uint)len);
+            }
+            return;
+        }
+        var c = new Conn(new Socket(SocketType.Stream, ProtocolType.Tcp), b.GatewayPort, guestPort, ip, 0)
+        {
+            B = b, Key = key, Mac = mac, St = State.Connecting, RcvNxt = seq + 1,
+            Mss = Math.Min(OurMss, ParseMss(f, tcpOff, dataOff)), GuestWnd = Be16(f, tcpOff + 14),
+        };
+        if (_bridged.Count >= MaxConnections)
+        {
+            c.Sock.Dispose();
+            BridgeFailed++;
+            c.Error = BridgeError.Full;
+            Send(c, RST | ACK, 0, []);
+            OnBridgeEvent?.Invoke(Event.Refused, c.BInfo);
+            return;
+        }
+        c.Iss = _nextIss;
+        _nextIss += 0x0100_0000;
+        c.SndUna = c.SndNxt = c.SndMax = c.Iss;
+        _bridged[key] = c;
+        c.HostDeadline = Stopwatch.GetTimestamp() + (long)(HostConnectTimeout.TotalSeconds * Stopwatch.Frequency);
+        if (IPAddress.TryParse(b.Host, out var literal)) StartConnect(c, literal, b.Port);
+        else _ = ResolveLoop(c, b);
+    }
+
+    /// <summary>The host could not be reached (or the guest went away mid-handshake): the guest's connect() is reset.</summary>
+    private void FailBridged(Conn c, BridgeError why)
+    {
+        BridgeFailed++;
+        c.Error = why;
+        if (c.St == State.Connecting) Send(c, RST | ACK, 0, []);   // a refused SYN: RST|ACK acknowledging it
+        Finish(c, reset: true, Event.Refused);
+    }
+
+    private void SendSynAck(Conn c)
+    {
+        c.SynSent = true;
+        Send(c, SYN | ACK, c.Iss, [], withMss: true);
+    }
+
+    private static ulong BridgeKey(byte[] f, int ipOff, int tcpOff) =>
+        (ulong)Be32(f, ipOff + 12) << 32 | (ulong)Be16(f, tcpOff) << 16 | Be16(f, tcpOff + 2);
+
+    private static bool IpAt(byte[] f, int o, byte[] ip) =>
+        f[o] == ip[0] && f[o + 1] == ip[1] && f[o + 2] == ip[2] && f[o + 3] == ip[3];
+
+    private void SendRaw(byte[] mac, byte[] ip, ushort srcPort, ushort dstPort, byte flags, uint seq, uint ack)
+    {
+        var tcp = new byte[20];
+        tcp[0] = (byte)(srcPort >> 8); tcp[1] = (byte)srcPort;
+        tcp[2] = (byte)(dstPort >> 8); tcp[3] = (byte)dstPort;
+        WriteBe32(tcp, 4, seq);
+        WriteBe32(tcp, 8, ack);
+        tcp[12] = 5 << 4;
+        tcp[13] = flags;
+        _net.SendToStation(mac, ip, tcp);
     }
 
     private void SendAck(Conn c) => Send(c, ACK, c.SndNxt, []);
@@ -508,7 +805,7 @@ public sealed class TcpForwarder : IDisposable
         var hl = withMss ? 24 : 20;
         var tcp = new byte[hl + payload.Length];
         tcp[0] = (byte)(c.Port >> 8); tcp[1] = (byte)c.Port;
-        tcp[2] = (byte)(c.L.GuestPort >> 8); tcp[3] = (byte)c.L.GuestPort;
+        tcp[2] = (byte)(c.GuestPort >> 8); tcp[3] = (byte)c.GuestPort;
         WriteBe32(tcp, 4, seq);
         WriteBe32(tcp, 8, (flags & ACK) != 0 ? c.RcvNxt : 0);
         tcp[12] = (byte)((hl / 4) << 4);
@@ -519,7 +816,7 @@ public sealed class TcpForwarder : IDisposable
         payload.CopyTo(tcp.AsSpan(hl));
         c.LastAdvWnd = w;
         if ((flags & ACK) != 0) c.AckDue = false;
-        _net.SendToStation(c.Mac, tcp);
+        _net.SendToStation(c.Mac, c.GuestIp, tcp);
     }
 
     private static ushort Be16(byte[] b, int o) => (ushort)(b[o] << 8 | b[o + 1]);
@@ -536,6 +833,9 @@ public sealed class TcpForwarder : IDisposable
         _listeners.Clear();
         foreach (var c in _conns.Values) c.Abort();
         _conns.Clear();
+        foreach (var c in _bridged.Values) c.Abort();
+        _bridged.Clear();
+        _bridges.Clear();
         while (_accepted.TryDequeue(out var a)) Reset(a.S);
     }
 }
