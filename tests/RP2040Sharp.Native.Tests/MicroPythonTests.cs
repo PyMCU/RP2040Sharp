@@ -25,10 +25,11 @@ public class MicroPythonTests(ITestOutputHelper output)
         return false;
     }
 
-    internal static (nint H, Host Host) BootToRepl(string uf2Path, uint flags, ulong maxCycles = 125_000_000UL * 20)
+    internal static (nint H, Host Host) BootToRepl(string uf2Path, uint flags, ulong maxCycles = 125_000_000UL * 20, byte[]? uniqueId = null)
     {
         var h = Abi.CreateEx(0, flags);
         Assert.NotEqual(0, h);
+        if (uniqueId is not null) Abi.SetFlashUniqueId(h, uniqueId);   // before the firmware's start-up reads it
         var host = new Host();
         Abi.Attach(h, host);
         Assert.True(Abi.LoadUf2(h, File.ReadAllBytes(uf2Path)) > 1000);

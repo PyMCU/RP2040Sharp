@@ -698,6 +698,19 @@ internal static unsafe class Exports
         catch (Exception e) { chip.Fault("st_rp2040_adc_set_voltage", e); }
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_set_flash_unique_id", CallConvs = [typeof(CallConvCdecl)])]
+    public static void SetFlashUniqueId(nint h, byte* id)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return;
+        try
+        {
+            if (id == null) { chip.Reject("st_rp2040_set_flash_unique_id: id is NULL"); return; }
+            chip.Machine.Ssi.SetUniqueId(new ReadOnlySpan<byte>(id, 8));
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_set_flash_unique_id", e); }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "st_rp2040_set_pin_callback", CallConvs = [typeof(CallConvCdecl)])]
     public static void SetPinCallback(nint h, delegate* unmanaged[Cdecl]<nint, int, int, int, ulong, void> cb, nint user)
     {

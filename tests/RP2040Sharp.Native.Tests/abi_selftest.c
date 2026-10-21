@@ -90,6 +90,7 @@ static void hammer_dead_handle(st_rp2040 *dead, const char *label) {
     CHECK(st_rp2040_load_uf2(dead, buf, sizeof buf) == -1, what);
     st_rp2040_pin_set_input(dead, 3, 1);
     st_rp2040_adc_set_voltage(dead, 0, 1.0);
+    { const uint8_t uid[8] = {1,2,3,4,5,6,7,8}; st_rp2040_set_flash_unique_id(dead, uid); }
     st_rp2040_set_pin_callback(dead, NULL, NULL);
     st_rp2040_set_serial_callback(dead, NULL, NULL);
     st_rp2040_serial_write(dead, ST_RP2040_SERIAL_USB_CDC, buf, sizeof buf);
@@ -524,6 +525,13 @@ int main(int argc, char **argv) {
     st_rp2040_serial_write(c, ST_RP2040_SERIAL_USB_CDC, NULL, 4);
     CHECK(strstr(st_rp2040_last_error(c), "NULL") != NULL, "NULL serial data rejected");
     CHECK(st_rp2040_load_uf2(c, NULL, 0) == -1, "NULL UF2 rejected");
+    {
+        const uint8_t uid[8] = {0xE6, 0x61, 0x41, 0x04, 0x03, 0x9B, 0x2A, 0x17};
+        st_rp2040_set_flash_unique_id(c, NULL);
+        CHECK(strstr(st_rp2040_last_error(c), "NULL") != NULL, "NULL flash unique id rejected with reason");
+        st_rp2040_set_flash_unique_id(c, uid);
+        CHECK(st_rp2040_status(c) == ST_RP2040_STATUS_OK, "flash unique id set / NULL survived");
+    }
     CHECK(st_rp2040_cycles_until_edge(c, 0xFFFFFFFFu) == UINT64_MAX, "no pin-level engine edges");
     CHECK(st_rp2040_cycle_to_ps(c, 125000000u) == 1000000000000ull, "cycle_to_ps at 125 MHz");
 

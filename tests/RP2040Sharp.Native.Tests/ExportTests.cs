@@ -50,6 +50,7 @@ public class ExportTests
             Assert.Equal(ulong.MaxValue, Abi.CyclesUntilEdge(dead, ~0u));
             Abi.PinSetInput(dead, 3, 1);
             Abi.AdcSetVoltage(dead, 0, 1.0);
+            Abi.SetFlashUniqueId(dead, new byte[8]);
             Abi.SerialWrite(dead, 2, "x");
             Abi.Destroy(dead);
         }
@@ -77,6 +78,9 @@ public class ExportTests
             Assert.Contains("NULL", Abi.LastError(h));
             Assert.Equal(-1, Abi.LoadUf2(h, null));
             Assert.Contains("NULL", Abi.LastError(h));
+            Abi.SetFlashUniqueId(h, null);
+            Assert.Contains("NULL", Abi.LastError(h));
+            Abi.SetFlashUniqueId(h, [1, 2, 3, 4, 5, 6, 7, 8]);
             Assert.Equal(0, Abi.Status(h)); // rejections never fault the chip
         }
         finally { Abi.Destroy(h); }

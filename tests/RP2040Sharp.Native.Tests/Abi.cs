@@ -49,6 +49,13 @@ internal static unsafe class Abi
 
     public static int PinGetPull(nint h, int gpio) => ((delegate* unmanaged[Cdecl]<nint, int, int>)&Exports.PinGetPull)(h, gpio);
     public static void PinSetInput(nint h, int gpio, int level) => ((delegate* unmanaged[Cdecl]<nint, int, int, void>)&Exports.PinSetInput)(h, gpio, level);
+    public static void SetFlashUniqueId(nint h, byte[]? id)
+    {
+        var f = (delegate* unmanaged[Cdecl]<nint, byte*, void>)&Exports.SetFlashUniqueId;
+        if (id is null) { f(h, null); return; }
+        fixed (byte* p = id) f(h, p);
+    }
+
     public static void AdcSetVoltage(nint h, int ch, double v) => ((delegate* unmanaged[Cdecl]<nint, int, double, void>)&Exports.AdcSetVoltage)(h, ch, v);
 
     public static void SerialWrite(nint h, int channel, byte[]? data, int len = -1)

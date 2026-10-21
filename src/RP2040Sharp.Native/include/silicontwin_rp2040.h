@@ -175,6 +175,13 @@ int  st_rp2040_pin_get_pull(st_rp2040 *chip, int gpio);
  * as 0 V. The temperature sensor (channel 4) reads 27 degrees C. */
 void st_rp2040_adc_set_voltage(st_rp2040 *chip, int channel, double volts);
 
+/* The chip's 64-bit unique id, 8 bytes: what the flash answers to 0x4B (Read Unique ID), which is where the RP2040 SDK's
+ * pico_get_unique_board_id() reads it, so machine.unique_id() / microcontroller.cpu.uid return exactly these bytes in
+ * this order. The default is unique per chip and the same on every run (a hash of a creation counter and the flash
+ * size), so two chips on one MQTT broker do not share a client id. The firmware reads the id once at start-up: call
+ * this after st_rp2040_create and before the first run. NULL is rejected (last_error). */
+void st_rp2040_set_flash_unique_id(st_rp2040 *chip, const uint8_t id[8]);
+
 /* Pass cb = NULL to disable (also from inside a callback). */
 void st_rp2040_set_pin_callback(st_rp2040 *chip, st_rp2040_pin_cb cb, void *user);
 void st_rp2040_set_serial_callback(st_rp2040 *chip, st_rp2040_serial_cb cb, void *user);
