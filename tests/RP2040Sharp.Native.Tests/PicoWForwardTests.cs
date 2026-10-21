@@ -22,7 +22,7 @@ public unsafe class PicoWForwardTests(ITestOutputHelper output)
     private const uint Cyw43 = 0x100, BusAll = 7;
     private const int Led = 15;
 
-    private sealed class Host
+    internal sealed class Host
     {
         public readonly StringBuilder Cdc = new();
         public readonly List<(int Event, WifiStatus Status)> Events = [];
@@ -68,7 +68,7 @@ public unsafe class PicoWForwardTests(ITestOutputHelper output)
 
     private static string Error(nint h) => Marshal.PtrToStringAnsi((nint)LastError(h))!;
 
-    private static WifiStatus WifiStatusOf(nint h)
+    internal static WifiStatus WifiStatusOf(nint h)
     {
         var st = new WifiStatus { Size = (uint)sizeof(WifiStatus) };
         Assert.Equal(0, GetStatus(h, &st));
@@ -114,7 +114,7 @@ public unsafe class PicoWForwardTests(ITestOutputHelper output)
         " c.close()\n";
 
     /// <summary>A chip booted to a listening server, driven like Proteus on the test thread.</summary>
-    private sealed class Session : IDisposable
+    internal sealed class Session : IDisposable
     {
         public readonly Host Host = new();
         private readonly GCHandle _gc;
@@ -335,6 +335,48 @@ public unsafe class PicoWForwardTests(ITestOutputHelper output)
     }
 }
 
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class ThreadPoolHeldCollection
+{
+    public const string Name = "thread pool held";
+}
+
+/// <summary>
+/// The forwarder writes to the host from a thread pool task while the guest's clock runs on. Here the pool is held on
+/// purpose (every worker waits on a gate, more work queued behind it) while the guest answers and closes, as a host busy
+/// with other work holds it. Alone in its collection: nothing else waits for the pool meanwhile.
+/// </summary>
+[Collection(ThreadPoolHeldCollection.Name)]
+public class PicoWForwardHeldPoolTests
+{
+    // MicroPython resets a half-closed connection 10 simulated seconds after its FIN. Its answer was acknowledged to it,
+    // so the host still gets all of it and an orderly end, however late the writer runs (it used to get the reset instead).
+    [SkippableFact]
+    public void An_answer_sent_before_the_guest_resets_its_half_closed_connection_still_reaches_the_host()
+    {
+        var uf2 = PicoWForwardTests.PicoWImage();
+        using var s = new PicoWForwardTests.Session(uf2, 0);
+        s.Boot();
+        using var c = new TcpClient();
+        c.Connect(IPAddress.Loopback, s.Port);
+        c.ReceiveTimeout = 30_000;
+        c.GetStream().Write("GET /late HTTP/1.1\r\nHost: pico\r\n\r\n"u8);
+        s.RunUntil(() => PicoWForwardTests.WifiStatusOf(s.H).TcpToGuest > 0, 60, "the request in the guest");
+        var gate = new ManualResetEventSlim();   // never disposed: work items still queued wait on it after the test
+        try
+        {
+            for (var i = 0; i < ThreadPool.ThreadCount + 256; i++) ThreadPool.UnsafeQueueUserWorkItem(_ => gate.Wait(), null);
+            s.RunUntil(() => s.Host.Events.Any(e => e.Event == ChipWifi.EvTcpClose), 60, "the guest's reset");
+            Assert.Equal(0u, PicoWForwardTests.WifiStatusOf(s.H).TcpOpen);
+        }
+        finally { gate.Set(); }
+        using var ms = new MemoryStream();
+        c.GetStream().CopyTo(ms);   // to the FIN: no reset
+        var text = Encoding.ASCII.GetString(ms.ToArray());
+        Assert.StartsWith("HTTP/1.1 200 OK", text);
+        Assert.EndsWith("\r\n\r\nHello #1 from 192.168.4.1", text);
+    }
+}
 /// <summary>A minimal HTTP client on a raw socket (async code cannot live in the unsafe test class).</summary>
 internal static class RawHttpW
 {

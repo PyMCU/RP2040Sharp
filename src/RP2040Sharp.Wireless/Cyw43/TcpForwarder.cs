@@ -161,6 +161,7 @@ public sealed class TcpForwarder : IDisposable
         public readonly ConcurrentQueue<byte[]> Inbox = new();
         public int InboxBytes;
         public volatile bool HostEof, HostReset, Closed;
+        public volatile bool GuestGone;          // the guest reset it after its FIN: host bytes have nowhere to go
         // simulation thread → background writer
         public readonly Channel<byte[]> Out = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
         public int OutPending;
@@ -359,6 +360,7 @@ public sealed class TcpForwarder : IDisposable
                 while (Volatile.Read(ref c.InboxBytes) > InboxCap && !c.Closed) await Task.Delay(1).ConfigureAwait(false);
                 var n = await c.Sock.ReceiveAsync(buf, SocketFlags.None).ConfigureAwait(false);
                 if (n == 0) { c.HostEof = true; break; }
+                if (c.GuestGone) continue;   // read to the host's close, keep nothing
                 c.Inbox.Enqueue(buf[..n]);
                 Interlocked.Add(ref c.InboxBytes, n);
                 Signal();
@@ -599,8 +601,15 @@ public sealed class TcpForwarder : IDisposable
         if ((flags & RST) != 0)
         {
             // Before the handshake: nothing listens on the guest port yet; the SYN timer tries again. A bridged
-            // connection the guest resets is gone in any state.
-            if (c.St == State.Established || c.B is not null) Finish(c, reset: true, Event.Close);
+            // connection the guest resets is gone in any state. After the guest's FIN, everything it sent has been
+            // acknowledged to it, and some may still wait for the writer (a thread pool task, while the guest's clock
+            // runs on): lwIP resets a half-closed connection after a while (MicroPython: 10 s), and that reset must not
+            // throw those bytes away. The connection then ends as the FIN said: the rest is written, then a FIN.
+            if (c.St == State.Established || c.B is not null)
+            {
+                if (c.GuestFin) c.GuestGone = true;
+                Finish(c, reset: !c.GuestFin, Event.Close);
+            }
             return true;
         }
         if (c.St == State.Connecting) return true;   // the guest's SYN again: answered once the host connection is up
