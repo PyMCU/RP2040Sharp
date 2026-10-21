@@ -194,11 +194,14 @@ static void wifi_arguments(void) {
     st_rp2040 *plain = st_rp2040_create_ex(0, ST_RP2040_BUS_ALL);
     st_rp2040 *w = st_rp2040_create_ex(0, ST_RP2040_BUS_ALL | ST_RP2040_CYW43);
     st_rp2040_wifi_cb cb = wifi_event;
-    CHECK(sizeof(st_rp2040_wifi_info) == 160 && offsetof(st_rp2040_wifi_info, ipv4) == 16 && offsetof(st_rp2040_wifi_info, mac) == 28 &&
+    CHECK(sizeof(st_rp2040_wifi_info) == 208 && offsetof(st_rp2040_wifi_info, ipv4) == 16 && offsetof(st_rp2040_wifi_info, mac) == 28 &&
           offsetof(st_rp2040_wifi_info, ssid) == 36 && offsetof(st_rp2040_wifi_info, tx_bytes) == 72 &&
           offsetof(st_rp2040_wifi_info, changes) == 104 && offsetof(st_rp2040_wifi_info, tcp_forwards) == 112 &&
           offsetof(st_rp2040_wifi_info, tcp_accepted) == 120 && offsetof(st_rp2040_wifi_info, tcp_host_port) == 152,
-          "st_rp2040_wifi_info layout: 160 bytes, documented offsets");
+          "st_rp2040_wifi_info layout: 208 bytes, documented offsets");
+    CHECK(offsetof(st_rp2040_wifi_info, bridges) == 160 && offsetof(st_rp2040_wifi_info, bridge_connected) == 168 &&
+          offsetof(st_rp2040_wifi_info, bridge_to_guest) == 192 && offsetof(st_rp2040_wifi_info, bridge_gateway_port) == 200 &&
+          offsetof(st_rp2040_wifi_info, bridge_error) == 206, "st_rp2040_wifi_info: the bridge fields from offset 160");
     memset(&s, 0, sizeof s);
     s.size = sizeof s;
     CHECK(st_rp2040_wifi_set_ap(plain, "Proteus", NULL, 0, 0) == -1 && contains(st_rp2040_last_error(plain), "CYW43439"),
@@ -246,6 +249,28 @@ static void wifi_arguments(void) {
         q = st_rp2040_wifi_forward_tcp(w, p, 80);
         CHECK(q == p, "the port can be forwarded again");
     }
+    CHECK(st_rp2040_wifi_bridge_tcp(plain, 1883, "127.0.0.1", 1883) == -1 && contains(st_rp2040_last_error(plain), "CYW43439"),
+          "plain chip: wifi_bridge_tcp -> -1 + reason");
+    CHECK(st_rp2040_wifi_dns_add(plain, "broker.local", "192.168.4.1") == -1, "plain chip: wifi_dns_add -> -1");
+    CHECK(st_rp2040_wifi_bridge_tcp(NULL, 1883, "127.0.0.1", 1883) == -1 && st_rp2040_wifi_dns_add(NULL, "a", "1.2.3.4") == -1,
+          "bridge / dns: NULL chip -> -1");
+    CHECK(st_rp2040_wifi_bridge_tcp(w, 0, "127.0.0.1", 1883) == -1 && st_rp2040_wifi_bridge_tcp(w, 65536, "127.0.0.1", 1883) == -1 &&
+          st_rp2040_wifi_bridge_tcp(w, 1883, "127.0.0.1", -1) == -1 && st_rp2040_wifi_bridge_tcp(w, 1883, "127.0.0.1", 65536) == -1,
+          "bridge: ports out of range -> -1");
+    CHECK(st_rp2040_wifi_bridge_tcp(w, 1883, NULL, 1883) == -1 && st_rp2040_wifi_bridge_tcp(w, 1883, "a b", 1883) == -1,
+          "bridge: NULL or bad host -> -1");
+    CHECK(st_rp2040_wifi_bridge_tcp(w, 1883, NULL, 0) == -1 && contains(st_rp2040_last_error(w), "not bridged"), "bridge: removing one not there -> -1");
+    CHECK(st_rp2040_wifi_bridge_tcp(w, 1883, "127.0.0.1", 1883) == 0, "bridge 192.168.4.1:1883 -> 127.0.0.1:1883");
+    CHECK(st_rp2040_wifi_bridge_tcp(w, 1883, "localhost", 1884) == -1 && contains(st_rp2040_last_error(w), "already"), "bridge: the same gateway port twice -> -1");
+    CHECK(st_rp2040_wifi_dns_add(w, "broker.local", "192.168.4.1") == 0 && st_rp2040_wifi_dns_add(w, "broker.local", "192.168.4.9") == 0,
+          "dns: add, and add again replaces");
+    CHECK(st_rp2040_wifi_dns_add(w, "bad name", "1.2.3.4") == -1 && st_rp2040_wifi_dns_add(w, "x", "1.2.3") == -1 &&
+          st_rp2040_wifi_dns_add(w, "x", NULL) == -1, "dns: bad name, bad address, removing one not there -> -1");
+    memset(&s, 0, sizeof s);
+    s.size = sizeof s;
+    CHECK(st_rp2040_wifi_status(w, &s) == 0 && s.size == 208 && s.bridges == 1 && s.bridge_open == 0 && s.bridge_failed == 0,
+          "status counts the bridge");
+    CHECK(st_rp2040_wifi_bridge_tcp(w, 1883, NULL, 0) == 0 && st_rp2040_wifi_dns_add(w, "broker.local", NULL) == 0, "bridge and name removed");
     st_rp2040_destroy(plain);
     st_rp2040_destroy(w);
 }
@@ -334,6 +359,85 @@ static void wifi_forward(const unsigned char *uf2, size_t len) {
     st_rp2040_destroy(g_wifi_chip);
     g_wifi_chip = st_rp2040_create_ex(0, ST_RP2040_BUS_ALL | ST_RP2040_CYW43);
     CHECK(st_rp2040_wifi_forward_tcp(g_wifi_chip, port, 80) == port, "forward: destroy freed the port (a new chip takes it)");
+    st_rp2040_destroy(g_wifi_chip);
+}
+
+/* Outbound bridge: the guest dials echo.local:7777 (a name of the gateway's DNS), the core relays it to an echo server
+ * of this process on 127.0.0.1; a second bridge to a closed port is refused at once. Run as Proteus runs the chip. */
+static void wifi_bridge(const unsigned char *uf2, size_t len) {
+    static const char *client =
+        "import network,time,socket\nw=network.WLAN(network.STA_IF)\nw.active(True)\nw.connect('Proteus','proteus-pass')\n"
+        "while not w.isconnected():\n time.sleep_ms(20)\n"
+        "c=socket.socket()\nc.connect(socket.getaddrinfo('echo.local',7777)[0][-1])\nc.write(b'bridged from C'*20)\n"
+        "r=b''\nwhile len(r)<280:\n d=c.recv(512)\n if not d: break\n r+=d\n"
+        "print('ECHO',len(r),r==b'bridged from C'*20)\nc.close()\n"
+        "c=socket.socket()\ntry:\n c.connect(('192.168.4.1',7778))\nexcept OSError as e:\n print('REFUSED',e.errno)\n"
+        "print('BRIDGE DONE')\n\x04";
+    const uint32_t watch = 0x3FFFFFFFu & ~((1u << 23) | (1u << 24) | (1u << 25) | (1u << 29));
+    struct sockaddr_in a;
+    socklen_t alen = sizeof a;
+    sock_t ls, cs = SOCK_BAD;
+    int stage = 0, echo_port, closed_port;
+    char buf[512];
+    st_rp2040_wifi_info s;
+#ifdef _WIN32
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+    /* a closed port: bound, then released */
+    ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(0x7F000001u);
+    bind(ls, (struct sockaddr *)&a, sizeof a);
+    getsockname(ls, (struct sockaddr *)&a, &alen);
+    closed_port = ntohs(a.sin_port);
+    sock_close(ls);
+    /* the echo server */
+    ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    a.sin_port = 0;
+    alen = sizeof a;
+    CHECK(ls != SOCK_BAD && bind(ls, (struct sockaddr *)&a, sizeof a) == 0 && listen(ls, 2) == 0 &&
+          getsockname(ls, (struct sockaddr *)&a, &alen) == 0, "bridge: echo server on 127.0.0.1");
+    echo_port = ntohs(a.sin_port);
+    sock_nonblock(ls);
+
+    g_wifi_events = g_wifi_lease = 0; g_wifi_mode = 0; g_wifi_cdc_len = 0; g_wifi_cdc[0] = 0;
+    g_wifi_chip = st_rp2040_create_ex(0, ST_RP2040_BUS_ALL | ST_RP2040_CYW43);
+    st_rp2040_set_serial_callback(g_wifi_chip, wifi_cdc, NULL);
+    CHECK(st_rp2040_wifi_set_ap(g_wifi_chip, "Proteus", "proteus-pass", 0, 0) == 0, "bridge: WPA2 AP");
+    CHECK(st_rp2040_wifi_bridge_tcp(g_wifi_chip, 7777, "127.0.0.1", echo_port) == 0 &&
+          st_rp2040_wifi_bridge_tcp(g_wifi_chip, 7778, "127.0.0.1", closed_port) == 0 &&
+          st_rp2040_wifi_dns_add(g_wifi_chip, "echo.local", "192.168.4.1") == 0, "bridge: 7777 -> echo server, 7778 -> closed port, echo.local");
+    CHECK(st_rp2040_load_uf2(g_wifi_chip, uf2, len) > 1000, "bridge: W image loads");
+    for (long i = 0; i < 3000000 && !contains(g_wifi_cdc, "BRIDGE DONE") && st_rp2040_status(g_wifi_chip) == ST_RP2040_STATUS_OK; i++) {
+        int n;
+        st_rp2040_run_until_edge(g_wifi_chip, 30000, 75, watch);
+        st_rp2040_wifi_poll(g_wifi_chip);
+        if (stage == 0 && contains(g_wifi_cdc, ">>> ")) {
+            st_rp2040_serial_write(g_wifi_chip, ST_RP2040_SERIAL_USB_CDC, (const uint8_t *)"\x01", 1);
+            stage = 1;
+        }
+        if (stage == 1 && contains(g_wifi_cdc, "raw REPL")) {
+            st_rp2040_serial_write(g_wifi_chip, ST_RP2040_SERIAL_USB_CDC, (const uint8_t *)client, strlen(client));
+            stage = 2;
+        }
+        if (cs == SOCK_BAD) {
+            cs = accept(ls, NULL, NULL);
+            if (cs != SOCK_BAD) sock_nonblock(cs);
+        } else if ((n = (int)recv(cs, buf, (int)sizeof buf, 0)) > 0) send(cs, buf, n, 0);
+        else if (n == 0) { sock_close(cs); cs = SOCK_BAD; sock_close(ls); ls = SOCK_BAD; }
+    }
+    CHECK(contains(g_wifi_cdc, "ECHO 280 True"), "bridge: the guest's bytes come back from the echo server through the bridge");
+    CHECK(contains(g_wifi_cdc, "REFUSED 104"), "bridge: a closed host port resets the guest's connect()");
+    for (int k = 0; k < 2000; k++) { st_rp2040_run_until_edge(g_wifi_chip, 30000, 75, watch); if (st_rp2040_wifi_poll(g_wifi_chip) == 0) break; }
+    memset(&s, 0, sizeof s);
+    s.size = sizeof s;
+    CHECK(st_rp2040_wifi_status(g_wifi_chip, &s) == 0 && s.bridges == 2 && s.bridge_open == 0 && s.bridge_connected == 1 &&
+          s.bridge_failed == 1 && s.bridge_to_host == 280 && s.bridge_to_guest == 280 && s.bridge_error == ST_RP2040_WIFI_BRIDGE_ERR_REFUSED,
+          "bridge: status counts one relayed connection and one refused");
+    if (cs != SOCK_BAD) sock_close(cs);
+    if (ls != SOCK_BAD) sock_close(ls);
     st_rp2040_destroy(g_wifi_chip);
 }
 
@@ -493,6 +597,7 @@ int main(int argc, char **argv) {
             wifi_join(wfw, wlen, 1, "proteus-pass");
             wifi_join(wfw, wlen, 2, "proteus-pass");
             wifi_forward(wfw, wlen);
+            wifi_bridge(wfw, wlen);
             free(wfw);
         }
     } else puts("wifi (firmware): SKIPPED (pass a Pico W .uf2 as the second argument)");

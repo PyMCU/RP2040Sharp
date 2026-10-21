@@ -262,7 +262,7 @@ public unsafe class PicoWForwardTests(ITestOutputHelper output)
             var st = WifiStatusOf(s.H);
             output.WriteLine($"accepted {st.TcpAccepted}, failed {st.TcpFailed}, to guest {st.TcpToGuest} B, from guest {st.TcpFromGuest} B, " +
                              $"{s.Calls} run calls; events: " + string.Join(",", s.Host.Events.Select(e => e.Event)));
-            Assert.Equal(160u, st.Size);
+            Assert.Equal(208u, st.Size);
             Assert.Equal(1u, st.TcpForwards);
             Assert.Equal(0u, st.TcpFailed);
             Assert.True(st.TcpAccepted >= 12, "every request was a connection");

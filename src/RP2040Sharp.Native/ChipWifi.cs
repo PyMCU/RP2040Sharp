@@ -6,7 +6,7 @@ using RP2040Sharp.Wireless.Cyw43;
 
 namespace SiliconTwin.Native;
 
-/// <summary>st_rp2040_wifi_info (silicontwin_rp2040.h): 160 bytes (112 before the port forwarding fields), the same layout on
+/// <summary>st_rp2040_wifi_info (silicontwin_rp2040.h): 208 bytes (112 before the port forwarding fields, 160 before the bridges), the same layout on
 /// x86 and x64. Grown only at the end; the caller's <c>size</c> says how much of it the caller knows (docs/wireless.md).</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct WifiStatus
@@ -28,6 +28,10 @@ internal unsafe struct WifiStatus
     public uint TcpForwards, TcpOpen;
     public ulong TcpAccepted, TcpFailed, TcpToGuest, TcpFromGuest;
     public ushort TcpHostPort, TcpGuestPort, TcpPeerPort, Reserved3;
+    // ---- 160: outbound bridges (W3) ----
+    public uint Bridges, BridgeOpen;
+    public ulong BridgeConnected, BridgeFailed, BridgeToHost, BridgeToGuest;
+    public ushort BridgeGatewayPort, BridgeHostPort, BridgeGuestPort, BridgeError;
 }
 
 /// <summary>
@@ -36,8 +40,9 @@ internal unsafe struct WifiStatus
 /// gateway with DHCP on 192.168.4.0/24, <see cref="VirtualNet"/>) and the access point the host configures with
 /// st_rp2040_wifi_set_ap. It follows what the station does (scan, join, wrong passphrase, unknown SSID, leave, DHCP
 /// lease, WL_ON power) into a status a host can poll and events it delivers after each run, never from inside one.
-/// Protocol level only: no RF. The host's network is reached only through the forwards the host asks for
-/// (st_rp2040_wifi_forward_tcp): listeners on 127.0.0.1, relayed to the station's servers (docs/wireless.md).
+/// Protocol level only: no RF. The host's network is reached only through what the host sets up: forwards
+/// (st_rp2040_wifi_forward_tcp: listeners on 127.0.0.1, relayed to the station's servers) and bridges
+/// (st_rp2040_wifi_bridge_tcp: a gateway port relayed to one host:port), docs/wireless.md.
 /// </summary>
 internal sealed unsafe class ChipWifi : IDisposable
 {
@@ -45,6 +50,9 @@ internal sealed unsafe class ChipWifi : IDisposable
     public const uint FlagPowered = 1, FlagLeased = 2;
     public const int EvScan = 1, EvJoin = 2, EvLease = 3, EvLeave = 4, EvBadAuth = 5, EvNoNetwork = 6;
     public const int EvTcpOpen = 7, EvTcpClose = 8, EvTcpRefused = 9;
+    public const int EvBridgeOpen = 10, EvBridgeClose = 11, EvBridgeFailed = 12;
+    /// <summary>Names the gateway's DNS server answers (st_rp2040_wifi_dns_add).</summary>
+    public const int MaxDnsNames = 64;
     /// <summary>Simulated seconds per core-0 cycle for the forwarder's timers: the nominal clk_sys is close enough.</summary>
     private const double NominalHz = 125_000_000;
     /// <summary>Host time between two pumps of the forwards from inside the run calls.</summary>
@@ -71,6 +79,8 @@ internal sealed unsafe class ChipWifi : IDisposable
     private uint _changes;
     private TcpForwarder? _fwd;
     private TcpForwarder.ConnInfo _lastConn;
+    private TcpForwarder.BridgeInfo _lastBridge;
+    private ushort _lastBridgeError;
     private long _nextPump;
 
     public delegate* unmanaged[Cdecl]<nint, int, ulong, WifiStatus*, void> Cb;
@@ -229,14 +239,115 @@ internal sealed unsafe class ChipWifi : IDisposable
             why = "127.0.0.1:" + hostPort + " is not forwarded";
             return null;
         }
+        try { return Forwarder().Listen((ushort)hostPort, (ushort)guestPort); }
+        catch (InvalidOperationException e) { why = e.Message; return null; }
+    }
+
+    /// <summary>The forwarder (forwards and bridges), set up on first use: simulated time, events into the queue.</summary>
+    private TcpForwarder Forwarder()
+    {
         if (_fwd is null)
         {
             _fwd = Net.Forwarder;
             _fwd.Clock = () => _cycles() / NominalHz;
             _fwd.OnEvent = OnForward;
+            _fwd.OnBridgeEvent = OnBridge;
         }
-        try { return _fwd.Listen((ushort)hostPort, (ushort)guestPort); }
-        catch (InvalidOperationException e) { why = e.Message; return null; }
+        return _fwd;
+    }
+
+    // ---- outbound bridges (W3) ---------------------------------------------------------------------------------
+
+    /// <summary>st_rp2040_wifi_bridge_tcp: relay the guest's connections to 192.168.4.1:<paramref name="gatewayPort"/> to
+    /// <paramref name="host"/>:<paramref name="port"/>; port 0 removes the bridge. True, or false with
+    /// <paramref name="why"/>.</summary>
+    public bool Bridge(int gatewayPort, byte* host, int port, out string? why)
+    {
+        why = null;
+        if (gatewayPort < 1 || gatewayPort > 65535) { why = "gateway_port " + gatewayPort + " out of range 1..65535"; return false; }
+        if (port < 0 || port > 65535) { why = "port " + port + " out of range 1..65535 (0 removes the bridge)"; return false; }
+        if (port == 0)
+        {
+            if (_fwd is not null && _fwd.RemoveBridge((ushort)gatewayPort)) return true;
+            why = "gateway port " + gatewayPort + " is not bridged";
+            return false;
+        }
+        if ((why = ParseHost(host, out var h)) != null) return false;
+        try { Forwarder().AddBridge((ushort)gatewayPort, h!, (ushort)port); return true; }
+        catch (InvalidOperationException e) { why = e.Message; return false; }
+    }
+
+    /// <summary>A bridge's host: a name or an IPv4 / IPv6 literal (brackets allowed around IPv6), at most 253 bytes.</summary>
+    public static string? ParseHost(byte* host, out string? h)
+    {
+        h = null;
+        if (host == null || host[0] == 0) return "host is NULL or empty";
+        int n = CStrLen(host, 254);
+        if (n > 253) return "host is longer than 253 bytes";
+        for (int i = 0; i < n; i++)
+        {
+            byte c = host[i];
+            bool ok = c is >= (byte)'a' and <= (byte)'z' or >= (byte)'A' and <= (byte)'Z' or >= (byte)'0' and <= (byte)'9'
+                      or (byte)'.' or (byte)'-' or (byte)'_' or (byte)':' or (byte)'[' or (byte)']' or (byte)'%';
+            if (!ok) return "host has a character that is not in a name or an address: 0x" + c.ToString("X2");
+        }
+        var s = Encoding.ASCII.GetString(host, n);
+        if (s.StartsWith('[') && s.EndsWith(']') && s.Length > 2) s = s[1..^1];
+        if (s.Contains('[') || s.Contains(']')) return "host '" + s + "': brackets only around a whole IPv6 address";
+        if (s.Contains(':') && !System.Net.IPAddress.TryParse(s, out _)) return "host '" + s + "' is not a valid IPv6 address";
+        h = s;
+        return null;
+    }
+
+    private void OnBridge(TcpForwarder.Event ev, TcpForwarder.BridgeInfo info)
+    {
+        _lastBridge = info;
+        if (ev == TcpForwarder.Event.Refused) _lastBridgeError = (ushort)info.Error;
+        Push(ev switch { TcpForwarder.Event.Open => EvBridgeOpen, TcpForwarder.Event.Close => EvBridgeClose, _ => EvBridgeFailed });
+    }
+
+    /// <summary>st_rp2040_wifi_dns_add: the gateway's DNS answers <paramref name="name"/> with <paramref name="ipv4"/>; ipv4
+    /// NULL or "" removes the name. True, or false with <paramref name="why"/>.</summary>
+    public bool DnsAdd(byte* name, byte* ipv4, out string? why)
+    {
+        if ((why = ParseDnsName(name, out var n)) != null) return false;
+        var records = Net.DnsRecords;
+        if (ipv4 == null || ipv4[0] == 0)
+        {
+            if (records.Remove(n!)) return true;
+            why = "the name '" + n + "' is not there to remove";
+            return false;
+        }
+        int len = CStrLen(ipv4, 16);
+        var text = len > 15 ? "" : Encoding.ASCII.GetString(ipv4, len);
+        var parts = text.Split('.');
+        var ip = new byte[4];
+        bool ok = parts.Length == 4;
+        for (int i = 0; ok && i < 4; i++)
+            ok = parts[i].Length is >= 1 and <= 3 && parts[i].All(char.IsAsciiDigit) && byte.TryParse(parts[i], out ip[i]);
+        if (!ok) { why = "ipv4 '" + (len > 15 ? text + "..." : text) + "' is not a dotted-quad IPv4 address"; return false; }
+        if (!records.ContainsKey(n!) && records.Count >= MaxDnsNames) { why = "at most " + MaxDnsNames + " names per chip"; return false; }
+        records[n!] = ip;
+        return true;
+    }
+
+    /// <summary>A DNS name: 1..253 bytes of letters, digits, '-', '_' and '.', labels of 1..63; a trailing '.' is dropped.</summary>
+    public static string? ParseDnsName(byte* name, out string? n)
+    {
+        n = null;
+        if (name == null || name[0] == 0) return "name is NULL or empty";
+        int len = CStrLen(name, 255);
+        if (len > 254 || (len == 254 && name[253] != (byte)'.')) return "name is longer than 253 bytes";
+        var s = Encoding.ASCII.GetString(name, len);
+        foreach (var ch in s)
+            if (!(char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_' or '.'))
+                return "name has a character other than letters, digits, '-', '_' and '.': 0x" + ((int)ch).ToString("X2");
+        if (s.EndsWith('.')) s = s[..^1];
+        if (s.Length == 0) return "name is only a '.'";
+        foreach (var label in s.Split('.'))
+            if (label.Length is 0 or > 63) return "name '" + s + "' has an empty label or one longer than 63 bytes";
+        n = s;
+        return null;
     }
 
     private void OnForward(TcpForwarder.Event ev, TcpForwarder.ConnInfo info)
@@ -252,15 +363,15 @@ internal sealed unsafe class ChipWifi : IDisposable
         if (f is null) return 0;
         f.Pump();
         _nextPump = Stopwatch.GetTimestamp() + PumpInterval;
-        return f.OpenConnections;
+        return f.OpenConnections + f.BridgedConnections;
     }
 
-    /// <summary>From the run calls: pump the forwards at most once per <see cref="PumpInterval"/> of host time, and not at
-    /// all on a chip that forwards nothing (one null check on the idle fast path).</summary>
+    /// <summary>From the run calls: pump the forwards and bridges at most once per <see cref="PumpInterval"/> of host time,
+    /// and not at all on a chip that forwards and bridges nothing (one null check on the idle fast path).</summary>
     public void PumpIfDue()
     {
         var f = _fwd;
-        if (f is null || (f.Forwards == 0 && !f.Busy)) return;
+        if (f is null || (f.Forwards == 0 && f.Bridges == 0 && !f.Busy)) return;
         var t = Stopwatch.GetTimestamp();
         if (t < _nextPump) return;
         _nextPump = t + PumpInterval;
@@ -308,6 +419,16 @@ internal sealed unsafe class ChipWifi : IDisposable
             s.TcpHostPort = _lastConn.HostPort;
             s.TcpGuestPort = _lastConn.GuestPort;
             s.TcpPeerPort = _lastConn.PeerPort;
+            s.Bridges = (uint)f.Bridges;
+            s.BridgeOpen = (uint)f.BridgedConnections;
+            s.BridgeConnected = (ulong)f.BridgeConnected;
+            s.BridgeFailed = (ulong)f.BridgeFailed;
+            s.BridgeToHost = (ulong)f.ToHostBytes;
+            s.BridgeToGuest = (ulong)f.FromHostBytes;
+            s.BridgeGatewayPort = _lastBridge.GatewayPort;
+            s.BridgeHostPort = _lastBridge.HostPort;
+            s.BridgeGuestPort = _lastBridge.GuestPort;
+            s.BridgeError = _lastBridgeError;
         }
         return s;
     }

@@ -188,8 +188,9 @@ void st_rp2040_serial_write(st_rp2040 *chip, st_rp2040_serial_channel channel, c
  * the guest downloads is parked, never executed; no RF, no chip internals): one access point the host configures here, and a gateway at 192.168.4.1 that answers ARP and DHCP (leases from 192.168.4.2, mask /24).
  * The guest's own driver and TCP/IP stack run unmodified (MicroPython: network.WLAN(network.STA_IF).scan(),
  * .connect(ssid, key), .ifconfig()). Protocol level only: no RF. Nothing reaches the host's real network except
- * through the forwards the host asks for (st_rp2040_wifi_forward_tcp: listeners on 127.0.0.1 only).
- * docs/wireless.md describes the model and what later versions add (outbound bridges).
+ * through what the host sets up: forwards into the guest (st_rp2040_wifi_forward_tcp: listeners on 127.0.0.1 only) and
+ * bridges out of it (st_rp2040_wifi_bridge_tcp: a gateway port relayed to the one host:port the host names).
+ * docs/wireless.md describes the model.
  * Every call below on a chip without the CYW43439 is rejected (-1, last_error says why). */
 
 /* Join state of the station (st_rp2040_wifi_info.state). New values may be added: treat unknown ones as DOWN. */
@@ -210,8 +211,8 @@ enum {
 /* Link status. Set `size` to sizeof(st_rp2040_wifi_info) before calling: the library fills that many bytes at most and
  * sets `size` to the bytes it filled, so a host built against an older, shorter struct keeps working with a newer
  * library and the other way round. Fields are only ever added at the end; a reserved field may later get a meaning
- * whose value is 0 in every earlier version. 160 bytes in this version (112 before the port forwarding fields),
- * the same on x86 and x64. */
+ * whose value is 0 in every earlier version. 208 bytes in this version (112 before the port forwarding fields, 160
+ * before the outbound bridges), the same on x86 and x64. */
 typedef struct st_rp2040_wifi_info {
     uint32_t size;        /* in: bytes the caller provides (at least 8); out: bytes filled */
     int32_t  state;       /* st_rp2040_wifi_state */
@@ -241,7 +242,27 @@ typedef struct st_rp2040_wifi_info {
     uint16_t tcp_guest_port; /*   its guest port, */
     uint16_t tcp_peer_port;  /*   and the host client's own port (127.0.0.1:tcp_peer_port) */
     uint16_t reserved3;
+    /* ---- 160: outbound bridges (st_rp2040_wifi_bridge_tcp); a library older than them fills `size` = 160 ---- */
+    uint32_t bridges;             /* gateway ports bridged */
+    uint32_t bridge_open;         /* bridged connections the guest opened and that have not finished */
+    uint64_t bridge_connected;    /* guest connections relayed to their host since create */
+    uint64_t bridge_failed;       /* of the guest's connections, given up: host refused, unreachable, unknown name, too many */
+    uint64_t bridge_to_host;      /* payload bytes from the guest to the hosts */
+    uint64_t bridge_to_guest;     /* payload bytes from the hosts to the guest */
+    uint16_t bridge_gateway_port; /* the connection of the last ST_RP2040_WIFI_EV_BRIDGE_* event: the gateway port the guest dialled, */
+    uint16_t bridge_host_port;    /*   the host's port it is relayed to, */
+    uint16_t bridge_guest_port;   /*   and the guest's own port (192.168.4.2:bridge_guest_port) */
+    uint16_t bridge_error;        /* why the last ST_RP2040_WIFI_EV_BRIDGE_FAILED failed: ST_RP2040_WIFI_BRIDGE_ERR_* (0: none yet) */
 } st_rp2040_wifi_info;
+
+/* st_rp2040_wifi_info.bridge_error. New values may be added: treat unknown ones as UNREACHABLE. */
+enum {
+    ST_RP2040_WIFI_BRIDGE_ERR_NONE        = 0,
+    ST_RP2040_WIFI_BRIDGE_ERR_REFUSED     = 1, /* the host answered with a reset: nothing listens on host:port */
+    ST_RP2040_WIFI_BRIDGE_ERR_UNREACHABLE = 2, /* no answer within 10 s of host time, or no route */
+    ST_RP2040_WIFI_BRIDGE_ERR_NO_HOST     = 3, /* the bridge's host name does not resolve on this PC */
+    ST_RP2040_WIFI_BRIDGE_ERR_FULL        = 4  /* 64 bridged connections are open already */
+};
 
 /* Events of the Wi-Fi callback. New values may be added: ignore unknown ones. */
 typedef enum {
@@ -253,7 +274,10 @@ typedef enum {
     ST_RP2040_WIFI_EV_NO_NETWORK = 6, /* a join for an SSID no AP has */
     ST_RP2040_WIFI_EV_TCP_OPEN    = 7, /* a forwarded connection reached the guest's server (tcp_*_port say which) */
     ST_RP2040_WIFI_EV_TCP_CLOSE   = 8, /* a forwarded connection ended (closed by either side, or reset) */
-    ST_RP2040_WIFI_EV_TCP_REFUSED = 9  /* a forwarded connection was given up: no server on the guest port within 10 s simulated */
+    ST_RP2040_WIFI_EV_TCP_REFUSED = 9, /* a forwarded connection was given up: no server on the guest port within 10 s simulated */
+    ST_RP2040_WIFI_EV_BRIDGE_OPEN   = 10, /* a guest connection to a bridged gateway port reached its host (bridge_*_port say which) */
+    ST_RP2040_WIFI_EV_BRIDGE_CLOSE  = 11, /* a bridged connection ended (closed by either side, or reset) */
+    ST_RP2040_WIFI_EV_BRIDGE_FAILED = 12  /* a guest connection to a bridged port was reset: the host could not be reached (bridge_error) */
 } st_rp2040_wifi_event;
 
 /* A Wi-Fi status change. Called when st_rp2040_run / _run_until_edge / _wifi_poll has finished its work, on the same
@@ -288,10 +312,31 @@ int  st_rp2040_wifi_forward_tcp(st_rp2040 *chip, int host_port, int guest_port);
 /* Move what the forwarded host sockets delivered (connections, bytes, closes) into the guest now, and run the
  * forwarding timers; then deliver the Wi-Fi events raised. The socket I/O itself runs on background threads; this
  * and the run calls are the only places the guest side is touched, always on the caller's thread. The run calls do
- * it by themselves at most once per millisecond of host time (never on a chip without forwards); a host that runs
- * the chip in short calls (Proteus) calls this once per step for the lowest latency. Not from inside a callback.
- * Returns the forwarded connections open, or -1. */
+ * it by themselves at most once per millisecond of host time (never on a chip without forwards or bridges); a host
+ * that runs the chip in short calls (Proteus) calls this once per step for the lowest latency. The bridges
+ * (_wifi_bridge_tcp) are pumped here too. Not from inside a callback. Returns the connections open, forwarded and
+ * bridged, or -1. */
 int  st_rp2040_wifi_poll(st_rp2040 *chip);
+
+/* Outbound bridge: a guest connecting to the gateway 192.168.4.1:gateway_port is relayed to host:port on the PC's real
+ * network (an MQTT broker on 127.0.0.1:1883, say), the way a NAT router relays a station's connection. The guest reaches
+ * only what the host configures here: a gateway port is relayed to its one host:port, nothing the guest sends picks the
+ * destination, and every other address stays unreachable. The guest's SYN is answered once the host connection is up;
+ * when it cannot be (refused, unreachable, an unknown name, 64 bridged connections open) the guest gets a reset, so its
+ * connect() fails at once, and ST_RP2040_WIFI_EV_BRIDGE_FAILED says why (bridge_error). `host` is a name or an IPv4 / IPv6
+ * literal of at most 253 bytes, resolved by the PC at each connection; port 1..65535. gateway_port 1..65535, each once
+ * per chip (port 0 removes its bridge and resets its connections; host is then ignored and may be NULL). At most 16
+ * bridges per chip; they are pumped with the forwards (st_rp2040_wifi_poll and the run calls); st_rp2040_destroy closes them.
+ * Returns 0, or -1 (bad handle, faulted chip, no CYW43439, a port out of range, a bad host, already bridged, not
+ * bridged, too many: st_rp2040_last_error says which). */
+int  st_rp2040_wifi_bridge_tcp(st_rp2040 *chip, int gateway_port, const char *host, int port);
+/* A name for the gateway's DNS server (192.168.4.1, which the DHCP lease gives the station): the guest's lookups of
+ * `name` answer `ipv4` (dotted quad), e.g. ("broker.local", "192.168.4.1") lets the firmware dial a bridge by name.
+ * Every other name is NXDOMAIN, as before. `name` is 1..253 bytes of letters, digits, '-', '_' and '.', labels of
+ * 1..63, compared without case; a trailing '.' is dropped. ipv4 NULL or "" removes the name. At most 64 names per
+ * chip; adding a name again replaces its address. Returns 0, or -1 (bad handle, faulted chip, no CYW43439, a bad name
+ * or address, a name not there to remove, too many: st_rp2040_last_error says which). */
+int  st_rp2040_wifi_dns_add(st_rp2040 *chip, const char *name, const char *ipv4);
 
 /* The Wi-Fi types and values are those of silicontwin_rp2350.h: st_rp2040_wifi_info is its st_wifi_status (the name
  * differs because st_rp2040_wifi_status is the function), same layout, same ST_*WIFI_* numbers, so a host that drives

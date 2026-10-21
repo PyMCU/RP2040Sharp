@@ -158,7 +158,7 @@ public unsafe class PicoWWifiTests(ITestOutputHelper output)
         Assert.Equal("255.255.255.0", Ip(s.Netmask));
         Assert.Equal("Proteus", Ssid(s));
         Assert.Equal(-50, s.Rssi);
-        Assert.Equal(160u, s.Size);
+        Assert.Equal(208u, s.Size);
         Assert.True(s.TxBytes > 0 && s.RxBytes > 0 && s.TxFrames > 0 && s.RxFrames > 0, "DHCP moved frames both ways");
         Assert.Equal([ChipWifi.EvScan, ChipWifi.EvJoin, ChipWifi.EvLease], o.Events.Select(e => e.Event));
         Assert.True(o.Events.Zip(o.Events.Skip(1)).All(p => p.First.Cycle <= p.Second.Cycle), "events in cycle order");
@@ -246,14 +246,14 @@ public unsafe class PicoWWifiTests(ITestOutputHelper output)
             Assert.Equal(0u, head.Gateway[0]);                                    // past the caller's size: untouched
             var big = new WifiStatus { Size = 4096 };                                // bigger than ours: ours
             Assert.Equal(0, GetStatus(w, &big));
-            Assert.Equal(160u, big.Size);
+            Assert.Equal(208u, big.Size);
             Assert.Equal(ChipWifi.StateDown, big.State);
             Assert.Equal(0u, big.Flags);
             Assert.Equal("192.168.4.1", Ip(big.Gateway));
             Assert.Equal(0, Status(w));
             Assert.Equal(0, Status(plain));
             SetWifiCb(plain, null, 0);                                              // NULL is fine without a radio
-            Assert.Equal(160, sizeof(WifiStatus));
+            Assert.Equal(208, sizeof(WifiStatus));
         }
         finally { Destroy(plain); Destroy(w); }
     }

@@ -824,6 +824,36 @@ internal static unsafe class Exports
         finally { EndRun(chip); }
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_wifi_bridge_tcp", CallConvs = [typeof(CallConvCdecl)])]
+    public static int WifiBridgeTcp(nint h, int gatewayPort, byte* host, int port)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return -1;
+        try
+        {
+            if (WifiOf(chip, "st_rp2040_wifi_bridge_tcp") is not { } w) return -1;
+            if (w.Bridge(gatewayPort, host, port, out var why)) return 0;
+            chip.Reject("st_rp2040_wifi_bridge_tcp: " + why);
+            return -1;
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_wifi_bridge_tcp", e); return -1; }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_wifi_dns_add", CallConvs = [typeof(CallConvCdecl)])]
+    public static int WifiDnsAdd(nint h, byte* name, byte* ipv4)
+    {
+        var chip = Lookup(h);
+        if (chip == null || chip.Faulted) return -1;
+        try
+        {
+            if (WifiOf(chip, "st_rp2040_wifi_dns_add") is not { } w) return -1;
+            if (w.DnsAdd(name, ipv4, out var why)) return 0;
+            chip.Reject("st_rp2040_wifi_dns_add: " + why);
+            return -1;
+        }
+        catch (Exception e) { chip.Fault("st_rp2040_wifi_dns_add", e); return -1; }
+    }
+
     // ---- CIRCUITPY from the host (st_rp2040_fs_*) ----------------------------------------------------------------------
     // What a PC does when it copies files onto the CIRCUITPY drive, done on the FAT volume in emulated flash (FatVolume).
 
