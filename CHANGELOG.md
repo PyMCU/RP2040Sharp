@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed: `CircuitPythonFs.BuildVolume` truncated names to 8.3 and could not hold folders; it now bakes whole projects
+
+`BuildVolume` wrote root-directory entries only, with each name cut to 8.3 and no long-name entries, so a module such as
+`adafruit_pioasm.py` landed on CIRCUITPY as `ADAFRUIT.PY` and `import adafruit_pioasm` failed, two modules sharing their
+first eight letters overwrote each other, and a `lib/<package>/__init__.py` project could not be baked at all.
+`BuildVolume`, `Bake`, `ReadFile` and the new `ListFiles` and `BuildVolumeFromDirectory` now go through `FatVolume`:
+names may be paths with `/` (folders are created on demand), long names get VFAT entries, single-case 8.3 names keep their
+case (`code.py` stays `code.py`), empty files take no cluster, and the output is deterministic (timestamps 1980-01-01).
+`FatVolume.Format(int sizeBytes)` creates an empty CIRCUITPY volume with CircuitPython's own geometry and
+`FatVolume.ListFiles()` lists every file recursively. `BuildVolumeFromDirectory(sizeBytes, directory)` bakes a host
+folder, skipping dot-files and `__pycache__`. **Breaking:** every bad input (invalid or duplicate path, a file and a
+folder with the same name, a volume that is full or has no room left in the root) now throws `FatException` instead of
+`ArgumentException` or `InvalidOperationException`. Tested by `CircuitPythonFsTests` (a realistic project with a 70 KB
+file and a `.mpy`, 8.3-prefix collisions, LFN checksums and 13/26-character names, deep nesting, a folder spanning more
+than one cluster, the 512-entry root, overflow, path validation) and `CircuitPythonProjectTests`, which bakes a long-named
+module and a nested package and boots CircuitPython 9.2.1 on the RP2040 until `ICIRCUIT pio 42` is printed.
+
 ### Added: the Pico W onboard LED (`Pin("LED")`) is modelled, and `st_rp2040_wifi_gpio` reports it
 
 On the W boards the LED hangs off the CYW43439's WL_GPIO0, which the cyw43-driver sets with the `WLC_SET_VAR "gpioout"`
