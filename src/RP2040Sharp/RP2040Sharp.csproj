@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <PackageId>RP2040Sharp</PackageId>
-    <Description>Cycle-accurate RP2040 emulator: Cortex-M0+ CPU, BusInterconnect, and all peripherals. Single-package, AOT-compatible.</Description>
+    <Description>Register-accurate RP2040 emulator: Cortex-M0+ CPU, BusInterconnect, and all peripherals. Single-package, AOT-compatible.</Description>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <PublishTrimmed>true</PublishTrimmed>

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed: "register-accurate" instead of "cycle-accurate" in the package description and README
+
+CPU instructions and peripheral registers behave as on silicon; timing follows rp2040js's per-instruction cycle-cost
+model and is not cycle-exact. `RP2040Sharp.Wireless` drops the `emulator` tag: the CYW43439 is not emulated, its gSPI
+host protocol is translated to a virtual network.
+
 ### Fixed: `CircuitPythonFs.BuildVolume` truncated names to 8.3 and could not hold folders; it now bakes whole projects
 
 `BuildVolume` wrote root-directory entries only, with each name cut to 8.3 and no long-name entries, so a module such as

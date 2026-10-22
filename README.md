@@ -6,7 +6,7 @@
 ![License](https://img.shields.io/badge/license-BUSL--1.1-orange.svg)
 ![.NET Version](https://img.shields.io/badge/.NET-10.0-purple)
 
-**RP2040Sharp** is a high-performance emulator for the Raspberry Pi RP2040 microcontroller, written entirely in **modern C# (.NET 10)**. It runs real RP2040 firmware — including **MicroPython** — without modification.
+**RP2040Sharp** is a high-performance, register-accurate emulator for the Raspberry Pi RP2040 microcontroller, written entirely in **modern C# (.NET 10)**. It runs real RP2040 firmware — including **MicroPython** — without modification.
 
 This project is a port and re-imagination of the excellent [rp2040js](https://github.com/wokwi/rp2040js) project by Uri Shaked. The goal is to bring embedded emulation to the .NET ecosystem with a strong focus on speed and type safety, leveraging the latest runtime features.
 

@@ -26,7 +26,7 @@ public sealed unsafe class CortexM0Plus
     public Registers Registers;
     public long Cycles;
 
-    // ── Cycle-accurate timing model (always on) ──────────────────────────────
+    // ── Cycle-cost timing model (always on, not cycle-exact) ─────────────────
     // The core reproduces the EXACT per-instruction cycle model of rp2040js (cortex-m0-core.ts
     // executeInstruction): each instruction costs a base cycle (the run loop's single Cycles++)
     // plus the per-type penalties the real M0+ pays — taken branches, BL/BLX/BX, LDM/STM/PUSH/POP

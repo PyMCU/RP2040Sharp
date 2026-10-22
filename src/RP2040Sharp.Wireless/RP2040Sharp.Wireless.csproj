@@ -17,7 +17,7 @@
       (pico-sdk, MicroPython, CircuitPython) runs in STA and SoftAP modes against a virtual access point,
       and BLE advertises/scans/connects and relays GATT between virtual devices.
     </Description>
-    <PackageTags>rp2040;picow;cyw43439;wifi;ble;bluetooth;emulator;sdpcm;whd;hci;virtualization</PackageTags>
+    <PackageTags>rp2040;picow;cyw43439;wifi;ble;bluetooth;sdpcm;whd;hci;virtualization</PackageTags>
 
     <!-- Specialized work: Business Source License 1.1 (converts to MIT on the Change Date).
          nuget.org rejects BUSL-1.1 as a license *expression* (it only accepts OSI/FSF-approved
