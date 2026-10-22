@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace RP2040.Core.Memory;
 
@@ -19,7 +20,7 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
 
     // 0x10000000-0x17FFFFFF: the flash array through its XIP aliases. XIP_CTRL (0x14000000) and XIP_SRAM
     // (0x15000000) sit inside it and are not modelled: they read the array like the rest of the window.
-    private const uint XIP_ARRAY_SPAN = 0x08000000;
+    public const uint XIP_ARRAY_SPAN = 0x08000000;
 
     // The non-striped aliases of SRAM0-3 (datasheet 2.6.1): 0x21000000-0x2103FFFF, one 64 KiB bank each.
     private const uint SRAM_ALIAS_START = 0x21000000;
@@ -35,13 +36,18 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     public readonly byte* PtrFlash;
     public readonly byte* PtrBootRom;
 
-    private readonly IMemoryMappedDevice[] _memoryMap = new IMemoryMappedDevice[16];
+    private struct Region
+    {
+        public IMemoryMappedDevice? Device;
+        public bool[]? SlotPresent;
+        public uint DecodeLimit;
+        public int SlotShift;
+    }
+
+    private readonly Region[] _regions = new Region[16];
 
     // What a bridged region decodes, cached from the device's IAddressDecoder when it is mapped, so a
     // peripheral access checks it with two array loads instead of a type test and a call.
-    private readonly uint[] _decodeLimit = new uint[16];
-    private readonly bool[]?[] _slotPresent = new bool[]?[16];
-    private readonly int[] _slotShift = new int[16];
 
     // SSI peripheral lives inside the Flash region (0x18000000) — handled as a sub-device
     // so the flash fast path continues to serve 0x10000000–0x17FFFFFF unchanged.
@@ -77,17 +83,18 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     {
         if (regionIndex is < 0 or > 15)
             throw new ArgumentOutOfRangeException(nameof(regionIndex));
-        _memoryMap[regionIndex] = device;
+        ref var entry = ref _regions[regionIndex];
+        entry.Device = device;
         if (device is IAddressDecoder decoder)
         {
-            _decodeLimit[regionIndex] = decoder.DecodeLimit;
-            _slotPresent[regionIndex] = decoder.SlotPresent;
-            _slotShift[regionIndex] = decoder.SlotShift;
+            entry.DecodeLimit = decoder.DecodeLimit;
+            entry.SlotPresent = decoder.SlotPresent;
+            entry.SlotShift = decoder.SlotShift;
         }
         else
         {
-            _decodeLimit[regionIndex] = uint.MaxValue;
-            _slotPresent[regionIndex] = null;
+            entry.DecodeLimit = uint.MaxValue;
+            entry.SlotPresent = null;
         }
     }
 
@@ -111,7 +118,9 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
         if (sram < SRAM_SIZE) { value = PtrSram[sram]; return true; }
         if (address - FLASH_START_ADDRESS < XIP_ARRAY_SPAN) { value = PtrFlash[address & MaskFlash]; return true; }
         if (address < BOOTROM_SIZE) { value = PtrBootRom[address]; return true; }
-        return TryReadByteSlow(address, out value);
+        var ok = TryReadByteSlow(address, out var slow);
+        value = slow;
+        return ok;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -125,7 +134,9 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
             return true;
         }
         if (address < BOOTROM_SIZE) { value = Unsafe.ReadUnaligned<ushort>(PtrBootRom + address); return true; }
-        return TryReadHalfWordSlow(address, out value);
+        var ok = TryReadHalfWordSlow(address, out var slow);
+        value = slow;
+        return ok;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -139,7 +150,9 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
             return true;
         }
         if (address < BOOTROM_SIZE) { value = Unsafe.ReadUnaligned<uint>(PtrBootRom + address); return true; }
-        return TryReadWordSlow(address, out value);
+        var ok = TryReadWordSlow(address, out var slow);
+        value = slow;
+        return ok;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -184,12 +197,13 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     {
         var region = address >> 28;
         if (region <= REGION_SRAM) return null;
-        var device = _memoryMap[region];
+        ref var entry = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_regions), (nint)region);
+        var device = entry.Device;
         if (device is null) return null;
         var local = address & 0x0FFFFFFF;
-        if (local >= _decodeLimit[region]) return null;
-        var slots = _slotPresent[region];
-        if (slots is not null && !slots[(local >> _slotShift[region]) & 0xFF]) return null;
+        if (local >= entry.DecodeLimit) return null;
+        var slots = entry.SlotPresent;
+        if (slots is not null && !slots[(local >> entry.SlotShift) & 0xFF]) return null;
         return device;
     }
 
@@ -197,6 +211,12 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     private bool TryReadByteSlow(uint address, out byte value)
     {
         if (Decode(address) is { } d) { value = d.ReadByte(address & 0x0FFFFFFF); return true; }
+        return TryReadByteRare(address, out value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryReadByteRare(uint address, out byte value)
+    {
         if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
         {
             value = _ssiDevice.ReadByte(address - SSI_BASE_ADDRESS);
@@ -211,6 +231,12 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     private bool TryReadHalfWordSlow(uint address, out ushort value)
     {
         if (Decode(address) is { } d) { value = d.ReadHalfWord(address & 0x0FFFFFFF); return true; }
+        return TryReadHalfWordRare(address, out value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryReadHalfWordRare(uint address, out ushort value)
+    {
         if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
         {
             value = _ssiDevice.ReadHalfWord(address - SSI_BASE_ADDRESS);
@@ -222,9 +248,18 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private bool TryReadWordSlow(uint address, out uint value)
+    private bool TryReadWordSlow(uint address, out uint value) => TryReadWordIO(address, out value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryReadWordIO(uint address, out uint value)
     {
         if (Decode(address) is { } d) { value = d.ReadWord(address & 0x0FFFFFFF); return true; }
+        return TryReadWordRare(address, out value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryReadWordRare(uint address, out uint value)
+    {
         if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
         {
             value = _ssiDevice.ReadWord(address - SSI_BASE_ADDRESS);
@@ -276,9 +311,18 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     public void WriteHalfWord(uint address, ushort value) => TryWriteHalfWord(address, value);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private bool TryWriteWordSlow(uint address, uint value)
+    private bool TryWriteWordSlow(uint address, uint value) => TryWriteWordIO(address, value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryWriteWordIO(uint address, uint value)
     {
         if (Decode(address) is { } d) { d.WriteWord(address & 0x0FFFFFFF, value); return true; }
+        return TryWriteWordRare(address, value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryWriteWordRare(uint address, uint value)
+    {
         if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
         {
             _ssiDevice.WriteWord(address - SSI_BASE_ADDRESS, value);
@@ -293,6 +337,12 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     private bool TryWriteByteSlow(uint address, byte value)
     {
         if (Decode(address) is { } d) { d.WriteByte(address & 0x0FFFFFFF, value); return true; }
+        return TryWriteByteRare(address, value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryWriteByteRare(uint address, byte value)
+    {
         if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
         {
             _ssiDevice.WriteByte(address - SSI_BASE_ADDRESS, value);
@@ -307,6 +357,12 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
     private bool TryWriteHalfWordSlow(uint address, ushort value)
     {
         if (Decode(address) is { } d) { d.WriteHalfWord(address & 0x0FFFFFFF, value); return true; }
+        return TryWriteHalfWordRare(address, value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryWriteHalfWordRare(uint address, ushort value)
+    {
         if (address - SSI_BASE_ADDRESS < SSI_SPAN && _ssiDevice != null)
         {
             _ssiDevice.WriteHalfWord(address - SSI_BASE_ADDRESS, value);
