@@ -1,14 +1,17 @@
 using RP2040.Core.Cpu;
 using RP2040.Core.Memory;
+using RP2040.Peripherals.PinLevel;
 
 namespace RP2040.Peripherals.I2c;
 
 /// <summary>
 /// RP2040 I2C peripheral (DesignWare DW_apb_i2c).
 /// I2C0 base: 0x40044000, I2C1 base: 0x40048000.
-/// Transfer simulation via injectable callbacks.
+/// Transfer simulation via injectable callbacks; optionally (<see cref="EnablePinLevel"/>) the master drives SDA/SCL
+/// on the GPIO pads through an <see cref="I2cMasterEngine"/> when firmware routes the I2C function to them. The
+/// engine runs on core 0's cycle counter and is brought up to the cycle of every access (docs/pin-level-buses.md).
 /// </summary>
-public sealed class I2cPeripheral : IMemoryMappedDevice
+public sealed class I2cPeripheral : IMemoryMappedDevice, IDeferrableTickable, II2cMasterHost
 {
     private const uint IC_CON                = 0x000;
     private const uint IC_TAR                = 0x004;
@@ -95,7 +98,110 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
     private readonly Queue<byte> _rxFifo = new(FIFO_DEPTH);
 
     /// <summary>DREQ source for DMA RX: true when the RX FIFO has data.</summary>
-    public bool RxDataAvailable => _rxFifo.Count > 0;
+    public bool RxDataAvailable { get { Dreq(); return _rxFifo.Count > 0; } }
+
+    /// <summary>DREQ source for DMA TX: the transaction model drains the TX FIFO immediately, so it always has room; in
+    /// pin-level mode the FIFO is real and fills while the engine is on the wire.</summary>
+    public bool TxFifoNotFull { get { Dreq(); return _txFifo.Count < FIFO_DEPTH; } }
+
+    /// <summary>Pin-level mode: raised when the engine takes a command off the TX FIFO, so a DMA channel paced by this
+    /// I2C's TX DREQ can re-arm.</summary>
+    public Action? OnTxSpace;
+
+    // ── Pin-level master (opt-in, see EnablePinLevel) ──
+    // With an engine attached and SDA/SCL routed to pads, IC_DATA_CMD feeds a real 16-deep TX FIFO of commands that the
+    // engine executes on the wire; the transaction callbacks below are bypassed. Without an engine, or while the pads
+    // are not routed, nothing here is used and the block behaves as a transaction model.
+    private I2cMasterEngine? _engine;
+    private Func<bool>? _routed;
+    private Func<long>? _clock;
+    private Func<uint>? _icHz;
+    private bool _advancing;
+    private readonly Queue<I2cCommand> _txFifo = new(FIFO_DEPTH);
+
+    /// <summary>The pin-level master engine, or null when pin-level mode is off.</summary>
+    public I2cMasterEngine? PinEngine => _engine;
+
+    /// <summary>Pin-level mode: raised after anything that may have moved the engine's next event (an access, a pad
+    /// input), so the machine plans again.</summary>
+    internal Action? Changed;
+
+    /// <summary>
+    /// Attach a pin-level master. <paramref name="isRouted"/> reports whether firmware has routed both SDA and SCL to
+    /// pads (IO_BANK0 FUNCSEL = I2C); while it returns false the block keeps using the transaction callbacks.
+    /// <paramref name="clock"/> is the engine's time base (core 0's cycle at the access in flight, 8 ns at the core's
+    /// fixed 125 MHz); <paramref name="icHz"/> is the block's clock (clk_sys) as firmware programmed it, which the SCL
+    /// counters and the SDA hold count. The caller registers the returned engine with IO_BANK0 as the I2C pad function.
+    /// </summary>
+    public I2cMasterEngine EnablePinLevel(Func<bool> isRouted, Func<long> clock, Func<uint>? icHz = null)
+    {
+        _routed = isRouted;
+        _clock = clock;
+        _icHz = icHz;
+        _engine = new I2cMasterEngine(this);
+        _engine.Skip(clock());
+        _engine.BeforeAccess = _ => Advance();
+        _engine.AfterInput = () => Changed?.Invoke();
+        return _engine;
+    }
+
+    private bool PinPathActive => _engine is not null && (_con & 1) != 0 && (_engine.BusBusy || _routed!());
+
+    /// <summary>Bring the engine up to the clock (re-entrant calls, from inside its own step, are no-ops).</summary>
+    private void Advance()
+    {
+        var e = _engine;
+        if (e is null || _advancing) return;
+        var d = _clock!() - e.Now;
+        if (d <= 0) return;
+        _advancing = true;
+        try
+        {
+            if (e.Idle && _txFifo.Count == 0) e.Skip(d);
+            else e.Tick(d);
+        }
+        finally { _advancing = false; }
+    }
+
+    private void Dreq()
+    {
+        if (_engine is null) return;
+        Advance();
+        Changed?.Invoke();
+    }
+
+    /// <summary>The machine's clock went back (watchdog reboot): restart the engine on it.</summary>
+    internal void Rebase(long now) => _engine?.Rebase(now);
+
+    /// <summary>Cycles from <paramref name="now"/> (core 0's clock) to the master's next step that can move SDA or SCL
+    /// (0 when it will look at a queued command next), long.MaxValue while idle or waiting on SCL held low by a slave.
+    /// Reads no register and syncs nothing.</summary>
+    internal long CyclesUntilPadEdge(long now)
+    {
+        var e = _engine;
+        if (e is null) return long.MaxValue;
+        long d = CyclesUntilEvent();
+        return d == long.MaxValue ? d : d - (now - e.Now);
+    }
+
+    // ── IDeferrableTickable ───────────────────────────────────────────
+
+    /// <summary>Only the pin-level engine has events: its timer between bus edges, a stretched SCL seen high, or the
+    /// next sweep for a command it has yet to look at (a master waiting on the host re-polls on every tick).</summary>
+    public long CyclesUntilEvent()
+    {
+        var e = _engine;
+        if (e is null) return long.MaxValue;
+        // A master waiting on the host re-polls it on its next tick: due now once what it waits for is there.
+        if (e.WaitingOnHost)
+            return _txFifo.Count != 0 || e.WaitingForRoom && _rxFifo.Count < FIFO_DEPTH ? 0 : long.MaxValue;
+        return e.CyclesUntilEvent;
+    }
+
+    public void CatchUp(long cycles) => Advance();
+
+    /// <summary>The engine runs on the clock, not on the sweep's cycles.</summary>
+    public void Tick(long deltaCycles) => Advance();
 
     /// <summary>Raised when a byte lands in the RX FIFO, so a DMA channel stalled on the RX DREQ can re-arm.</summary>
     public Action? OnRxAvailable;
@@ -148,6 +254,15 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
 
     public uint ReadWord(uint address)
     {
+        if (_engine is null) return Read(address);
+        Advance();
+        var v = Read(address);
+        Changed?.Invoke();
+        return v;
+    }
+
+    private uint Read(uint address)
+    {
         return address switch
         {
             IC_CON                => _con,
@@ -158,9 +273,9 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
             IC_SS_SCL_LCNT        => _ssSclLcnt,
             IC_FS_SCL_HCNT        => _fsSclHcnt,
             IC_FS_SCL_LCNT        => _fsSclLcnt,
-            IC_INTR_STAT          => _rawIntr & _intrMask,
+            IC_INTR_STAT          => RawIntr & _intrMask,
             IC_INTR_MASK          => _intrMask,
-            IC_RAW_INTR_STAT      => _rawIntr,
+            IC_RAW_INTR_STAT      => RawIntr,
             IC_RX_TL              => _rxTl,
             IC_TX_TL              => _txTl,
             IC_CLR_INTR           => ClearAllInterrupts(),
@@ -176,7 +291,7 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
             IC_CLR_GEN_CALL       => ClearBit(11),
             IC_ENABLE             => _enable,
             IC_STATUS             => BuildStatus(),
-            IC_TXFLR              => 0,   // TX FIFO always drained in simulation
+            IC_TXFLR              => (uint)_txFifo.Count,   // 0 in the transaction model: the TX FIFO drains instantly
             IC_RXFLR              => (uint)_rxFifo.Count,
             IC_SDA_HOLD           => _sdaHold,
             IC_TX_ABRT_SOURCE     => _txAbrtSource,
@@ -204,6 +319,14 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
 
     public void WriteWord(uint address, uint value)
     {
+        if (_engine is null) { Write(address, value); return; }
+        Advance();
+        Write(address, value);
+        Changed?.Invoke();
+    }
+
+    private void Write(uint address, uint value)
+    {
         switch (address)
         {
             case IC_CON:              _con              = value & 0x7FF; break;
@@ -221,8 +344,14 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
                 _intrMask = value & 0xFFF;
                 CheckInterrupts();
                 break;
-            case IC_RX_TL:            _rxTl             = value & 0xFF; break;
-            case IC_TX_TL:            _txTl             = value & 0xFF; break;
+            case IC_RX_TL:
+                _rxTl = value & 0xFF;
+                if (PinPathActive) { UpdateRxFull(); CheckInterrupts(); }   // a new threshold can change RX_FULL now
+                break;
+            case IC_TX_TL:
+                _txTl = value & 0xFF;
+                if (_engine is not null) CheckInterrupts();   // pin-level TX_EMPTY follows the threshold
+                break;
             case IC_ENABLE:
                 _enable = value & 3;
                 // TX_EMPTY (bit 4): TX FIFO is at or below IC_TX_TL threshold.
@@ -273,6 +402,12 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
     private void HandleDataCmd(uint value)
     {
         if (!IsEnabled) return;
+
+        if (PinPathActive)
+        {
+            PinDataCmd(value);
+            return;
+        }
 
         var isRead = (value & (1u << 8)) != 0;
         var addr   = (byte)(_tar & 0x7F);
@@ -331,8 +466,48 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
         }
     }
 
+    /// <summary>Queue an IC_DATA_CMD write for the pin-level engine.</summary>
+    private void PinDataCmd(uint value)
+    {
+        // While TX_ABRT is pending the TX FIFO is held flushed: commands are dropped until firmware clears it.
+        if ((_rawIntr & INTR_TX_ABRT) != 0) return;
+        if (_txFifo.Count >= FIFO_DEPTH)
+        {
+            _rawIntr |= INT_TX_OVER;
+            CheckInterrupts();
+            return;
+        }
+        _txFifo.Enqueue(new I2cCommand((byte)value, (value & (1u << 8)) != 0, (value & (1u << 10)) != 0, (value & (1u << 9)) != 0));
+        CheckInterrupts();
+    }
+
+    private const uint INT_TX_OVER = 1u << 3, INT_TX_EMPTY = 1u << 4;
+
+    /// <summary>IC_RAW_INTR_STAT. In pin-level mode TX_EMPTY is a live level (TX FIFO at or below IC_TX_TL and, with
+    /// IC_CON.TX_EMPTY_CTRL, the last byte fully shifted out, ACK slot included) instead of the transaction model's
+    /// latched bit.</summary>
+    private uint RawIntr => _engine is null || !PinPathActive ? _rawIntr
+        : (_rawIntr & ~INT_TX_EMPTY) | (TxEmptyLevel() ? INT_TX_EMPTY : 0);
+
+    private bool TxEmptyLevel() =>
+        IsEnabled && _txFifo.Count <= _txTl && ((_con & (1u << 8)) == 0 || !_engine!.ByteInFlight);
+
+    /// <summary>Pin-level RX_FULL (bit 2): asserted while the RX FIFO holds more than IC_RX_TL entries.</summary>
+    private void UpdateRxFull()
+    {
+        if (_rxFifo.Count > _rxTl) _rawIntr |= 1u << 2;
+        else                       _rawIntr &= ~(1u << 2);
+    }
+
     private uint PopRxFifo()
     {
+        if (PinPathActive)
+        {
+            if (!_rxFifo.TryDequeue(out var b)) return 0;
+            UpdateRxFull();
+            CheckInterrupts();
+            return b;
+        }
         if (_rxFifo.TryDequeue(out var data))
         {
             if (_rxFifo.Count == 0)
@@ -347,7 +522,10 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
 
     private uint BuildStatus()
     {
-        uint st = ST_TFE | ST_TFNF;  // TX always ready in simulation
+        uint st = 0;
+        if (_txFifo.Count == 0)         st |= ST_TFE;    // always, in the transaction model
+        if (_txFifo.Count < FIFO_DEPTH) st |= ST_TFNF;
+        if (_engine is { BusBusy: true }) st |= ST_ACTIVITY | ST_MST_ACTV;
         if (_rxFifo.Count > 0)  st |= ST_RFNE;
         if (_rxFifo.Count >= FIFO_DEPTH) st |= ST_RFF;
         return st;
@@ -397,7 +575,73 @@ public sealed class I2cPeripheral : IMemoryMappedDevice
     private void CheckInterrupts()
     {
         if (_cpu is null) return;
-        _cpu.SetInterrupt(_irq, (_rawIntr & _intrMask) != 0);
+        _cpu.SetInterrupt(_irq, (RawIntr & _intrMask) != 0);
+    }
+
+    // ── II2cMasterHost (pin-level engine) ───────────────────────────────────────────
+
+    bool II2cMasterHost.Enabled => IsEnabled && (_con & 1) != 0;
+    int II2cMasterHost.TargetAddress => (int)(_tar & 0x7F);
+    bool II2cMasterHost.RxHasRoom => _rxFifo.Count < FIFO_DEPTH;
+
+    /// <summary>SCL high/low periods from the speed-mode counters: IC_SS_SCL_* when IC_CON.SPEED = standard,
+    /// IC_FS_SCL_* for fast (and high, which has no HS counters here), at HCNT+1 / LCNT+1 block clock cycles with the
+    /// DW minimums (6 / 8) applied. SDA hold is IC_SDA_HOLD.IC_SDA_TX_HOLD. All scaled from the block clock to the
+    /// core's 125 MHz (rounded).</summary>
+    void II2cMasterHost.GetTiming(out int high, out int low, out int sdaHold)
+    {
+        var standard = ((_con >> 1) & 3) == 1;
+        var hcnt = standard ? _ssSclHcnt : _fsSclHcnt;
+        var lcnt = standard ? _ssSclLcnt : _fsSclLcnt;
+        long ic = Math.Max(_icHz?.Invoke() ?? RP2040Machine.CLK_HZ, 1u);
+        int Scale(long n) => (int)((n * RP2040Machine.CLK_HZ + ic / 2) / ic);
+        high = Math.Max(Scale(Math.Max(hcnt, 6u) + 1), 1);
+        low = Math.Max(Scale(Math.Max(lcnt, 8u) + 1), 2);
+        sdaHold = Scale(_sdaHold & 0xFFFF);
+    }
+
+    bool II2cMasterHost.TryPeekCommand(out I2cCommand command) => _txFifo.TryPeek(out command);
+
+    void II2cMasterHost.CommandTaken()
+    {
+        _txFifo.TryDequeue(out _);
+        CheckInterrupts();
+        OnTxSpace?.Invoke();
+    }
+
+    void II2cMasterHost.BusStart(bool repeated)
+    {
+        _rawIntr |= (1u << 10) | (1u << 8);   // START_DET, ACTIVITY
+        CheckInterrupts();
+    }
+
+    void II2cMasterHost.BusStop()
+    {
+        _rawIntr |= 1u << 9;                  // STOP_DET
+        OnStop?.Invoke();
+        CheckInterrupts();
+    }
+
+    void II2cMasterHost.WriteDone() => CheckInterrupts();   // TX_EMPTY (with TX_EMPTY_CTRL) follows the shifter
+
+    void II2cMasterHost.ReadDone(byte value)
+    {
+        _rxFifo.Enqueue(value);
+        UpdateRxFull();
+        CheckInterrupts();
+        OnRxAvailable?.Invoke();
+    }
+
+    /// <summary>Abort: TX_ABRT with the source bit and, as on the DW with IC_AVOID_RX_FIFO_FLUSH_ON_TX_ABRT = 0, both
+    /// FIFOs flushed. The engine then issues the STOP, which raises STOP_DET.</summary>
+    void II2cMasterHost.Abort(uint source)
+    {
+        _txAbrtSource |= source;
+        _rawIntr |= INTR_TX_ABRT;
+        _txFifo.Clear();
+        _rxFifo.Clear();
+        UpdateRxFull();
+        CheckInterrupts();
     }
 
     /// <summary>Inject a byte into the RX FIFO (simulates a slave device responding).</summary>

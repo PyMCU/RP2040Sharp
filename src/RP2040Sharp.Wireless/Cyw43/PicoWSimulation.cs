@@ -26,7 +26,7 @@ public sealed class PicoWSimulation : IDisposable
     /// <summary>The board itself — CPU, peripherals, UART/USB probes.</summary>
     public PicoSimulation Board { get; }
 
-    /// <summary>The emulated CYW43439 attached to this board.</summary>
+    /// <summary>The CYW43439 host-interface translation (gSPI to a virtual network) attached to this board.</summary>
     public Cyw43439Device Radio { get; }
 
     /// <summary>The radio's WLAN/BT command layer (scan results, join state, packet queues).</summary>

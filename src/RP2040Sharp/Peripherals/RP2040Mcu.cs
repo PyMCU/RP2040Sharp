@@ -1,3 +1,4 @@
+using RP2040.CoSim;
 using RP2040.Peripherals.I2c;
 using RP2040.Peripherals.Spi;
 using RP2040.Peripherals.Uart;
@@ -49,8 +50,20 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
     private int _flashLength;
     private Func<int, double>? _readChannelVolts;
 
-    /// <summary>Creates an adapter over a new <see cref="RP2040Machine"/> that it disposes with itself.</summary>
-    public RP2040Mcu() : this(new RP2040Machine(), ownsMachine: true) { }
+    /// <summary>
+    /// Creates an adapter over a new <see cref="RP2040Machine"/> that it disposes with itself, with deferred peripheral
+    /// ticks on (<see cref="RP2040Machine.DeferPeripheralTicks"/>: the same results as ticking every peripheral after
+    /// every slice, faster).
+    /// </summary>
+    public RP2040Mcu() : this(new RP2040McuOptions()) { }
+
+    /// <summary>Creates an adapter over a new machine built from <paramref name="options"/>, disposed with the adapter.</summary>
+    public RP2040Mcu(RP2040McuOptions options)
+        : this(new RP2040Machine(options.FlashSizeBytes, options.Bootrom, options.PinLevelBuses)
+               { DeferPeripheralTicks = options.DeferPeripheralTicks }, ownsMachine: true)
+    {
+        CoSim = options.CoSim;
+    }
 
     /// <summary>Creates an adapter over an existing machine, which the caller keeps owning.</summary>
     /// <param name="machine">The machine to drive.</param>
@@ -61,6 +74,9 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         ArgumentNullException.ThrowIfNull(machine);
         _machine = machine;
         _ownsMachine = ownsMachine;
+        // The co-simulation loop of the C ABI chip; the pin bank reports through its recorder, hooked while it has a
+        // listener.
+        _cosim = new RP2040CoSim(machine, attachPads: false);
         _bank = new PinBank(this);
         _banks = [_bank];
         _uarts = [new UartPort(0, machine.Uart0), new UartPort(1, machine.Uart1)];
@@ -70,6 +86,16 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
 
     /// <summary>The wrapped machine, for everything the shared contracts do not cover.</summary>
     public RP2040Machine Machine => _machine;
+
+    private readonly RP2040CoSim _cosim;
+
+    /// <summary>
+    /// Run through the co-simulation loop (<see cref="RP2040CoSim"/>, docs/cosim.md), on by default: a step ends at the
+    /// first instruction boundary at or past the requested cycle (a sleeping core exactly on it), with sleeping
+    /// stretches and bounded awake runs when deferred ticks are on. Off, <see cref="Run"/> is
+    /// <see cref="RP2040Machine.RunCycles"/> (slices sized from the cycles per instruction seen so far).
+    /// </summary>
+    public bool CoSim { get; set; } = true;
 
     /// <summary>
     /// Upper bound, in instructions, on one slice of <see cref="Run"/>. Peripherals that advance on a tick
@@ -101,7 +127,80 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
     /// Returns the wall-clock cycles that elapsed. With Core 1 running that is the longer of the two cores,
     /// while <see cref="Cycles"/> follows Core 0 alone, so the two can differ by the cores' skew.
     /// </remarks>
-    public long Run(long cycleBudget) => _machine.RunCycles(cycleBudget, MaxSliceInstructions);
+    public long Run(long cycleBudget)
+    {
+        long used;
+        if (CoSim)
+        {
+            if (cycleBudget <= 0) return 0;
+            _cosim.Quantum = Math.Max(1, MaxSliceInstructions);
+            // Wall-clock cycles: the longer of the two cores per slice, the peripherals' time base.
+            var swept = _machine.SweptCycles;
+            var request = new RunRequest
+            {
+                MaxSlots = int.MaxValue,
+                TargetCycle = _machine.Cpu.Cycles + cycleBudget,
+                Flags = CoSimFlags.SleepingStretches | CoSimFlags.BoundedRuns,
+            };
+            while (_cosim.RunUntilEdge(request).Reason == StopReason.Budget) { }   // more slots than an int holds
+            used = _machine.SweptCycles - swept;
+        }
+        else used = _machine.RunCycles(cycleBudget, MaxSliceInstructions);
+        // Leave nothing owed: whatever the host reads or drives next sees the peripherals at the end of the run.
+        if (used > 0 && _machine.DeferPeripheralTicks) _machine.SyncPeripherals();
+        return used;
+    }
+
+    /// <summary>
+    /// Like <see cref="Run"/>, for a host whose circuit answers within a bit time (a pin-level I2C or SPI device): runs up
+    /// to <paramref name="maxCycles"/> in slices of <paramref name="guard"/> instructions per core (at most
+    /// <see cref="MaxSliceInstructions"/>; twice that while both cores sleep) and returns after the slice in which a pin
+    /// of <paramref name="watch"/> changed, through the co-simulation loop with everything the native chip uses
+    /// (<see cref="CoSimFlags.All"/>: the event guard ends a slice where guard 1 would have after each watched edge, plus
+    /// bounded runs, sleeping stretches and adaptive sleeping slices, each with the result of the plain slices). A change
+    /// counts when the bank records it, so the bank must be armed (a <see cref="IPinBank.PinChanged"/> subscriber); with
+    /// nobody listening this is <see cref="Run"/>. With <see cref="CoSim"/> off: <see cref="Run"/> in guard-sized steps
+    /// until such a change.
+    /// </summary>
+    /// <returns>The wall-clock cycles that elapsed, as <see cref="Run"/>.</returns>
+    public long RunUntilEdge(long maxCycles, int guard, ulong watch)
+    {
+        if (maxCycles <= 0) return 0;
+        if (guard <= 0 || (watch & PinBank.AllPinsMask) == 0 || !_bank.Armed) return Run(maxCycles);
+        long used = 0;
+        if (CoSim)
+        {
+            _cosim.Quantum = Math.Max(1, MaxSliceInstructions);
+            var swept = _machine.SweptCycles;
+            var request = new RunRequest
+            {
+                MaxSlots = int.MaxValue,
+                TargetCycle = _machine.Cpu.Cycles + maxCycles,
+                Guard = guard,
+                Watch = watch,
+                Flags = CoSimFlags.All,
+            };
+            while (_cosim.RunUntilEdge(request).Reason == StopReason.Budget) { }
+            used = _machine.SweptCycles - swept;
+            if (used > 0 && _machine.DeferPeripheralTicks) _machine.SyncPeripherals();
+        }
+        else
+        {
+            var pads = _cosim.Pads;
+            pads.Watch = (uint)(watch & PinBank.AllPinsMask);
+            pads.WatchedChanged = false;
+            try
+            {
+                while (used < maxCycles && !pads.WatchedChanged) used += Run(Math.Min(guard, maxCycles - used));
+            }
+            finally { pads.Watch = 0; }
+        }
+        return used;
+    }
+
+    /// <summary>Cycles from now until the next edge a pin-level engine makes on a pin of <paramref name="watch"/>,
+    /// long.MaxValue when none has one coming (<see cref="RP2040CoSim.CyclesUntilPadEdge"/>).</summary>
+    public long CyclesUntilPadEdge(ulong watch) => _cosim.CyclesUntilPadEdge(watch);
 
     /// <inheritdoc />
     public long RunUntil(long absoluteCycle)
@@ -296,30 +395,34 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
     private sealed class PinBank : IPinBank
     {
         private const uint AllPins = (1u << PinCountValue) - 1;
+        public const ulong AllPinsMask = AllPins;
 
         private readonly RP2040Mcu _owner;
         private readonly RP2040Machine _m;
         private readonly Action<uint> _sioHook;
-        private readonly Action<uint> _padsHook;
+        private readonly PadEventRecorder _recorder;
+
 
         private PinChangeHandler? _changed;
         private ulong _watchMask = AllPins;
         private bool _armed;
-
-        // What the chip drove when each pin was last reported, so a SIO output register that moves
-        // under a pin nobody drives does not read as a change.
-        private uint _lastOe;
-        private uint _lastLevels;
 
         public PinBank(RP2040Mcu owner)
         {
             _owner = owner;
             _m = owner._machine;
             _sioHook = OnSioChanged;
-            _padsHook = OnPadsChanged;
+            // Every pad change with its own cycle (PadEventRecorder), handed over while it happens so a handler can
+            // answer at once; a SIO output register that moves under a pin nobody drives is no change.
+            _recorder = owner._cosim.Pads;
+            _recorder.Mode = PadReportMode.Immediate;
+            _recorder.Immediate = OnPadsChanged;
         }
 
         public string Name => "GPIO";
+
+        /// <summary>True while somebody listens to <see cref="PinChanged"/> (the recorder is hooked).</summary>
+        public bool Armed => _armed;
 
         public int PinCount => PinCountValue;
 
@@ -327,6 +430,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             get
             {
+                if (_m.DeferPeripheralTicks) _m.SyncForHostRead();
                 _m.IoBank0.GetPadOutputState(out var oe, out _);
                 return oe;
             }
@@ -336,6 +440,7 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             get
             {
+                if (_m.DeferPeripheralTicks) _m.SyncForHostRead();
                 _m.IoBank0.GetPadOutputState(out var oe, out var levels);
                 return levels & oe;
             }
@@ -345,18 +450,11 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
 
         public ulong PullDownMask => _m.PadsBank0.PullDownMask & AllPins;
 
-        public void SetInputs(ulong mask, ulong levels)
-        {
-            var bits = (uint)mask & AllPins;
-            while (bits != 0)
-            {
-                var pin = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                bits &= bits - 1;
-                _m.IoBank0.SetExternalInput(pin, ((levels >> pin) & 1UL) != 0);
-            }
-        }
+        // The co-simulation's: pads already held at the level are skipped (a circuit solver re-applies its inputs many
+        // times per step); the rest sync the deferred peripherals first (RP2040Machine.SyncForHostInput).
+        public void SetInputs(ulong mask, ulong levels) => _owner._cosim.SetInputs(mask & AllPins, levels);
 
-        public void ReleaseInputs(ulong mask) => _m.IoBank0.ReleaseExternalInput((uint)mask & AllPins);
+        public void ReleaseInputs(ulong mask) => _owner._cosim.ReleaseInputs(mask & AllPins);
 
         public event PinChangeHandler PinChanged
         {
@@ -375,21 +473,17 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         public ulong WatchMask
         {
             get => _watchMask;
-            set
-            {
-                _watchMask = value & AllPins;
-                // Pins that just came into the watch set need a fresh baseline, or the first event
-                // for them would compare against a state from before anyone was looking.
-                if (_armed) Snapshot();
-            }
+            // The recorder follows every pin, so a pin coming into the watch set compares against where it is now.
+            set => _watchMask = value & AllPins;
         }
 
         private void Arm()
         {
             if (_armed) return;
             _armed = true;
-            Snapshot();
-            _m.IoBank0.PadsChanged += _padsHook;
+            // PWM pads follow the counter: have their edges reported, at the cycle of the step that made each.
+            _m.ExactPwmPadEdges = true;
+            _recorder.Attach();
             // SIO writes do not reach IO_BANK0 on their own; the hook forwards just the watched pads
             // that the write moved, so firmware banging other pins pays nothing here.
             _m.Sio.OnGpioChanged += _sioHook;
@@ -399,15 +493,9 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
         {
             if (!_armed) return;
             _armed = false;
-            _m.IoBank0.PadsChanged -= _padsHook;
+            _m.ExactPwmPadEdges = false;
+            _recorder.Detach();
             _m.Sio.OnGpioChanged -= _sioHook;
-        }
-
-        private void Snapshot()
-        {
-            _m.IoBank0.SyncPadBaseline();
-            _m.IoBank0.GetPadOutputState(out _lastOe, out var levels);
-            _lastLevels = levels & _lastOe;
         }
 
         private void OnSioChanged(uint changed)
@@ -416,23 +504,13 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
             if (hit != 0) _m.IoBank0.NotifyPads(hit);
         }
 
-        private void OnPadsChanged(uint pads)
+        private void OnPadsChanged(ulong changed, ulong outputEnable, ulong levels, ulong cycle)
         {
             var handler = _changed;
             if (handler is null) return;
-
-            _m.IoBank0.GetPadOutputState(out var oe, out var levels);
-            levels &= oe;
-
-            // Judge only the pads the machine flagged; the rest keep their baseline.
-            var moved = pads & ((oe ^ _lastOe) | ((levels ^ _lastLevels) & oe));
-            _lastOe = (_lastOe & ~pads) | (oe & pads);
-            _lastLevels = (_lastLevels & ~pads) | (levels & pads);
-
-            moved &= (uint)_watchMask;
+            var moved = changed & _watchMask;
             if (moved == 0) return;
-
-            var change = new PinChange(moved, oe, levels, _owner.Cycles);
+            var change = new PinChange(moved, outputEnable, levels, _owner._cycleBase + (long)cycle);
             handler(in change);
         }
     }
@@ -609,4 +687,24 @@ public sealed class RP2040Mcu : IMcu, IGpio, IPwmSource, IAdcInput, IPeripheralM
 
         public void MasterStop() => i2c.SimulateStop();
     }
+}
+
+/// <summary>How <see cref="RP2040Mcu(RP2040McuOptions)"/> builds its machine.</summary>
+public sealed record RP2040McuOptions
+{
+    /// <summary>Flash size in bytes (2 MiB, as on a Pico).</summary>
+    public uint FlashSizeBytes { get; init; } = 2 * 1024 * 1024;
+
+    /// <summary>Bootrom revision.</summary>
+    public RP2040BootromRevision Bootrom { get; init; } = RP2040BootromRevision.B1;
+
+    /// <summary>Serial blocks that drive and sample the pads themselves (docs/pin-level-buses.md). None by default.</summary>
+    public PinLevel.PinLevelBus PinLevelBuses { get; init; } = PinLevel.PinLevelBus.None;
+
+    /// <summary>Deferred peripheral ticks (<see cref="RP2040Machine.DeferPeripheralTicks"/>): on by default; off ticks every
+    /// peripheral after every slice, the reference the deferred machine is checked against.</summary>
+    public bool DeferPeripheralTicks { get; init; } = true;
+
+    /// <summary>Run through the co-simulation loop (<see cref="RP2040Mcu.CoSim"/>): on by default.</summary>
+    public bool CoSim { get; init; } = true;
 }

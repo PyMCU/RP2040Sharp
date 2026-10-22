@@ -8,7 +8,7 @@ namespace RP2040.Peripherals.Rtc;
 /// Advances 1 second per 125M CPU cycles (CLK_SYS = 125 MHz).
 /// Fires IRQ 25 (RTC_IRQ) when the enabled alarm matches the current time.
 /// </summary>
-public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
+public sealed class RtcPeripheral : IMemoryMappedDevice, IDeferrableTickable
 {
     private const uint RTC_SETUP0   = 0x04;   // YEAR[27:16], MONTH[11:8], DAY[4:0]
     private const uint RTC_SETUP1   = 0x08;   // DOTW[26:24], HOUR[20:16], MIN[13:8], SEC[5:0]
@@ -69,6 +69,8 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
     /// <summary>Inject a specific date/time into the RTC.</summary>
     public void SetDateTime(int year, int month, int day, int dayOfWeek, int hour, int min, int sec)
     {
+        Schedule?.Sync();
+        Schedule?.Touch();
         _rtcDate = ((uint)year << YEAR_SHIFT) | ((uint)month << 8) | (uint)day;
         _rtcTime = ((uint)dayOfWeek << 24) | ((uint)hour << 16) | ((uint)min << 8) | (uint)sec;
     }
@@ -76,7 +78,9 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
     /// <summary>Read-only snapshot of the running RTC date/time for external inspection.</summary>
     public readonly record struct RtcSnapshot(
         bool Enabled, int Year, int Month, int Day, int DayOfWeek, int Hour, int Minute, int Second);
-    public RtcSnapshot GetSnapshot() => new(
+    public RtcSnapshot GetSnapshot() { Schedule?.Sync(); return Snapshot(); }
+
+    private RtcSnapshot Snapshot() => new(
         (_ctrl & CTRL_ENABLE) != 0,
         (int)((_rtcDate >> YEAR_SHIFT) & 0xFFF),   // YEAR
         (int)((_rtcDate >> 8)  & 0xF),     // MONTH
@@ -88,6 +92,12 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, ITickable
     public bool IsEnabled => (_ctrl & CTRL_ENABLE) != 0;
 
     // ── ITickable ─────────────────────────────────────────────────────────
+
+    /// <summary>The deferred tick the machine keeps for the RTC (bus accesses sync it in the bridge).</summary>
+    public DeferredTick? Schedule { get; set; }
+
+    /// <summary>Cycles until the next second (time registers, alarm match); none while disabled.</summary>
+    public long CyclesUntilEvent() => (_ctrl & CTRL_ENABLE) == 0 ? long.MaxValue : Math.Max(0, CLK_HZ - _accumCycles);
 
     public void Tick(long deltaCycles)
     {

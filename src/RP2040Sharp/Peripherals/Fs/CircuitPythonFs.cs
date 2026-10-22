@@ -119,6 +119,27 @@ public static class CircuitPythonFs
         return null;
     }
 
+    // ── Copying files onto CIRCUITPY ───────────────────────────────────────────
+
+    /// <summary>
+    /// What a PC does when it copies <paramref name="files"/> onto the CIRCUITPY drive, done on the FAT volume in the
+    /// machine's flash: the volume is found after <paramref name="firmwareEnd"/> (the end of the firmware image; see
+    /// <see cref="FatVolume"/>), the files are written (directories created, existing files replaced) and, with
+    /// <paramref name="reset"/>, the chip reboots as a watchdog reset does so CircuitPython runs the new code.py. All or
+    /// nothing: on a <see cref="FatException"/> (no volume yet, full, a bad path) flash is unchanged and there is no
+    /// reset. Do not write under a running CircuitPython without the reset: it caches sectors in RAM and may write them
+    /// back over the files.
+    /// </summary>
+    public static void PutFiles(RP2040Machine machine, int firmwareEnd, IEnumerable<(string Path, byte[] Data)> files, bool reset)
+    {
+        var flash = machine.FlashMemory;
+        var vol = FatVolume.Open(flash, firmwareEnd)
+            ?? throw new FatException("no FAT volume in flash after the firmware (CircuitPython formats CIRCUITPY on its first boot)");
+        foreach (var (path, data) in files) vol.Put(path, data);
+        vol.CopyTo(flash);
+        if (reset) machine.SystemReset();
+    }
+
     // ── Writing / baking ───────────────────────────────────────────────────────
 
     /// <summary>

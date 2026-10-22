@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The st_rp2040_* C ABI (include/silicontwin_rp2040.h) as an exports library: a plain class library whose
+    [UnmanagedCallersOnly] entry points become exports of whichever NativeAOT shared library links it. Only one
+    NativeAOT runtime may live in a host process, so the shipping artefact is the host's single library (the
+    Silicon Twin demo's silicontwin.dll), which takes this assembly with:
+
+      <ProjectReference Include="...\src\RP2040Sharp.Native\RP2040Sharp.Native.csproj" />
+      <UnmanagedEntryPointsAssembly Include="RP2040Sharp.Native" />
+
+    For local tests only, -p:StNativeLib=true publishes it alone as silicontwin_rp2040.dll / .so / .dylib.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>SiliconTwin.Native</RootNamespace>
+    <AssemblyName>RP2040Sharp.Native</AssemblyName>
+    <Description>The RP2040 core (Raspberry Pi Pico / Pico W) behind a flat C ABI (include/silicontwin_rp2040.h), as [UnmanagedCallersOnly] exports for a NativeAOT host library.</Description>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- Standalone NativeAOT library for local tests (dotnet publish -p:StNativeLib=true). Not a shipping artefact. -->
+  <PropertyGroup Condition="'$(StNativeLib)' == 'true'">
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <AssemblyName>silicontwin_rp2040</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <OptimizationPreference>Speed</OptimizationPreference>
+  </PropertyGroup>
+
+  <!-- Test-only export st_rp2040_test_inject_fault (make the core throw). Off by default; never in packages. -->
+  <PropertyGroup Condition="'$(StTestHooks)' == 'true'">
+    <DefineConstants>$(DefineConstants);ST_ENABLE_TEST_HOOKS</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="RP2040Sharp.Native.Tests" />
+    <ProjectReference Include="..\RP2040Sharp\RP2040Sharp.csproj" />
+    <!-- The CYW43439 of the Pico W (ST_RP2040_CYW43). -->
+    <ProjectReference Include="..\RP2040Sharp.Wireless\RP2040Sharp.Wireless.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="include\silicontwin_rp2040.h" />
+  </ItemGroup>
+</Project>

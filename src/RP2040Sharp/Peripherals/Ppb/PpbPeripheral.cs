@@ -90,6 +90,25 @@ public sealed class PpbPeripheral : IMemoryMappedDevice, ITickable
     /// delta, but each core's SysTick advances with that core's own cycles.</summary>
     public void Tick(long deltaCycles) => SyncSysTick();
 
+    /// <summary>
+    /// Cycles of the owning core from now until SysTick next raises its exception (the 1 -> 0 transition with
+    /// TICKINT set), <see cref="long.MaxValue"/> when it will not: the sweeps in between only count, and a COUNTFLAG
+    /// without the exception is found by the CSR read that looks at it (reads sync the counter first).
+    /// </summary>
+    public long CyclesUntilSysTick()
+    {
+        if ((_systCsr & 3) != 3) return long.MaxValue;   // ENABLE and TICKINT
+        var reload = _systRvrWritten ? (long)_systRvr : 0xFFFFFF;
+        long steps;
+        if (_systCvr > 0) steps = _systCvr;
+        else if (reload > 0) steps = reload + 1;
+        else return long.MaxValue;
+        var fireAt = (_systCsr & 4) != 0
+            ? _systAnchor + steps
+            : (_systAnchor / TICK_CYCLES + steps) * TICK_CYCLES;
+        return Math.Max(0, fireAt - _cpu.Cycles);
+    }
+
     // MPU registers. The regions are stored and read back, but nothing enforces them: accesses are never
     // checked against an MPU region, so a violation does not fault (see docs/limitations).
     private uint _mpuCtrl, _mpuRnr;

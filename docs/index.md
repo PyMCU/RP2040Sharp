@@ -129,4 +129,9 @@ compat/index
 :caption: Reference
 
 reference/index
+native-abi
+wireless
+cosim
+peripheral-deadlines
+pin-level-buses
 ```

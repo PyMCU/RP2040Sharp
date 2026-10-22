@@ -235,24 +235,102 @@ public sealed unsafe class CortexM0Plus
     {
         switch (_activeDecoder)
         {
-            case DecoderType.NativeLut: RunGeneric(ref _nativeLutDecoder, instructions); break;
-            case DecoderType.Lut:       RunGeneric(ref _lutDecoder, instructions); break;
-            case DecoderType.Switch:    RunGeneric(ref _switchDecoder, instructions); break;
-            default:                    RunGeneric(ref _nativeLutDecoder, instructions); break;
+            case DecoderType.NativeLut: RunGeneric<Decoders.NativeLutDecoder, NoRunLimit>(ref _nativeLutDecoder, instructions); break;
+            case DecoderType.Lut:       RunGeneric<Decoders.LutDecoder, NoRunLimit>(ref _lutDecoder, instructions); break;
+            case DecoderType.Switch:    RunGeneric<Decoders.SwitchDecoder, NoRunLimit>(ref _switchDecoder, instructions); break;
+            default:                    RunGeneric<Decoders.NativeLutDecoder, NoRunLimit>(ref _nativeLutDecoder, instructions); break;
         }
     }
 
+    /// <summary>
+    /// A bounded run: slices of <paramref name="slice"/> instructions, one after the other in the same loop, for as
+    /// long as <paramref name="gate"/> lets each slice end go by (<see cref="ISliceGate.NextSlice"/>). Each slice is
+    /// exactly what <see cref="Run"/>(<paramref name="slice"/>) would execute, a sleep included: falling asleep
+    /// charges the rest of the slice and ends the run, as it ends a <see cref="Run"/>. A separate instantiation of
+    /// the run loop, so <see cref="Run"/> pays nothing for it.
+    /// </summary>
+    public void RunGated(ISliceGate gate, int slice)
+    {
+        Gate = gate;
+        GateSlice = slice;
+        try
+        {
+            switch (_activeDecoder)
+            {
+                case DecoderType.Lut:    RunGeneric<Decoders.LutDecoder, SliceRunLimit>(ref _lutDecoder, slice); break;
+                case DecoderType.Switch: RunGeneric<Decoders.SwitchDecoder, SliceRunLimit>(ref _switchDecoder, slice); break;
+                default:                 RunGeneric<Decoders.NativeLutDecoder, SliceRunLimit>(ref _nativeLutDecoder, slice); break;
+            }
+        }
+        finally { Gate = null; }
+    }
+
+    /// <summary>The gate and slice length of the bounded run in flight (<see cref="RunGated"/>).</summary>
+    internal ISliceGate? Gate;
+    internal int GateSlice;
+
+    // ── Cut slices (the event-bounded guard of the native adapter, docs/pin-level-buses.md) ──
+
+    /// <summary>A cut run (<see cref="RunCut"/>, <see cref="RunGatedCut"/>) stops before the first slot that would start
+    /// at or after this cycle, and charges a sleep only up to it.</summary>
+    internal long CutCycle = long.MaxValue;
+
+    /// <summary>Set (by the machine, from inside a slot) to stop a cut run right after the slot in flight.</summary>
+    internal bool CutRequest;
+
+    /// <summary>Slots of the slice in flight that a cut run did not run (0 when it ran to the end of the slice).</summary>
+    internal int CutLeft;
+
+    /// <summary>
+    /// <see cref="Run"/>, stopped early by <see cref="CutCycle"/> or <see cref="CutRequest"/>: the slots it runs are
+    /// exactly the first ones <see cref="Run"/> would. The caller makes sure the first slot runs (the cut cycle is past
+    /// the current one and no request is pending) and reads <see cref="CutLeft"/> after.
+    /// </summary>
+    internal void RunCut(int instructions)
+    {
+        CutLeft = 0;
+        switch (_activeDecoder)
+        {
+            case DecoderType.Lut:    RunGeneric<Decoders.LutDecoder, CutRunLimit>(ref _lutDecoder, instructions); break;
+            case DecoderType.Switch: RunGeneric<Decoders.SwitchDecoder, CutRunLimit>(ref _switchDecoder, instructions); break;
+            default:                 RunGeneric<Decoders.NativeLutDecoder, CutRunLimit>(ref _nativeLutDecoder, instructions); break;
+        }
+    }
+
+    /// <summary><see cref="RunGated"/> with the cut of <see cref="RunCut"/>: <see cref="CutLeft"/> is then counted in
+    /// the slice the run ended in.</summary>
+    internal void RunGatedCut(ISliceGate gate, int slice)
+    {
+        Gate = gate;
+        GateSlice = slice;
+        CutLeft = 0;
+        try
+        {
+            switch (_activeDecoder)
+            {
+                case DecoderType.Lut:    RunGeneric<Decoders.LutDecoder, SliceCutRunLimit>(ref _lutDecoder, slice); break;
+                case DecoderType.Switch: RunGeneric<Decoders.SwitchDecoder, SliceCutRunLimit>(ref _switchDecoder, slice); break;
+                default:                 RunGeneric<Decoders.NativeLutDecoder, SliceCutRunLimit>(ref _nativeLutDecoder, slice); break;
+            }
+        }
+        finally { Gate = null; }
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private void RunGeneric<TDecoder>(ref TDecoder decoder, int instructions)
+    private void RunGeneric<TDecoder, TLimit>(ref TDecoder decoder, int instructions)
         where TDecoder : struct, Decoders.IInstructionDecoder
+        where TLimit : struct, IRunLimit
     {
         var fetchPtr = _fetchPtr;
         var fetchMask = _fetchMask;
         var fetchBase = _fetchBase;
         var fetchLen = _fetchLen;
 
-        while (instructions-- > 0)
+        while (instructions-- > 0 || TLimit.Refill(this, ref instructions))
         {
+            // A cut run stops before the slot (folded away in every other run).
+            if (TLimit.HasCut && (CutRequest || Cycles >= CutCycle)) { CutLeft = instructions + 1; break; }
+
             // ARMv6-M §B1.5.13 Lockup: CPU halts when HardFault fires in HardFault/NMI handler.
             if (IsLockedUp) return;
 
@@ -287,6 +365,12 @@ public sealed unsafe class CortexM0Plus
                 }
                 else
                 {
+                    if (TLimit.HasCut)
+                    {
+                        // A cut run sleeps up to the cut cycle only (at least one slot: checked above).
+                        long left = instructions + 1L, room = CutCycle - Cycles;
+                        if (room < left) { Cycles += room; CutLeft = (int)(left - room); break; }
+                    }
                     Cycles += (uint)(instructions + 1);
                     return;
                 }

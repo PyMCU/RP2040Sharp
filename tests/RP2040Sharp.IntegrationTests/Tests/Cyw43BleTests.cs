@@ -77,10 +77,10 @@ public class Cyw43BleTests(ITestOutputHelper output)
         var msg = "";
         if (obs.MsgPtr is >= 0x10000000 and < 0x20000000)
             for (uint k = 0; k < 80; k++) { var b = sim.Rp2040.Bus.ReadByte(obs.MsgPtr + k); if (b == 0) break; msg += (char)b; }
-        File.WriteAllText("/tmp/rp2040_usbtl.txt",
+        File.WriteAllText(Path.Combine(Path.GetTempPath(), "rp2040_usbtl.txt"),
             $"hitPanic={obs.Hit} msg='{msg}' ep=0x{obs.Arg1:X2} reached>>>={rx.ToString().Contains(">>>")}\n" +
             "--- unified timeline (last 80: SETUP/ARM/BS + xfer_continue) ---\n" + string.Join("\n", tl));
-        output.WriteLine(File.ReadAllText("/tmp/rp2040_usbtl.txt"));
+        output.WriteLine(File.ReadAllText(Path.Combine(Path.GetTempPath(), "rp2040_usbtl.txt")));
     }
 
     [Fact]

@@ -250,6 +250,9 @@ public sealed class SioPeripheral : IMemoryMappedDevice, IAddressDecoder
     private const uint GpioMask   = (1u << 30) - 1;
     private const uint GpioHiMask = (1u << 6) - 1;
 
+    /// <summary>The levels of the pads something holds from outside (a wired signal or the PIO), where it holds them.</summary>
+    internal uint HeldInputLevels => _gpioIn & _gpioDriven;
+
     public uint GpioOe  => _gpioOe;
     public uint GpioOut => _gpioOut;
 

@@ -9,7 +9,7 @@ namespace RP2040.Peripherals.Adc;
 /// Conversion results are provided via injectable callbacks for simulation.
 /// START_MANY (free-running) mode is driven via ITickable.
 /// </summary>
-public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
+public sealed class AdcPeripheral : IMemoryMappedDevice, IDeferrableTickable
 {
     private const uint ADC_CS     = 0x000;  // Control / Status
     private const uint ADC_RESULT = 0x004;  // Conversion result (12-bit, read-only)
@@ -69,6 +69,21 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
     {
         if ((_cs & (1u << 3)) == 0) return;  // START_MANY not set
 
+        var cyclesPerConv = CyclesPerConversion();
+        _tickAccum += deltaCycles;
+        while (_tickAccum >= cyclesPerConv)
+        {
+            _tickAccum -= cyclesPerConv;
+            PerformConversion();
+        }
+    }
+
+    /// <summary>Cycles until the next free-running conversion; none unless START_MANY is set.</summary>
+    public long CyclesUntilEvent() =>
+        (_cs & (1u << 3)) == 0 ? long.MaxValue : Math.Max(0, CyclesPerConversion() - _tickAccum);
+
+    private long CyclesPerConversion()
+    {
         // ADC clock = 48 MHz; CPU clock = 125 MHz; each conversion takes 96 ADC clocks.
         // ADC_DIV: INT[27:8] + FRAC[7:0] (integer and fractional divisor of ADC clock).
         var divInt  = (long)((_div >> 8) & 0xFFFFF);
@@ -81,14 +96,7 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, ITickable
         if (periodClocks256 < 96 * 256) periodClocks256 = 96 * 256;
         // ADC clock = 48 MHz; CPU clock = 125 MHz.
         var cyclesPerConv = periodClocks256 * 125 / (256 * 48);
-        if (cyclesPerConv < 1) cyclesPerConv = 1;
-
-        _tickAccum += deltaCycles;
-        while (_tickAccum >= cyclesPerConv)
-        {
-            _tickAccum -= cyclesPerConv;
-            PerformConversion();
-        }
+        return cyclesPerConv < 1 ? 1 : cyclesPerConv;
     }
 
     public AdcPeripheral(CortexM0Plus cpu)

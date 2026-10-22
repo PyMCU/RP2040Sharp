@@ -281,7 +281,14 @@ public static unsafe class MemoryOps
             while (mask != 0)
             {
                 var regIdx = BitOperations.TrailingZeroCount(mask);
-                if (!cpu.Bus.TryReadWord(readPtr, out var word)) { Fault(cpu); return; }
+                if (!cpu.Bus.TryReadWord(readPtr, out var word))
+                {
+                    // A base in the list may already have been loaded from an earlier word: the abandoned
+                    // LDM leaves the base at its original value, like every other register the fault keeps.
+                    cpu.Registers[rn] = baseAddr;
+                    Fault(cpu);
+                    return;
+                }
                 cpu.Registers[regIdx] = word;
 
                 readPtr += 4;

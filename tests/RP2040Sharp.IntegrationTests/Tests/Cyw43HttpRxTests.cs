@@ -69,7 +69,7 @@ public class Cyw43HttpRxTests(ITestOutputHelper output)
 
         output.WriteLine(rx.ToString());
         output.WriteLine("HTTP RESPONSE: " + httpResponse);
-        File.WriteAllText("/tmp/rp2040_http.txt", $"response={httpResponse}\nREPL:\n{rx}\nDIAG:\n  " + string.Join("\n  ", diag));
+        File.WriteAllText(Path.Combine(Path.GetTempPath(), "rp2040_http.txt"), $"response={httpResponse}\nREPL:\n{rx}\nDIAG:\n  " + string.Join("\n  ", diag));
 
         httpResponse.Should().NotBeNull("the TCP connection must complete and close with a response");
         httpResponse.Should().Contain("200 OK");

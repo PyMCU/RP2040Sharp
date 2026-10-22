@@ -98,7 +98,7 @@ public sealed class BtSharedBus
     }
 
     // The host downloads the BT firmware, then polls BT_CTRL for FW_RDY *before* it sets SW_RDY, so
-    // the emulated controller reports ready as soon as it's queried (the firmware "boots" instantly),
+    // the virtual controller reports ready as soon as it's queried (the firmware "boots" instantly),
     // and is always awake. (_swReady is tracked only to gate H2B draining onced the host is up.)
     private uint BtCtrlValue() => FwRdy | BtAwake | (_b2hPending ? 2u : 0u);
 

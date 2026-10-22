@@ -7,9 +7,10 @@
 
     <PackageId>RP2040Sharp.Wireless</PackageId>
     <Product>RP2040Sharp.Wireless</Product>
-    <Title>RP2040Sharp.Wireless — CYW43439 Wi-Fi + BLE emulation for the Raspberry Pi Pico W</Title>
+    <Title>RP2040Sharp.Wireless — CYW43439 gSPI host-protocol translation (Wi-Fi + BLE) to a virtual network for the Raspberry Pi Pico W</Title>
     <Description>
-      A firmware-agnostic emulation of the Infineon CYW43439 Wi-Fi + Bluetooth LE combo chip as wired on
+      A firmware-agnostic translation (not an emulation: no RF, the radio firmware is never executed) of the
+      host interface of the Infineon CYW43439 Wi-Fi + Bluetooth LE combo chip into a virtual network, as wired on
       the Raspberry Pi Pico W: the gSPI bus (bit-banged through PIO), the SDIO backplane and firmware
       download, the WHD/SDPCM control + Ethernet data plane, and the BT HCI shared-bus transport. The
       radio link is virtualized behind the chip's register/protocol boundary, so unmodified firmware

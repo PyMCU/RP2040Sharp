@@ -9,7 +9,7 @@ namespace RP2040.Peripherals.Watchdog;
 /// When CTRL_ENABLE (bit 30) is set, the timer counts down from LOAD.
 /// Fires <see cref="OnReset"/> (and sets REASON_TIMER) when it reaches zero.
 /// </summary>
-public sealed class WatchdogPeripheral : IMemoryMappedDevice, ITickable
+public sealed class WatchdogPeripheral : IMemoryMappedDevice, IDeferrableTickable
 {
     private const uint CTRL      = 0x00;
     private const uint LOAD      = 0x04;
@@ -129,6 +129,14 @@ public sealed class WatchdogPeripheral : IMemoryMappedDevice, ITickable
     }
 
     // ── ITickable ─────────────────────────────────────────────────────────
+
+    /// <summary>Cycles until the countdown reaches zero (the reset); none while disabled or stopped at zero.</summary>
+    public long CyclesUntilEvent()
+    {
+        if ((_ctrl & CTRL_ENABLE) == 0 || _countDown == 0) return long.MaxValue;
+        // smallest c with (_accumUs + 2c) / 125 >= _countDown
+        return Math.Max(0, ((long)_countDown * HALF_CYCLES_PER_WDOG_TICK - _accumUs + 1) / 2);
+    }
 
     public void Tick(long deltaCycles)
     {

@@ -116,17 +116,49 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     private int _rxFrameLen;
     private bool _lastOpWasRead;
 
-    // 64-bit flash unique id served for the 0x4B (Read Unique ID) command — what machine.unique_id() reads.
-    // MUST differ per board instance, else two identical boards share an identity (e.g. the same MQTT
-    // client-id, so a broker drops the first when the second connects). Defaults to a random-looking
-    // value generated per instance (like a real chip's factory-programmed id) so this holds even when
-    // the host never touches it; still overridable for tests that need a reproducible id.
-    public byte[] UniqueId = CreateDefaultUniqueId();
-
-    private static byte[] CreateDefaultUniqueId()
+    // 64-bit flash unique id served for the 0x4B (Read Unique ID) command — what machine.unique_id() reads
+    // (the RP2040 SDK's pico_get_unique_board_id() asks the flash). MUST differ per board instance, else two
+    // identical boards share an identity (e.g. the same MQTT client-id, so a broker drops the first when the
+    // second connects). The default is deterministic: a hash of a per-process creation counter and the flash
+    // size, so a simulation that creates its chips in the same order gets the same ids every run. The firmware
+    // caches the id at start-up: change it with SetUniqueId before the first instruction runs.
+    public byte[] UniqueId
     {
+        get => _uniqueId;
+        set
+        {
+            if (value is null || value.Length != 8) throw new ArgumentException("the flash unique id is 8 bytes", nameof(value));
+            _uniqueId = (byte[])value.Clone();
+            _uniqueIdSet = true;
+        }
+    }
+
+    private byte[] _uniqueId;
+
+    private static int s_instanceCounter;
+    private readonly uint _instance = (uint)Interlocked.Increment(ref s_instanceCounter);
+    private bool _uniqueIdSet;
+
+    /// <summary>Replace the 8-byte flash unique id served for 0x4B.</summary>
+    public void SetUniqueId(ReadOnlySpan<byte> id)
+    {
+        UniqueId = id.ToArray();
+    }
+
+    public SsiPeripheral() { _uniqueId = DefaultUniqueId(0); }
+
+    // splitmix64 over (creation counter, flash size): well mixed, non-zero for every input we feed it.
+    private byte[] DefaultUniqueId(uint flashSize) =>
+        Mix((((ulong)_instance << 32) | flashSize) + 0x9E3779B97F4A7C15UL);
+
+    private static byte[] Mix(ulong z)
+    {
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9UL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBUL;
+        z ^= z >> 31;
+        if (z == 0) z = 1;
         var id = new byte[8];
-        Array.Copy(Guid.NewGuid().ToByteArray(), id, 8);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(id, z);
         return id;
     }
 
@@ -142,6 +174,7 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     {
         _flashPtr = flashPtr;
         _flashSize = flashSize;
+        if (!_uniqueIdSet) _uniqueId = DefaultUniqueId(flashSize);
     }
 
     /// <summary>
@@ -374,6 +407,7 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
                     if (offset < _flashSize)
                         _flashPtr[offset] = _txBuf[i];
                 }
+                ProgramByteCount += _txBuf.Count - 4;
                 _writeEnabled = false;
                 break;
             }
@@ -385,8 +419,14 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
     private uint GetAddress24() =>
         ((uint)_txBuf[1] << 16) | ((uint)_txBuf[2] << 8) | _txBuf[3];
 
+    /// <summary>Erase commands that reached the flash (any size), through the SSI or the bootrom flash hooks.</summary>
+    public long EraseCount;
+    /// <summary>Bytes programmed into the flash, through the SSI or the bootrom flash hooks.</summary>
+    public long ProgramByteCount;
+
     private void FlashErase(uint addr, uint size)
     {
+        EraseCount++;
         // Align the start address down to the erase-unit boundary (size must be a power of 2)
         var start = addr & ~(size - 1);
         // The 24-bit address can lie beyond a smaller flash: nothing to erase, and (end - start) would
