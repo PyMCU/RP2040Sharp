@@ -5,7 +5,13 @@ All notable changes to **RP2040Sharp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-10-22
+
+### Performance: scalar loads, stores and stack bursts stay call-free on the SRAM path
+
+The spec-audit fault checks had made every load and store spill around the fault call, costing 8-15% of
+throughput. SRAM and XIP accesses are inline again and faults, peripherals and unmapped space take out-of-line
+paths, with the same faults as before. MicroPython CPU loop, NativeAOT, Switch decoder: 266-270 to 281-286 MIPS.
 
 ### Changed: "register-accurate" instead of "cycle-accurate" in the package description and README
 
