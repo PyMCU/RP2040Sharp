@@ -100,7 +100,7 @@ public sealed class UsbCdcHost
 
     private void FlushPendingOut()
     {
-        if (_armedOutEp < 0 || _txFifo.Count == 0) return;
+        if (_armedOutEp < 0 || _txFifo.Count == 0 || _openFramesLeft > 0) return;
         var ep = _armedOutEp; var size = _armedOutSize;
         _armedOutEp = -1;
         DeliverOut(ep, size);
@@ -119,6 +119,7 @@ public sealed class UsbCdcHost
     private void HandleResetReceived()
     {
         _resumeSignaled = false;
+        _openFramesLeft = 0;
         // A bus reset starts enumeration from scratch. Drop everything learned from a previous session: after
         // a device reboot (watchdog reset, rp2040.reboot()) the stale _descriptorsSize/_initialized would
         // otherwise skip GET_DESCRIPTOR/SET_CONFIGURATION and the rebooted device would never be configured.
@@ -128,8 +129,19 @@ public sealed class UsbCdcHost
         _inEndpoint = -1;
         _outEndpoint = -1;
         _armedOutEp = -1;
-        _usb.SendSetupPacket(SetDeviceAddressPacket(1));
+        // A real host does not talk to the device the moment the reset ends: it waits the reset recovery
+        // time first (USB 2.0 §7.1.7.5 and §9.2.6.2, TRSTRCY >= 10 ms). This handler runs inside the firmware's
+        // write that clears SIE_STATUS.BUS_RESET; newer TinyUSB (CircuitPython 11) drops a SETUP that arrives
+        // before it has processed the reset, and the device never enumerates.
+        _usb.SendSetupPacketAfter(SetDeviceAddressPacket(1), ResetRecoveryCycles);
     }
+
+    /// <summary>Reset recovery (TRSTRCY, USB 2.0 §7.1.7.5 and §9.2.6.2): 10 ms between the end of a bus reset and the first SETUP.</summary>
+    public const long ResetRecoveryCycles = 10 * UsbPeripheral.CyclesPerMs;
+
+    /// <summary>SetAddress recovery (USB 2.0 §9.2.6.3): the device may take 2 ms after the status stage of
+    /// SET_ADDRESS before it must answer at the new address, so the host sends nothing earlier.</summary>
+    public const long SetAddressRecoveryCycles = 2 * UsbPeripheral.CyclesPerMs;
 
     private void HandleEndpointWrite(int endpoint, byte[] buffer)
     {
@@ -137,7 +149,10 @@ public sealed class UsbCdcHost
         {
             if (_descriptorsSize == null)
             {
-                _usb.SendSetupPacket(GetDescriptorPacket(DescriptorType.Configuration, CONFIGURATION_DESCRIPTOR_SIZE));
+                // Status stage of SET_ADDRESS: wait the SetAddress recovery interval. The other requests follow
+                // each other as soon as the previous one completes, which the spec allows: it sets no minimum gap.
+                _usb.SendSetupPacketAfter(GetDescriptorPacket(DescriptorType.Configuration, CONFIGURATION_DESCRIPTOR_SIZE),
+                                          SetAddressRecoveryCycles);
             }
             else if (!_initialized)
             {
@@ -151,6 +166,8 @@ public sealed class UsbCdcHost
                 else
                     foreach (var ifn in controlIfaces)
                         CdcSetControlLineState(interfaceNumber: (ushort)ifn);
+                // The port is open (DTR): hold host data for PortOpenFrames SOFs (see PortOpenFrames).
+                _openFramesLeft = PortOpenFrames;
                 OnDeviceConnected?.Invoke();
                 OnConfigurationComplete?.Invoke();
                 // Trigger MicroPython REPL prompt (mirrors rp2040js micropython-run.ts onDeviceConnected)
@@ -198,12 +215,28 @@ public sealed class UsbCdcHost
         // stays awake if it somehow suspended after the initial RESUME handshake.
         if (_initialized && (frameNumber & 0x7F) == 0)
             _usb.SignalResume();
+        if (_openFramesLeft > 0 && --_openFramesLeft == 0) FlushPendingOut();
     }
+
+    /// <summary>
+    /// SOFs (1 ms each at full speed) between opening the port (SET_CONTROL_LINE_STATE with DTR) and the first
+    /// host-to-device byte. A host application writes after its port is open, not in the same millisecond as the
+    /// line-state request; data delivered inside the firmware's own post-DTR window can starve TinyUSB's
+    /// <c>tud_task</c> while SOF events fill its 16-entry event queue, and a queue overflow drops events.
+    /// (On the RP2350's RISC-V cores that overflow ends in an unconditional <c>ebreak</c>; see RP2350Sharp.)
+    /// </summary>
+    public const int PortOpenFrames = 20;
+
+    /// <summary>SOFs left before queued host bytes may go out (see <see cref="PortOpenFrames"/>); 0 = deliver at once.</summary>
+    private int _openFramesLeft;
+
+    /// <summary>Diagnostics: true while the host still holds its data after opening the port.</summary>
+    public bool HoldingAfterPortOpen => _openFramesLeft > 0;
 
     private void HandleEndpointRead(int endpoint, int size)
     {
         if (endpoint != _outEndpoint) return;
-        if (_txFifo.Count == 0)
+        if (_txFifo.Count == 0 || _openFramesLeft > 0)
         {
             // No data ready — leave the OUT endpoint armed (the device keeps ep->active = 1 and waits,
             // exactly as hardware waits for the host to send an OUT token). Deliver the moment bytes

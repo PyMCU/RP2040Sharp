@@ -178,6 +178,8 @@ public static class SystemOps
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Cpsie(ushort opcode, CortexM0Plus cpu)
     {
+        // ARMv6-M CPS: "if CurrentModeIsPrivileged() then ..." — a NOP from unprivileged Thread code.
+        if (cpu.Registers.IPSR == 0 && (cpu.Registers.CONTROL & 1) != 0) return;
         cpu.Registers.PRIMASK = 0;
         cpu.Registers.InterruptsUpdated = true;
     }
@@ -185,6 +187,7 @@ public static class SystemOps
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Cpsid(ushort opcode, CortexM0Plus cpu)
     {
+        if (cpu.Registers.IPSR == 0 && (cpu.Registers.CONTROL & 1) != 0) return;   // unprivileged: NOP
         cpu.Registers.PRIMASK = 1;
     }
 

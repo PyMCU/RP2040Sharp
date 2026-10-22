@@ -50,6 +50,25 @@ public abstract class MemoryOpsTests
         }
 
         [Fact]
+        public void Should_KeepTheOriginalBase_WhenAFaultAbandonsAnLdmThatLoadsItsBase()
+        {
+            // LDMIA r0, {r0, r1}: r0's word is the last word of SRAM (loads fine), r1's word is past the end
+            // (bus error -> precise HardFault). The abandoned LDM must leave the base at its original value,
+            // not at the word it already loaded from the list.
+            const uint lastWord = BusInterconnect.SRAM_START_ADDRESS + BusInterconnect.SRAM_SIZE - 4;
+            Bus.WriteWord(lastWord, 0xCAFEF00D);
+            Bus.WriteHalfWord(0x20000000, InstructionEmiter.Ldmia(R0, 1 << R0 | 1 << R1));
+            Cpu.Registers[R0] = lastWord;
+            Cpu.Registers[R1] = 0x1111;
+
+            Cpu.Step();
+
+            Cpu.Registers.IPSR.Should().Be(3u, "the bus error takes a HardFault");
+            Cpu.Registers[R0].Should().Be(lastWord, "the base keeps its original value");
+            Cpu.Registers[R1].Should().Be(0x1111u, "the faulting element is not written");
+        }
+
+        [Fact]
         public void Should_ConsumeCorrectCycles_ForMultipleLoad()
         {
             // Arrange

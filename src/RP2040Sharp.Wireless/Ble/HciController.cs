@@ -7,7 +7,7 @@ using System.Collections.Generic;
 namespace RP2040Sharp.Wireless.Ble;
 
 /// <summary>
-/// An emulated Bluetooth LE controller at the HCI boundary — the chip side of the host's HCI stack
+/// A virtual Bluetooth LE controller at the HCI boundary (the CYW43439's BT HCI shared bus, translated; no radio) — the chip side of the host's HCI stack
 /// (btstack/NimBLE). It answers the bring-up command sequence (Reset, Read BD_ADDR, LE buffer sizes,
 /// …) with the Command Complete/Status events the host expects, and drives the LE link layer:
 /// advertising, scanning, and connections. Everything above the link layer (L2CAP/ATT/GATT) runs

@@ -7,7 +7,7 @@ using System.Collections.Generic;
 namespace RP2040Sharp.Wireless.Cyw43;
 
 /// <summary>
-/// A minimal virtual network behind the emulated radio: an L2/L3 gateway that answers ARP and serves
+/// A minimal virtual network behind the CYW43439 gSPI host-protocol translation: an L2/L3 gateway that answers ARP and serves
 /// DHCP so a CYW43439 STA that associates actually gets an IP (link status UP), the prerequisite for
 /// real sockets / Microdot. Ethernet frames the guest transmits arrive via <see cref="Sdpcm.OnHostEthernet"/>;
 /// replies go back through <see cref="Sdpcm.EnqueueEthernet"/>. This is the "virtualise behind the
@@ -104,9 +104,16 @@ public sealed class VirtualNet
     private static string MacKey(byte[] b, int o) => $"{b[o]:x2}{b[o + 1]:x2}{b[o + 2]:x2}{b[o + 3]:x2}{b[o + 4]:x2}{b[o + 5]:x2}";
     private static bool IsBroadcastOrMulticast(byte[] dst) => (dst[0] & 1) != 0; // multicast/broadcast bit
 
+    /// <summary>
+    /// Serve the guest's station interface (itf 0) only. A guest that also runs its own SoftAP (itf 1, by default
+    /// 192.168.4.1 as well) then has that network to itself instead of meeting this gateway's ARP replies for its own
+    /// address. Off by default (tests join several stations, AP and STA, through one gateway).
+    /// </summary>
+    public bool StationOnly { get; set; }
+
     private void HandleGuestFrame(Sdpcm from, int itf, byte[] frame)
     {
-        if (frame.Length < 14) return;
+        if (frame.Length < 14 || (StationOnly && itf != 0)) return;
         var srcKey = MacKey(frame, 6);
         if (_macToDevice.Count < MaxStations || _macToDevice.ContainsKey(srcKey))
             _macToDevice[srcKey] = from;         // learn source MAC → station
@@ -175,6 +182,8 @@ public sealed class VirtualNet
         }
         else if (proto == 6)                       // TCP
         {
+            // A forwarded host connection (ForwardTcp) first, then the scripted client.
+            if (_forwarder is { } fw && f.Length >= l4 + 20 && fw.HandleGuestSegment(f, ip, l4)) return;
             HandleTcp(itf, f, ip, l4);
         }
     }
@@ -192,7 +201,8 @@ public sealed class VirtualNet
 
     /// <summary>
     /// Names the built-in DNS server resolves (the DHCP lease already points the guest here via
-    /// option 6). Anything not listed falls back to <see cref="DnsDefault"/>, or is answered NXDOMAIN.
+    /// option 6). Anything not listed falls back to <see cref="DnsDefault"/>, or is answered NXDOMAIN. The names
+    /// listed are also answered to mDNS queries (224.0.0.251:5353), which is where lwIP sends ".local" names.
     /// </summary>
     public readonly Dictionary<string, byte[]> DnsRecords = new(StringComparer.OrdinalIgnoreCase);
 
@@ -202,10 +212,14 @@ public sealed class VirtualNet
     /// <summary>Diagnostics: a DNS query arrived. Arguments: queried name, answer (null = NXDOMAIN).</summary>
     public Action<string, byte[]?>? OnDnsQuery;
 
+    private static bool IsMdnsGroup(byte[] f, int o) =>
+        o + 4 <= f.Length && f[o] == 224 && f[o + 1] == 0 && f[o + 2] == 0 && f[o + 3] == 251;
+
     private void HandleUdp(int itf, byte[] f, int ipOff, int l4, ushort dstPort)
     {
         var payload = f[(l4 + 8)..];
         var reply = dstPort == 53 ? BuildDnsReply(payload)
+                  : dstPort == 5353 && IsMdnsGroup(f, ipOff + 16) ? BuildDnsReply(payload, mdns: true)
                   : _udpListeners.TryGetValue(dstPort, out var h) ? h(payload)
                   : null;
         if (reply is not { Length: > 0 }) return;
@@ -226,7 +240,7 @@ public sealed class VirtualNet
     /// the 0xC00C pointer at the question). Enough for getaddrinfo(), which is the gate every name-based
     /// client (urequests, umqtt, ntptime) has to pass before it can open a socket.
     /// </summary>
-    private byte[]? BuildDnsReply(byte[] q)
+    private byte[]? BuildDnsReply(byte[] q, bool mdns = false)
     {
         if (q.Length < 12) return null;
         if ((q[2] & 0x80) != 0) return null;              // already a response
@@ -249,6 +263,10 @@ public sealed class VirtualNet
         var qtype = Be16(q, o);
         var questionEnd = o + 4;
 
+        // mDNS (lwIP sends ".local" names to 224.0.0.251:5353 instead of the DNS server): answer only the names of
+        // DnsRecords, as the one-shot unicast response a querier on another port expects (RFC 6762 6.7); stay silent
+        // for the rest, as a LAN without that host is.
+        if (mdns && (qtype != 1 || !DnsRecords.ContainsKey(name.ToString()))) return null;
         var answer = DnsRecords.TryGetValue(name.ToString(), out var ip) ? ip : DnsDefault;
         OnDnsQuery?.Invoke(name.ToString(), qtype == 1 ? answer : null);
         if (qtype != 1) answer = null;                    // only A records are modelled
@@ -340,10 +358,8 @@ public sealed class VirtualNet
         public ushort ClientPort, ServerPort;
         public int Itf;
         public uint Seq, Ack;
-        public bool Established, Replied, RemoteClosed;
+        public bool Established, Replied;
         public readonly List<byte> Rx = [];
-        public System.Net.Sockets.Socket? Bridge;
-        public int ToRemote, FromRemote;
     }
 
     private readonly Dictionary<ushort, Func<byte[], byte[]?>> _listeners = new();
@@ -354,61 +370,57 @@ public sealed class VirtualNet
     /// <summary>
     /// Relay TCP on <paramref name="localPort"/> to a real server. A guest connecting to the gateway on
     /// that port is proxied byte-for-byte to <paramref name="remoteHost"/>:<paramref name="remotePort"/>,
-    /// so firmware can speak to services outside the simulation — a public MQTT broker, an HTTP API —
-    /// over its own TCP/IP stack rather than a stubbed one.
-    /// Call <see cref="Poll"/> from the run loop to pump traffic coming back the other way.
+    /// so firmware can speak to services outside the simulation — a broker on the PC, an HTTP API —
+    /// over its own TCP/IP stack rather than a stubbed one. A second call for the same port replaces its target.
+    /// The relay is the forwarder's (<see cref="TcpForwarder.AddBridge"/>): the guest's SYN is answered once the
+    /// real connection is up and reset when it cannot be, with retransmission and the guest's window kept.
+    /// Call <see cref="Poll"/> from the run loop to pump it.
     /// </summary>
-    public void BridgeTcp(ushort localPort, string remoteHost, int remotePort) =>
-        _bridges[localPort] = (remoteHost, remotePort);
-
-    /// <summary>Diagnostics: bytes relayed. Arguments: local port, to-remote count, from-remote count.</summary>
-    public Action<ushort, int, int>? OnBridgeTraffic;
-
-    private readonly Dictionary<ushort, (string Host, int Port)> _bridges = new();
-
-    /// <summary>
-    /// Move bytes waiting on the real sockets into the guest. Nothing else drives them: the simulation
-    /// is single-threaded, so the run loop has to give the bridge a turn.
-    /// </summary>
-    public void Poll()
+    public void BridgeTcp(ushort localPort, string remoteHost, int remotePort)
     {
-        foreach (var conn in _inbound.Values.ToArray())
-        {
-            var sock = conn.Bridge;
-            if (sock is null) continue;
-            try
-            {
-                while (sock.Connected && sock.Available > 0)
-                {
-                    var take = Math.Min(sock.Available, 512);   // one segment at a time; no MSS games
-                    var buf = new byte[take];
-                    var n = sock.Receive(buf, 0, take, System.Net.Sockets.SocketFlags.None);
-                    if (n <= 0) break;
-                    conn.FromRemote += n;
-                    SendTcpTo(conn, TCP_PSH | TCP_ACK, buf[..n]);
-                    conn.Seq += (uint)n;
-                    OnBridgeTraffic?.Invoke(conn.ServerPort, conn.ToRemote, conn.FromRemote);
-                }
-                if (!sock.Connected && !conn.RemoteClosed)
-                {
-                    conn.RemoteClosed = true;
-                    SendTcpTo(conn, TCP_FIN | TCP_ACK, []);
-                    conn.Seq += 1;
-                }
-            }
-            catch (System.Net.Sockets.SocketException) { CloseBridge(conn); }
-            catch (ObjectDisposedException) { CloseBridge(conn); }
-        }
+        Forwarder.RemoveBridge(localPort);
+        Forwarder.AddBridge(localPort, remoteHost, checked((ushort)remotePort));
     }
 
-    private void CloseBridge(InboundConn conn)
+    /// <summary>
+    /// Move what the real sockets delivered (forwarded and bridged connections) into the guest and run their timers.
+    /// Nothing else drives them: the simulation is single-threaded, so the run loop has to give them a turn.
+    /// </summary>
+    public void Poll() => _forwarder?.Pump();
+
+    // ── Host port forwarding: real host clients reach a server on the station ──────────
+
+    private TcpForwarder? _forwarder;
+
+    /// <summary>
+    /// The host side of port forwarding (created on first use): <see cref="TcpForwarder.Listen"/> opens
+    /// 127.0.0.1:hostPort and relays each connection to <see cref="ClientIp"/>:guestPort. <see cref="Poll"/> pumps it.
+    /// </summary>
+    public TcpForwarder Forwarder => _forwarder ??= new TcpForwarder(this);
+
+    /// <summary>Listen on 127.0.0.1:<paramref name="hostPort"/> (0: any free port) and relay every connection to the
+    /// station's <paramref name="guestPort"/>. Returns the port listened on.</summary>
+    public int ForwardTcp(ushort hostPort, ushort guestPort) => Forwarder.Listen(hostPort, guestPort);
+
+    /// <summary>The MAC of the station holding <see cref="ClientIp"/> (null until DHCP leased it).</summary>
+    internal byte[]? StationMac()
     {
-        try { conn.Bridge?.Close(); } catch { /* already gone */ }
-        conn.Bridge = null;
-        if (conn.RemoteClosed) return;
-        conn.RemoteClosed = true;
-        SendTcpTo(conn, TCP_FIN | TCP_ACK, []);
-        conn.Seq += 1;
+        foreach (var (key, ip) in _leases)
+            if (IpEquals(ip, ClientIp)) return Convert.FromHexString(key);
+        return null;
+    }
+
+    /// <summary>Send a TCP segment (checksum filled here) from the gateway to the station at <paramref name="ip"/>.</summary>
+    internal void SendToStation(byte[] mac, byte[] ip, byte[] tcp)
+    {
+        var csum = TcpChecksum(GatewayIp, ip, tcp);
+        tcp[16] = (byte)(csum >> 8); tcp[17] = (byte)csum;
+        var ipPkt = BuildIpv4(6, GatewayIp, ip, tcp);
+        var frame = new byte[14 + ipPkt.Length];
+        WriteEthHeader(frame, mac, GatewayMac, 0x0800);
+        Array.Copy(ipPkt, 0, frame, 14, ipPkt.Length);
+        _macToDevice.TryGetValue(MacKey(mac, 0), out var dev);
+        (dev ?? _sdpcm)?.EnqueueEthernet(0, frame);
     }
 
     private static string ConnKey(byte[] ip, ushort clientPort, ushort serverPort) =>
@@ -419,10 +431,7 @@ public sealed class VirtualNet
     {
         var srcPort = Be16(f, tcpOff);
         var dstPort = Be16(f, tcpOff + 2);
-        var bridged = _bridges.ContainsKey(dstPort);
-        _listeners.TryGetValue(dstPort, out var handler);
-        if (!bridged && handler is null) return false;
-        handler ??= _ => null;
+        if (!_listeners.TryGetValue(dstPort, out var handler)) return false;
 
         var clientIp  = f[(ipOff + 12)..(ipOff + 16)];
         var clientMac = f[6..12];
@@ -445,29 +454,6 @@ public sealed class VirtualNet
                 ClientIp = clientIp, ClientMac = clientMac, ClientPort = srcPort, ServerPort = dstPort,
                 Itf = itf, Seq = 5000, Ack = seq + 1,
             };
-            if (bridged)
-            {
-                var (host, port) = _bridges[dstPort];
-                try
-                {
-                    var sock = new System.Net.Sockets.Socket(
-                        System.Net.Sockets.AddressFamily.InterNetwork,
-                        System.Net.Sockets.SocketType.Stream,
-                        System.Net.Sockets.ProtocolType.Tcp) { NoDelay = true };
-                    sock.Connect(host, port);
-                    sock.Blocking = false;
-                    fresh.Bridge = sock;
-                }
-                catch (System.Net.Sockets.SocketException)
-                {
-                    // The real service is unreachable: refuse the connection instead of leaving the
-                    // guest's connect() hanging until its own timeout.
-                    fresh.Seq = 0;
-                    SendTcpTo(fresh, TCP_RST | TCP_ACK, []);
-                    _inbound.Remove(key);
-                    return true;
-                }
-            }
             _inbound[key] = fresh;
             SendTcpTo(fresh, TCP_SYN | TCP_ACK, []);
             fresh.Seq = 5001;
@@ -486,22 +472,7 @@ public sealed class VirtualNet
             }
             SendTcpTo(conn, TCP_ACK, []);
 
-            if (conn.Bridge is { } bridgeSock)
-            {
-                // Relay straight through; the reply comes back asynchronously via Poll().
-                try
-                {
-                    var chunk = f[payloadOff..(payloadOff + payloadLen)];
-                    var sent = 0;
-                    while (sent < chunk.Length)
-                        sent += bridgeSock.Send(chunk, sent, chunk.Length - sent,
-                                                System.Net.Sockets.SocketFlags.None);
-                    conn.ToRemote += chunk.Length;
-                    OnBridgeTraffic?.Invoke(conn.ServerPort, conn.ToRemote, conn.FromRemote);
-                }
-                catch (System.Net.Sockets.SocketException) { CloseBridge(conn); }
-            }
-            else if (!conn.Replied)
+            if (!conn.Replied)
             {
                 var request = conn.Rx.ToArray();
                 OnServerRequest?.Invoke(dstPort, request);
@@ -520,7 +491,6 @@ public sealed class VirtualNet
         {
             conn.Ack = seq + (uint)payloadLen + 1;   // FIN consumes one sequence number
             SendTcpTo(conn, TCP_ACK | TCP_FIN, []);
-            try { conn.Bridge?.Close(); } catch { /* already gone */ }
             _inbound.Remove(key);
         }
         return true;

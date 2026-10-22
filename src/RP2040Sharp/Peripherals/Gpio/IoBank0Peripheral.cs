@@ -1,5 +1,6 @@
 using RP2040.Core.Cpu;
 using RP2040.Core.Memory;
+using RP2040.Peripherals.PinLevel;
 using RP2040.Peripherals.Sio;
 
 namespace RP2040.Peripherals.Gpio;
@@ -48,6 +49,106 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
     /// changed state as far as any pad observer could tell.
     /// </summary>
     public Pwm.PwmPeripheral? Pwm { get; set; }
+
+    // ── Pin-level serial functions (opt-in) ──────────────────────────────────────
+    // With pin-level buses enabled the machine registers the I2C/SPI/UART pad functions here. A GPIO whose FUNCSEL
+    // selects one of them then takes its pad output from that function and feeds its pad input back to it; with nothing
+    // registered (the default) these functions drive nothing and none of the paths below run.
+
+    private readonly IPadFunction?[] _padFns = new IPadFunction?[6];   // [(funcsel-1)*2 + block]
+    private int _padFnCount;
+
+    /// <summary>Pads whose FUNCSEL selects a registered pad function (1 SPI, 2 UART, 3 I2C).</summary>
+    private uint _fnPins;
+
+    private readonly uint[] _fnPads = new uint[6];   // [(funcsel-1)*2 + block]: the pads routed to it, any role
+    private readonly uint[] _fnRolePads = new uint[24];   // [((funcsel-1)*2 + block)*4 + role]
+
+    /// <summary>
+    /// Core-0 cycle (the pin-level engines' time base) of the most recent pad drive change made by a serial function.
+    /// Valid inside <see cref="PadChanged"/> / <see cref="PadsChanged"/> while <see cref="FunctionDriving"/> is set: the
+    /// handler then sees the edge at the engine's own cycle, not at the access or sweep that brought the engine there.
+    /// </summary>
+    public long LastPadEdgeCycle { get; private set; }
+
+    /// <summary>True while IO_BANK0 reports a pad change made by a pin-level serial function (see <see cref="LastPadEdgeCycle"/>).</summary>
+    public bool FunctionDriving { get; private set; }
+
+    /// <summary>Wire a serial peripheral's pad side to the pins that select <paramref name="funcsel"/> (1 = SPI,
+    /// 2 = UART, 3 = I2C) for peripheral <paramref name="block"/> (0 or 1).</summary>
+    public void RegisterPadFunction(int funcsel, int block, IPadFunction fn)
+    {
+        if (funcsel is < 1 or > 3 || block is < 0 or > 1) throw new ArgumentOutOfRangeException(nameof(funcsel));
+        var idx = (funcsel - 1) * 2 + block;
+        if (_padFns[idx] is null) _padFnCount++;
+        _padFns[idx] = fn;
+        fn.DriveChanged = (role, cycle) => OnFunctionDrive(idx, role, cycle);
+        RebuildFunctionPins();
+        var pins = _fnPads[idx];
+        if (pins != 0) { NotifyPads(pins); DeliverFunctionInputs(pins); }
+    }
+
+    /// <summary>Bit n set: GPIO n is routed (FUNCSEL = <paramref name="funcsel"/>, 1 = SPI, 2 = UART, 3 = I2C) to
+    /// peripheral <paramref name="block"/>, in any role.</summary>
+    public uint FunctionPads(int funcsel, int block) =>
+        funcsel is < 1 or > 3 || block is < 0 or > 1 ? 0 : _fnPads[(funcsel - 1) * 2 + block];
+
+    /// <summary>True when a GPIO is routed to the given function / block / role (e.g. SPI0's SCK).</summary>
+    public bool IsFunctionRouted(int funcsel, int block, int role) =>
+        funcsel is >= 1 and <= 3 && block is 0 or 1 && role is >= 0 and <= 3 &&
+        _fnRolePads[((funcsel - 1) * 2 + block) * 4 + role] != 0;
+
+    private void RebuildFunctionPins()
+    {
+        Array.Clear(_fnPads);
+        Array.Clear(_fnRolePads);
+        _fnPins = 0;
+        if (_padFnCount == 0) return;
+        for (var pin = 0; pin < GPIO_COUNT; pin++)
+        {
+            var funcsel = (int)(_ctrl[pin] & FUNCSEL_MASK);
+            if (!PadFunctions.TryMap(funcsel, pin, out var b, out var r)) continue;
+            var idx = (funcsel - 1) * 2 + b;
+            _fnPads[idx] |= 1u << pin;
+            _fnRolePads[idx * 4 + r] |= 1u << pin;
+            if (_padFns[idx] is not null) _fnPins |= 1u << pin;
+        }
+    }
+
+    private IPadFunction? FunctionAt(int pin, out int role)
+    {
+        role = 0;
+        if (((_fnPins >> pin) & 1) == 0) return null;
+        var funcsel = (int)(_ctrl[pin] & FUNCSEL_MASK);
+        PadFunctions.TryMap(funcsel, pin, out var block, out role);
+        return _padFns[(funcsel - 1) * 2 + block];
+    }
+
+    private void OnFunctionDrive(int idx, int role, long cycle)
+    {
+        var mask = _fnRolePads[idx * 4 + role] & _fnPins;
+        if (mask == 0) return;
+        var outer = FunctionDriving;
+        var outerCycle = LastPadEdgeCycle;
+        LastPadEdgeCycle = cycle;
+        FunctionDriving = true;
+        try { NotifyPads(mask); }   // the pad reads back what the function drives (before the external device reacts)
+        finally { FunctionDriving = outer; LastPadEdgeCycle = outer ? outerCycle : cycle; }
+    }
+
+    /// <summary>Hand the functions on <paramref name="mask"/> their pad input as it is now (after INOVER).</summary>
+    private void DeliverFunctionInputs(uint mask)
+    {
+        mask &= _fnPins;
+        if (mask == 0) return;
+        var peri = GetInputWord();
+        while (mask != 0)
+        {
+            var pin = System.Numerics.BitOperations.TrailingZeroCount(mask);
+            mask &= mask - 1;
+            FunctionAt(pin, out var role)?.SetInput(role, (peri & (1u << pin)) != 0);
+        }
+    }
 
     /// <summary>GPIO n drives slice (n >> 1) & 7, channel B on odd pins (datasheet §4.5.2).</summary>
     private static (int slice, bool channelB) PwmChannelFor(int pin) => ((pin >> 1) & 7, (pin & 1) != 0);
@@ -162,6 +263,29 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         // Edge latching and peripheral inputs happen whoever is listening; only the output-change
         // notification below is skippable when nobody subscribes.
         EvaluatePads(mask);
+        ReportPadOutputs(mask);
+    }
+
+    /// <summary>
+    /// Raise <see cref="PadChanged"/> / <see cref="PadsChanged"/> for the pads in <paramref name="mask"/> whose effective
+    /// output moved, stamped with <paramref name="cycle"/> (<see cref="LastPadEdgeCycle"/>, with
+    /// <see cref="FunctionDriving"/> set): a peripheral that knows the cycle of its own edge (a PWM counter step) reports
+    /// it here. Only the output side: input edges and interrupt latching are left to <see cref="NotifyPads"/>.
+    /// </summary>
+    public void NotifyPadOutputsAt(uint mask, long cycle)
+    {
+        if (PadChanged is null && PadsChanged is null) return;
+        var outer = FunctionDriving;
+        var outerCycle = LastPadEdgeCycle;
+        LastPadEdgeCycle = cycle;
+        FunctionDriving = true;
+        try { ReportPadOutputs(mask); }
+        finally { FunctionDriving = outer; LastPadEdgeCycle = outer ? outerCycle : cycle; }
+    }
+
+    /// <summary>Raise the output-change events for the pads in <paramref name="mask"/>, without re-evaluating inputs.</summary>
+    public void ReportPadOutputs(uint mask)
+    {
         if (PadChanged is null && PadsChanged is null) return;
         uint changed = 0;
         while (mask != 0)
@@ -211,7 +335,7 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         var w = (_sio.GpioOut & sioDriven) | (_pioOut[0] & pio0Driven) | (_pioOut[1] & pio1Driven);
         var driven = sioDriven | pio0Driven | pio1Driven;
 
-        var rest = _pwmMuxedPins;
+        var rest = _pwmMuxedPins | _fnPins;
         while (rest != 0)
         {
             var pin = System.Numerics.BitOperations.TrailingZeroCount(rest);
@@ -260,6 +384,13 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
     /// <summary>Pads currently muxed to PWM (FUNCSEL 4), whose level is time-varying, not write-driven.</summary>
     private uint _pwmMuxedPins;
 
+    /// <summary>
+    /// Pads currently muxed to PWM (FUNCSEL 4), one bit per GPIO. Their level follows the PWM counter, which
+    /// never goes through <see cref="NotifyPads"/>, so neither <see cref="PadChanged"/> nor
+    /// <see cref="PadsChanged"/> reports their edges: a host that watches such a pad polls it.
+    /// </summary>
+    public uint PwmMuxedPins => _pwmMuxedPins;
+
     /// <summary>Pads muxed to each function, kept in step with FUNCSEL writes.</summary>
     private uint _sioPins, _pio0Pins, _pio1Pins;
 
@@ -274,10 +405,11 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         var oe   = (_sio.GpioOe  & _sioPins) | (_pioOe[0]  & _pio0Pins) | (_pioOe[1]  & _pio1Pins);
         var outv = (_sio.GpioOut & _sioPins) | (_pioOut[0] & _pio0Pins) | (_pioOut[1] & _pio1Pins);
 
-        // PWM pads are level-by-counter, so they keep the slow path — and there are rarely any.
-        if (_pwmMuxedPins != 0)
+        // PWM pads are level-by-counter, so they keep the slow path — and there are rarely any. Pads muxed to a
+        // pin-level serial function ask it (a handful at most).
+        if ((_pwmMuxedPins | _fnPins) != 0)
         {
-            var rest = _pwmMuxedPins;
+            var rest = _pwmMuxedPins | _fnPins;
             while (rest != 0)
             {
                 var pin = System.Numerics.BitOperations.TrailingZeroCount(rest);
@@ -320,6 +452,7 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
             var (slice, channelB) = PwmChannelFor(pin);
             return pwm.GetChannelOutput(slice, channelB);
         }
+        if (_fnPins != 0 && FunctionAt(pin, out var role) is { } fn) return fn.GetOutputLevel(role);
         return false;
     }
 
@@ -333,6 +466,7 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
             return (_pioOe[funcsel - FUNCSEL_PIO0] & (1u << pin)) != 0;
         if (funcsel == FUNCSEL_PWM && Pwm is { } pwm)
             return pwm.IsSliceEnabled(PwmChannelFor(pin).slice);
+        if (_fnPins != 0 && FunctionAt(pin, out var role) is { } fn) return fn.GetOutputEnable(role);
         return false;
     }
 
@@ -355,6 +489,12 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
 
     /// <summary>Pads an off-chip device currently drives through <see cref="SetExternalInput"/>.</summary>
     private uint _externalHeld;
+
+    /// <summary>Pads an off-chip device currently drives (<see cref="SetExternalInput"/>, not yet released).</summary>
+    public uint ExternalHeldMask => _externalHeld;
+
+    /// <summary>The levels SIO holds for the pads in <see cref="ExternalHeldMask"/> (meaningful only there).</summary>
+    public uint ExternalLevels => _sio.HeldInputLevels & _externalHeld;
 
     /// <summary>
     /// Stops driving the pads in <paramref name="mask"/> from outside, as <see cref="SetExternalInput"/>
@@ -487,6 +627,16 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         var pdiff = (peri ^ _periLevel) & mask;
         if (pdiff == 0) return;
         _periLevel ^= pdiff;
+        if ((pdiff & _fnPins) != 0)
+        {
+            var fnDiff = pdiff & _fnPins;
+            while (fnDiff != 0)
+            {
+                var pin = System.Numerics.BitOperations.TrailingZeroCount(fnDiff);
+                fnDiff &= fnDiff - 1;
+                FunctionAt(pin, out var role)?.SetInput(role, (peri & (1u << pin)) != 0);
+            }
+        }
         if (OnInputChanged is null) return;
         while (pdiff != 0)
         {
@@ -567,9 +717,13 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
                 SetOverride(bit, (value >> 28) & 3, ref _irqInvert, ref _irqLow, ref _irqHigh);
                 _outOverrides = (_outInvert | _outLow | _outHigh | _oeInvert | _oeLow | _oeHigh) != 0;
                 _irqOverrides = (_irqInvert | _irqLow | _irqHigh) != 0;
+                var wasFn = (_fnPins & bit) != 0;
+                if (_padFnCount != 0) RebuildFunctionPins();
                 // Re-muxing a pad (or overriding it) changes what it drives and what it reads without SIO or
                 // the PIO moving, so the change has to be announced here.
                 NotifyPads(bit);
+                // A function newly routed to the pad (or re-routed) learns the level it is on now.
+                if ((_fnPins & bit) != 0 || wasFn) DeliverFunctionInputs(bit);
                 // IRQOVER changes the interrupt line with no pad movement at all.
                 if (irqOverChanged) CheckInterrupts();
             }

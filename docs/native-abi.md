@@ -1,0 +1,183 @@
+# Native C ABI (`st_rp2040_*`)
+
+`src/RP2040Sharp.Native` exposes the RP2040 to C and C++ hosts (the Proteus VSM model of the
+Silicon Twin demo, first of all) through a flat C ABI, declared in
+[`include/silicontwin_rp2040.h`](../src/RP2040Sharp.Native/include/silicontwin_rp2040.h). It
+mirrors `silicontwin_rp2350.h` of RP2350Sharp wherever the RP2040 allows it, so one host can drive
+a Pico, a Pico W and a Pico 2 with the same code. The core is register-accurate: CPU instructions
+and peripheral registers behave as on silicon; timing is modelled, not cycle-exact.
+
+## Packaging: an exports library, not a DLL of its own
+
+Only one NativeAOT runtime can live in a process, so `RP2040Sharp.Native` is a plain class library
+whose `[UnmanagedCallersOnly]` entry points become exports of the single NativeAOT library the host
+ships. In the host's `.csproj`:
+
+```xml
+<ProjectReference Include="...\src\RP2040Sharp.Native\RP2040Sharp.Native.csproj" />
+<UnmanagedEntryPointsAssembly Include="RP2040Sharp.Native" />
+```
+
+For local tests it can also be published alone (never shipped that way):
+
+```bash
+dotnet publish src/RP2040Sharp.Native -c Release -r win-x64 -p:StNativeLib=true -o out
+# -> out/silicontwin_rp2040.dll (.so / .dylib), import library under bin/.../native/
+```
+
+`-p:StTestHooks=true` adds `st_rp2040_test_inject_fault` for the fault-isolation tests.
+
+## The ABI
+
+| Function | Notes |
+|---|---|
+| `st_rp2040_version`, `st_rp2040_clock_hz` | `"silicontwin-rp2040 0.1.0"`, 125 MHz |
+| `st_rp2040_create(flash)`, `st_rp2040_create_ex(flash, flags)` | `flash` 0 = 2 MiB, else a power of two in 4 KiB..16 MiB. `ST_RP2040_BUS_I2C` (1), `ST_RP2040_BUS_SPI` (2), `ST_RP2040_BUS_UART` (4), `ST_RP2040_BUS_ALL` (7): pin-level buses ([pin-level-buses.md](pin-level-buses.md)); `st_rp2040_create` is `create_ex(flash, ST_RP2040_BUS_ALL)`, as on RP2350. `ST_RP2040_CYW43` (0x100, the value of `ST_RP2350_CYW43`; it was 1) attaches the CYW43439 of the Pico W (WL_ON GP23, DATA GP24, CS GP25, CLK GP29). The Pico W images of MicroPython and CircuitPython need it to boot |
+| `st_rp2040_destroy`, `st_rp2040_status`, `st_rp2040_last_error` | Opaque handles, a sticky FAULTED state, no exception ever crosses an export (same model as RP2350) |
+| `st_rp2040_load_uf2` | RP2040 family `0xE48BFF56` (or no family). Any other family, e.g. an RP2350 image, rejects the whole file with `-1` and a message naming the family. Absolute/data family blocks are skipped. Core 0 starts at `0x10000000` as after the bootrom |
+| `st_rp2040_run(n)` | `n` instructions per core, peripherals ticked every 512 at most |
+| `st_rp2040_run_until_edge(max, guard, watch)` | Same semantics as RP2350: slices of `guard` (twice that while both cores sleep) whenever `watch` and `guard` are nonzero, including before firmware routes the pads; stops after the slice in which a watched pad's level or OE changed. The result is that of peripherals ticked at the end of every slice; deferred ticks, sleeping stretches and bounded awake runs take several slices at once with exactly that result ([peripheral-deadlines.md](peripheral-deadlines.md)). With pin-level buses and a guard above 1, the event-bounded guard ends a slice of core 0 at the next engine edge on a watched pad and right after an instruction that moved one ([pin-level-buses.md](pin-level-buses.md#pad-events-and-the-event-bounded-guard)) |
+| `st_rp2040_cycles_until_edge` | Cycles until the next step of a pin-level engine with work on a watched pad, `UINT64_MAX` when none has one coming (as on RP2350: the Proteus host's EdgeWait) |
+| `st_rp2040_cycles`, `st_rp2040_time_ps`, `st_rp2040_cycle_to_ps`, `st_rp2040_clk_sys_hz` | Core-0 cycles at a fixed 125 MHz (the core does not model clock changes): 8000 ps per cycle. Monotonic: a watchdog reset, `AIRCR.SYSRESETREQ` or `st_rp2040_fs_commit(chip, 1)` reboots the chip but its clock runs on |
+| `st_rp2040_instructions(core)` | Conservative retired count, as on RP2350 |
+| `st_rp2040_pin_get`, `st_rp2040_pin_get_pull`, `st_rp2040_pin_set_input` | `-1` releases a pad: it reads its pull and follows later pull changes. `pin_set_input` first applies the peripheral time still pending, so no tick samples the new level retroactively; a pad already held at the level (or already released) is left alone, without that sync, as on RP2350 |
+| `st_rp2040_adc_set_voltage` | Channels 0..3 (GP26..29); the temperature sensor reads 27 °C |
+| `st_rp2040_set_flash_unique_id(chip, id[8])` | The chip's 64-bit unique id: what the flash answers to `0x4B` (Read Unique ID), where the SDK's `pico_get_unique_board_id()` reads it, so `machine.unique_id()` and `microcontroller.cpu.uid` return exactly these bytes in this order. The default is unique per chip and the same on every run for the same creation order (a hash of a per-process creation counter and the flash size). The firmware reads it once at start-up: call this after `create` and before the first run. NULL is rejected (`last_error`), a dead handle ignored. The flash answers `0x4B` and the data reads only: JEDEC (`0x9F`) and SFDP read 0 on the RP2040 (the SDK does not ask) |
+| `st_rp2040_set_pin_callback`, `st_rp2040_set_serial_callback`, `st_rp2040_serial_write` | Channels UART0, UART1 and USB CDC: an emulated USB host (`UsbCdcHost`) enumerates the device and asserts DTR, so the MicroPython REPL works over CDC |
+| `st_rp2040_wifi_set_ap`, `st_rp2040_wifi_status`, `st_rp2040_set_wifi_callback` | Pico W (`ST_RP2040_CYW43`) only: the virtual access point and the link status, below |
+| `st_rp2040_wifi_gpio` | The CYW43439's WL GPIO outputs, bit 0 = the onboard LED (MicroPython `Pin("LED")`), 0 at power-on and whenever WL_ON goes low. Cheap enough for every step; rejects nothing (0 without the radio or for a bad handle) |
+| `st_rp2040_wifi_forward_tcp`, `st_rp2040_wifi_poll` | Pico W only: port forwarding from `127.0.0.1:host_port` to a server on the station, and its pump ([wireless.md](wireless.md)) |
+| `st_rp2040_wifi_bridge_tcp`, `st_rp2040_wifi_dns_add` | Pico W only: outbound bridges from the gateway's `192.168.4.1:gateway_port` to one `host:port` of the PC's network (an MQTT broker), and names for the gateway's DNS ([wireless.md](wireless.md#outbound-bridges-w3)) |
+| `st_rp2040_fs_status`, `st_rp2040_fs_put`, `st_rp2040_fs_commit` | CircuitPython: files copied onto CIRCUITPY the way a PC does, into the FAT volume in flash, then a reboot (below) |
+
+Type names carry the chip (`st_rp2040_pin_cb`, `ST_RP2040_STATUS_OK`...) so that a translation unit
+can include both headers; values and callback signatures are those of the RP2350 header.
+
+### Files onto CIRCUITPY
+
+CircuitPython keeps its CIRCUITPY drive read-only to its own code while USB is connected, so a host cannot write files
+through the raw REPL (`OSError: [Errno 30] Read-only filesystem`). These calls do what a PC does when it copies files
+onto the drive: they write them into the FAT volume in emulated flash (`FatVolume`, `src/RP2040Sharp/Peripherals/Fs`,
+no third-party code), then reboot the chip so CircuitPython runs the new `code.py`. Same calls and struct layout as
+`st_rp2350_fs_*` (RP2350Sharp `docs/circuitpy-files.md`); the struct is `st_rp2040_fs_info`, the flag
+`ST_RP2040_FS_BOOT_OUT`.
+
+- **Finding the volume.** CircuitPython keeps no partition table: it puts CIRCUITPY after its image, up to the end of
+  flash, and formats it with FatFs (no MBR) on its first boot. The search starts at the end of the image
+  `st_rp2040_load_uf2` loaded (its highest RP2040-family block; absolute and data family blocks do not count), rounded
+  up to 4 KiB, and takes the first erase sector with a consistent FAT12/FAT16 boot sector (`0x55AA`, jump, BPB fields,
+  a volume inside the flash, FATs large enough, FAT[0] repeating the media byte). CircuitPython 9.2.1 on the 2 MiB Pico:
+  1 MiB FAT12 at `0x100000`.
+- **Writing.** FAT12 and FAT16, long file names, directories created as needed, an existing file replaced (its old
+  clusters freed), all FAT copies kept equal. All or nothing: on an error (no volume yet, the volume or root directory
+  full, a name over 255 or a path over 256 characters, a path through a file) flash is untouched and
+  `st_rp2040_last_error` says why. A commit empties the queue either way.
+- **When.** `st_rp2040_fs_put` queues at any time. On a fresh flash, run until `st_rp2040_fs_status` returns 1 with
+  `ST_RP2040_FS_BOOT_OUT` and `flash_erases + flash_programmed` (counted for the SSI and the bootrom flash calls) has not
+  moved for about 100 ms of simulated time, then `st_rp2040_fs_commit(chip, 1)`. Writing under a running CircuitPython
+  without that reboot is unsafe: it caches flash sectors in RAM and writes them back. The reboot does not restart the
+  chip's time: `st_rp2040_cycles`, `st_rp2040_time_ps` and the pad-event cycles continue from where they were.
+
+### Wi-Fi (Pico W)
+
+With `ST_RP2040_CYW43` the core speaks the CYW43439's gSPI host protocol and translates it into a virtual network
+(the CYW43439 is not emulated: its radio firmware is parked, never executed; no RF): one access point the host sets with
+`st_rp2040_wifi_set_ap(chip, ssid, passphrase, channel, rssi)` (open with a NULL or empty passphrase, else WPA2-PSK),
+and a gateway at `192.168.4.1/24` that answers ARP, DHCP (the station gets `192.168.4.2`) and DNS (NXDOMAIN). The
+guest's own driver and lwIP run unmodified, so MicroPython's `WLAN.scan()`, `.connect(ssid, key)` and `.ifconfig()`
+work as on the board; a wrong passphrase ends in `STAT_WRONG_PASSWORD` (-3), an unknown SSID in `STAT_NO_AP_FOUND`
+(-2). `st_rp2040_wifi_status` fills an `st_rp2040_wifi_info` (join state, DHCP address, gateway, netmask, MAC, SSID,
+RSSI, Ethernet bytes and frames each way; a caller-set `size`, so the struct can grow at the end) and
+`st_rp2040_set_wifi_callback` reports every change (scan, join, lease, leave, wrong passphrase, unknown SSID) when
+the run call that raised it has finished, never from inside the emulation. Protocol level only: no RF, and the guest
+reaches nothing of the host's network except what the host sets up: port forwards in on 127.0.0.1
+(`st_rp2040_wifi_forward_tcp`) and bridges out to the `host:port` it names (`st_rp2040_wifi_bridge_tcp`), [wireless.md](wireless.md).
+
+It is the RP2350 ABI with `st_rp2040_` names: the same functions, values and 208-byte layout (the struct is
+`st_wifi_status` there; here it is `st_rp2040_wifi_info` because `st_rp2040_wifi_status` is the function). The model,
+the compatibility rules are described in RP2350Sharp's `docs/wireless.md`; port forwarding (W2) and the outbound
+bridges (W3) in [wireless.md](wireless.md).
+
+### Pad-change cycles
+
+Every pad change that goes through IO_BANK0 is recorded while it happens, not found by a scan at
+the end of the slice. A change made by a CPU instruction (a SIO, IO_BANK0 or PADS write, on either
+core) carries the cycle of that instruction, so the cycles a host sees, and pulse widths, are the
+same at every guard: the tests check a timer-timed 37 µs pulse and a square wave at guards 1, 75
+and 300. Changes made by the pin-level UART / SPI / I2C engines carry the cycle of the edge (the
+engines run on core 0's clock). A PWM counter edge carries the cycle of the counter step that made it
+(the divider's fractional phase included; `RP2040Machine.ExactPwmPadEdges`, on in the chip), a PWM register
+write the cycle of the instruction. Changes made by other peripherals (PIO, DMA into SIO) carry the end of
+the slice in which they happened. Changes are reported in cycle order (`PadEventRecorder`, stable), core 1's
+never past core 0's clock.
+
+The PWM counter itself still advances at the end of each slice (as every peripheral does), so it starts
+counting from the start of the slice in which firmware enabled it: the period and every later edge are
+exact, the phase of the first one follows where that slice began.
+
+## Inside: the co-simulation core
+
+The chip is a thin C face over `RP2040CoSim` (in the core library, [cosim.md](cosim.md)), the loop that the
+managed adapter `RP2040Mcu` runs too: `st_rp2040_run(n)` is `Run(n)` (slices of the 512-instruction quantum counted
+across calls), `st_rp2040_run_until_edge` is `RunUntilEdge` with the guard, the watch and
+`CoSimFlags.Default` (event guard, sleeping stretches, bounded runs, stop on a watched edge, twice the guard
+asleep); pad events come from its `PadEventRecorder` in deferred mode, `st_rp2040_pin_set_input` goes through
+`RP2040CoSim.SetInputs` / `ReleaseInputs`.
+
+## Missing compared with RP2350
+
+- **Exact peripheral-driven edges** for PIO and DMA: their pad changes carry the end of their slice (the
+  pin-level UART / SPI / I2C engines' and the PWM counter's carry their own cycle).
+- **Pin-level slaves and flow control**: SPI and I2C slave modes stay at transaction level; UART CTS /
+  RTS are not modelled; the UART RX interrupt is raised per byte (no RX trigger level or receive
+  timeout), as for bytes from the serial channel.
+- **Clock changes.** clk_sys is fixed at 125 MHz; `machine.freq()` changes nothing. (The pin-level
+  engines scale their dividers by the clocks firmware programmed, so buses run at the requested rate.)
+- SRAM-only UF2 images (`no_flash` binaries) are not loaded.
+
+## Throughput
+
+`run_until_edge(1000000, guard, all 30 pads)`, Windows x64, host seconds per simulated second (lower is
+better), best of 3. "Before" is the phase-1 tree (every peripheral ticked after every slice, every slice
+run on its own); "after" adds deferred ticks, sleeping stretches and bounded awake runs
+([peripheral-deadlines.md](peripheral-deadlines.md)), with the same results. JIT, `CoSimBench`
+(`RP2040_NATIVE_PERF=1`); idle and PWM are MicroPython v1.28.0 RPI_PICO after the REPL is up (PWM:
+`PWM(Pin(14), freq=1000, duty_u16=20000)`), 200 ms simulated; busy is a hand-assembled core-0 loop, 50 ms.
+
+| Workload | guard 1 before / after | guard 75 before / after | guard 300 before / after |
+|---|---:|---:|---:|
+| Idle REPL | 7.02 / 0.057 | 0.189 / 0.025 | 0.032 / 0.025 |
+| Idle REPL + 1 kHz PWM | 8.35 / 0.067 | 1.39 / 0.034 | 0.183 / 0.016 |
+| Busy loop | 9.38 / 0.82 | 0.64 / 0.58 | 0.51 / 0.53 |
+
+The two columns were measured an hour apart on a host shared with other work; `CoSimBench` now also
+alternates both modes on the same chip within one run, which gives the same picture under load (idle
+guard 1: 15.3 / 0.044, PWM guard 1: 17.6 / 0.14, busy guard 1: 18.9 / 1.65, busy guard 300: 0.69 /
+0.70). The busy loop at coarse guards is the interpreter itself (about 100-170 MIPS depending on the
+load); the plain `RP2040Machine.Run` loop is unchanged (old and new builds alternated: 95-112 and
+92-116 MIPS).
+
+With pin-level buses ([pin-level-buses.md](pin-level-buses.md#cost)) and nothing routed, the fast paths cost 8-20 %
+more; without bus flags the figures above are unchanged.
+
+NativeAOT (`abi_selftest.c`, idle REPL, single runs): guard 1 0.090x real time before, 18.4x after;
+guard 75 5.3x before, 67x after.
+
+## Tests
+
+- `tests/RP2040Sharp.Native.Tests`: export-level tests through unmanaged function pointers (handles,
+  rejected arguments, UF2 families, time, pulls, re-entrancy, destroy from a callback, injected
+  faults with `-p:StTestHooks=true`), `run_until_edge` semantics and guard invariance on a
+  hand-assembled firmware, MicroPython on the Pico (REPL over CDC, an `exec`'d script toggling GP15)
+  and on the Pico W (`network.WLAN(network.STA_IF).active(True)` with `ST_RP2040_CYW43`; `PicoWWifiTests`: the
+  Wi-Fi exports with a scan, a WPA2 connect up to the DHCP lease, a wrong passphrase, an open network and an unknown
+  SSID, run as the Proteus model runs it, guard 75).
+  The Pico image is the one under `tests/RP2040Sharp.IntegrationTests/Firmware`; the Pico W image
+  comes from `RP2040_MICROPYTHON_PICOW_UF2` or the integration tests' firmware cache, and the test
+  skips without it.
+- `SliceDifferentialTests`, `MicroPythonDifferentialTests`: the speed-ups against plain slices (see
+  [peripheral-deadlines.md](peripheral-deadlines.md#differential-tests)); `CoSimBench`: the measurements above.
+- `PinLevelDifferentialTests`, `PinLevelLockstepTests`, `MicroPythonBusTests`: the pin-level buses
+  ([pin-level-buses.md](pin-level-buses.md#tests)).
+- `tests/RP2040Sharp.Native.Tests/abi_selftest.c`: the same ABI from C against the NativeAOT library (with a Pico W
+  image as second argument also the Wi-Fi join, a wrong passphrase and the Wi-Fi callback's re-entrancy rules).

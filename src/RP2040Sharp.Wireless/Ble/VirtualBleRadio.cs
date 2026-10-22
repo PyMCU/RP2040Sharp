@@ -6,7 +6,7 @@ using System.Collections.Generic;
 namespace RP2040Sharp.Wireless.Ble;
 
 /// <summary>
-/// The virtual BLE air linking several emulated controllers (each a Pico 2 W). It carries the link
+/// The virtual BLE air linking several virtual controllers (each a Pico 2 W). It carries the link
 /// layer the controllers share: advertising packets reach scanners as Advertising Reports, a central's
 /// Create Connection finds the matching advertiser and establishes a <see cref="BleLink"/> (both sides
 /// get LE Connection Complete), and ACL traffic is relayed peer-to-peer. The host BLE stacks

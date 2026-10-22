@@ -74,10 +74,45 @@ public sealed class Sdpcm
     private const uint STATUS_NO_NETWORKS = 3; // EV_SET_SSID status: no matching SSID
     private const uint STATUS_PARTIAL = 8;
 
+    /// <summary>
+    /// The chip's WL GPIO outputs (chipcommon gpioout), bit n = WL_GPIOn. On the Pico W and Pico 2 W, WL_GPIO0 drives
+    /// the onboard LED. cyw43_ll_gpio_set writes it with the "gpioout" iovar (le32 mask, le32 value) and
+    /// cyw43_ll_gpio_get reads it back with "ccgpioin", which is how MicroPython's <c>Pin("LED").value()</c> answers.
+    /// 0 at power-on and again whenever WL_ON drops (<see cref="PowerDown"/>).
+    /// </summary>
+    public uint WlGpioOut { get; private set; }
+
+    /// <summary>Raised with the new <see cref="WlGpioOut"/> each time it changes (a write that leaves it as it was
+    /// raises nothing).</summary>
+    public Action<uint>? OnWlGpioChanged;
+
+    /// <summary>WL_ON went low: the chip's registers lose their state. Of them only the WL GPIO outputs are modelled
+    /// here; they return to 0 (the LED goes off).</summary>
+    public void PowerDown() => SetWlGpioOut(0);
+
+    private void SetWlGpioOut(uint value)
+    {
+        if (value == WlGpioOut) return;
+        WlGpioOut = value;
+        OnWlGpioChanged?.Invoke(value);
+    }
+
     /// <summary>Diagnostics/notification: the STA joined a network (matched SSID) or failed (null).</summary>
     public Action<string?>? OnStaJoin;
 
-    /// <summary>A Wi-Fi network the emulated chip "sees" on the air. Populated by the virtual radio
+    /// <summary>What the station side of the chip just did, for a host that reports link status: the event and
+    /// the SSID it concerns (null for a scan, or for a join request too short to carry one). Raised after the
+    /// events the driver will read are queued, so the guest sees the outcome a little later.</summary>
+    public Action<StaEvent, string?>? OnStaEvent;
+
+    /// <summary>Station events (see <see cref="OnStaEvent"/>).</summary>
+    public enum StaEvent { Scan, Joined, BadAuth, NoNetwork, Left }
+
+    /// <summary>Ethernet traffic through the WLAN function: frames and bytes the host transmitted (to the air) and
+    /// frames and bytes queued for the host (from the air). Monotonic.</summary>
+    public long TxFrames, TxBytes, RxFrames, RxBytes;
+
+    /// <summary>A Wi-Fi network the virtual network presents to the host's scans. Populated by the virtual radio
     /// (Fase 5/6) so <c>scan()</c> returns real BSSes; an empty list yields an empty scan.</summary>
     /// <summary>
     /// An access point in the virtual air. <paramref name="Secured"/> marks it WPA2-PSK, which makes the
@@ -115,8 +150,12 @@ public sealed class Sdpcm
     private byte _lastHostSeq;   // sequence of the most recent host packet (control or data)
     // Credit window granted ahead of the host's current sequence. The host stalls when its TX
     // sequence reaches the granted credit; granting seq+window keeps it flowing. The host only
-    // accepts a credit advance of ≤20 per packet (cyw43_ll.c), so the window stays small.
-    private const int CreditWindow = 4;
+    // accepts a credit advance of ≤20 per packet (cyw43_ll.c), so the window stays below that. It must
+    // cover a burst of TCP segments: a host stalled for credit reads packets into the very buffer that
+    // holds the frame it is about to send (cyw43_sdpcm_send_common), so an Ethernet frame arriving during
+    // the stall overwrites that frame's headers and the segment is lost (with 4, one in about eight
+    // segments of a 20 kB response, each costing the guest a retransmission timeout).
+    private const int CreditWindow = 16;
     private byte GrantedCredit => (byte)(_lastHostSeq + CreditWindow);
 
     /// <summary>Raised when a packet is queued for the host (drives the F2-packet-available IRQ);
@@ -210,6 +249,7 @@ public sealed class Sdpcm
             foreach (var ap in VisibleAps)
                 EnqueueAsyncEvent(BuildEscanResultEvent(ap, STATUS_PARTIAL));
             EnqueueAsyncEvent(BuildEscanResultEvent(null, STATUS_SUCCESS));
+            OnStaEvent?.Invoke(StaEvent.Scan, null);
         }
         // STA join: connect() ends with WLC_SET_SSID (or the "join" iovar) carrying le32(ssid_len)+ssid.
         else if (cmd == WLC_SET_SSID)
@@ -220,10 +260,12 @@ public sealed class Sdpcm
         // WLAN.disconnect() leaves status() still reporting GOT_IP and isconnected() still true.
         else if (cmd == WLC_DISASSOC)
         {
+            var left = _joinedAp;
             _joinedAp = null;
             EnqueueAsyncEvent(BuildBcmEvent(EV_LINK, STATUS_SUCCESS, 0, 0, 0));   // flags&1 = 0 → link down
             EnqueueAsyncEvent(BuildBcmEvent(EV_DISASSOC, STATUS_SUCCESS, 0, 0, 0));
             OnStaJoin?.Invoke(null);
+            if (left is not null) OnStaEvent?.Invoke(StaEvent.Left, left.Ssid);
         }
         // SoftAP SSID: cyw43_ll_wifi_ap_init sends iovar "bsscfg:ssid" = u32(ap iface) u32(ssid_len) ssid[32].
         // Capture it so the virtual air can advertise this guest's own AP to other stations' scans.
@@ -248,6 +290,17 @@ public sealed class Sdpcm
             {
                 EnqueueAsyncEvent(BuildBcmEvent(EV_LINK, STATUS_SUCCESS, (ushort)(up != 0 ? 1 : 0), 0, 1));
                 OnApUp?.Invoke(up != 0);
+            }
+        }
+        // WL GPIO: cyw43_ll_gpio_set sends iovar "gpioout" = u32(mask) u32(value); the bits under the mask take the
+        // value's (WL_GPIO0 is the onboard LED).
+        else if (cmd == WLC_SET_VAR && varName == "gpioout")
+        {
+            var v = varName.Length + 1;
+            if (payload.Length >= v + 8)
+            {
+                var mask = Get32(payload, v);
+                SetWlGpioOut((WlGpioOut & ~mask) | (Get32(payload, v + 4) & mask));
             }
         }
         // WPA2 passphrase: cyw43_ll_wifi_join() sends WLC_SET_WSEC_PMK with { u16 key_len; u16 flags;
@@ -294,6 +347,7 @@ public sealed class Sdpcm
             EnqueueAsyncEvent(BuildBcmEvent(EV_AUTH, STATUS_SUCCESS, 0, 0, 0));
             EnqueueAsyncEvent(BuildBcmEvent(EV_PSK_SUP, SUP_KEYXCHANGE_WAIT_M1, 0, 0, 0));
             OnStaJoin?.Invoke(null);
+            OnStaEvent?.Invoke(StaEvent.BadAuth, ssid);
             return;
         }
 
@@ -308,6 +362,7 @@ public sealed class Sdpcm
         EnqueueAsyncEvent(BuildBcmEvent(EV_LINK, STATUS_SUCCESS, 1, 0, 0)); // flags&1 = link up
         _joinedAp = ap;
         OnStaJoin?.Invoke(ssid);
+        OnStaEvent?.Invoke(StaEvent.Joined, ssid);
     }
 
     private void EmitJoinFail(string? ssid = null)
@@ -315,6 +370,7 @@ public sealed class Sdpcm
         _joinedAp = null;
         EnqueueAsyncEvent(BuildBcmEvent(EV_SET_SSID, STATUS_NO_NETWORKS, 0, 0, 0));
         OnStaJoin?.Invoke(null);
+        OnStaEvent?.Invoke(StaEvent.NoNetwork, ssid);
     }
 
     private static void Put16Be(byte[] b, int o, int v) { b[o] = (byte)(v >> 8); b[o + 1] = (byte)v; }
@@ -405,7 +461,12 @@ public sealed class Sdpcm
                     WriteString(buf, "CLM API: 12.2, Data: RP2040Sharp-virtual");
                     break;
                 case "ver":
-                    WriteString(buf, "wl0: RP2040Sharp virtual CYW43439 (emulated)");
+                    WriteString(buf, "wl0: RP2040Sharp virtual CYW43439 (gSPI protocol translation)");
+                    break;
+                // The WL GPIO levels, le32 (cyw43_ll_gpio_get tests bit n). Nothing drives a WL GPIO from outside, so
+                // an output reads back what it was set to.
+                case "ccgpioin":
+                    Put32(buf, 0, WlGpioOut);
                     break;
                 // Intentionally zeroed (count 0). clmload_status=0 is DLOAD_STATUS_SUCCESS, which the
                 // firmware needs after streaming the CLM blob; the event/mcast lists are legitimately empty.
@@ -464,6 +525,8 @@ public sealed class Sdpcm
         var dataOff = pkt[bdcOff + 3] << 2;
         var payloadOff = bdcOff + BdcHeaderLen + dataOff;
         if (payloadOff >= size) return;
+        TxFrames++;
+        TxBytes += size - payloadOff;
         OnHostEthernet?.Invoke(itf, pkt[payloadOff..size]);
     }
 
@@ -512,6 +575,8 @@ public sealed class Sdpcm
     /// The virtual network (DHCP/ARP/peer traffic) uses this to deliver frames to the STA/AP netif.</summary>
     public void EnqueueEthernet(int itf, byte[] ethFrame)
     {
+        RxFrames++;
+        RxBytes += ethFrame.Length;
         var size = DataBdcOffset + BdcHeaderLen + ethFrame.Length;   // header_length is 14, see EnqueueAsyncEvent
         var buf = new byte[Align4(size)];
         Put16(buf, 0, size);

@@ -8,7 +8,7 @@ namespace RP2040.Peripherals.Dma;
 /// 12 DMA channels. Transfers execute synchronously when CTRL_TRIG is written
 /// with EN=1, making simulation deterministic.
 /// </summary>
-public sealed class DmaPeripheral : IMemoryMappedDevice, ITickable
+public sealed class DmaPeripheral : IMemoryMappedDevice, IDeferrableTickable
 {
     private const int CHANNEL_COUNT = 12;
     private const uint CHANNEL_SIZE  = 0x40;  // 64 bytes per channel
@@ -348,6 +348,15 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, ITickable
     private const uint MaxBeatsPerRun = 1u << 20;
     private uint _budgetPaused;   // bit N = channel N stopped on the beat budget, not on its DREQ
 
+    /// <summary>The deferred tick the machine keeps for the DMA (bus accesses sync it in the bridge).</summary>
+    public DeferredTick? Schedule { get; set; }
+
+    /// <summary>Transfers run inside the access that starts them; a tick only resumes one paused on the beat budget.</summary>
+    public long CyclesUntilEvent() => _budgetPaused != 0 ? 0 : long.MaxValue;
+
+    /// <summary>Nothing counts with time.</summary>
+    public void CatchUp(long cycles) { }
+
     public void Tick(long deltaCycles)
     {
         if (_budgetPaused == 0) return;
@@ -401,7 +410,7 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, ITickable
             // Check DREQ: if source is registered and says not ready, stop
             if (dreqSource != null && !dreqSource())
                 break;
-            if (i == MaxBeatsPerRun) { _budgetPaused |= 1u << ch; break; }
+            if (i == MaxBeatsPerRun) { _budgetPaused |= 1u << ch; Schedule?.Touch(); break; }
 
             uint data = dataSize switch
             {
