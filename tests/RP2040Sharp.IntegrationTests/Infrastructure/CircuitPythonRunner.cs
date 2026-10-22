@@ -1,3 +1,4 @@
+using RP2040.Peripherals.Fs;
 using RP2040.TestKit;
 using RP2040.TestKit.Boards;
 using RP2040.TestKit.Probes;
@@ -60,6 +61,22 @@ public sealed class CircuitPythonRunner : IAsyncDisposable
 
         var uf2Bytes = await File.ReadAllBytesAsync(uf2Path);
         var flashImage = Uf2Reader.ToFlashImage(uf2Bytes);
+
+        var sim = new PicoSimulation(withUsbCdc);
+        sim.LoadFlash(flashImage);
+        return new CircuitPythonRunner(sim);
+    }
+
+    public static async Task<CircuitPythonRunner?> CreateWithFilesAsync(
+        string version, IReadOnlyList<(string Name, byte[] Data)> files, bool withUsbCdc = true)
+    {
+        var uf2Path = await FirmwareCache.GetCircuitPythonAsync(version);
+        if (uf2Path is null)
+            return null;
+
+        var flashImage = Uf2Reader.ToFlashImage(await File.ReadAllBytesAsync(uf2Path));
+        Array.Resize(ref flashImage, Math.Max(flashImage.Length, CircuitPythonFs.DefaultRegionOffset + CircuitPythonFs.DefaultRegionSize));
+        CircuitPythonFs.Bake(flashImage, files);
 
         var sim = new PicoSimulation(withUsbCdc);
         sim.LoadFlash(flashImage);
