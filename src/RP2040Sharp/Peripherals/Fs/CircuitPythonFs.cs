@@ -89,22 +89,7 @@ public static class CircuitPythonFs
     public static byte[]? ReadFile(byte[] flash, string path) => FatVolume.Open(flash, 0)?.ReadFile(path);
 
     /// <summary>Lists every file in the volume, recursively, as '/'-separated paths using long names.</summary>
-    public static IReadOnlyList<string> ListFiles(byte[] flash)
-    {
-        var files = new List<string>();
-        if (FatVolume.Open(flash, 0) is { } vol) CollectFiles(vol, "", files);
-        return files;
-    }
-
-    static void CollectFiles(FatVolume vol, string dir, List<string> files)
-    {
-        foreach (var name in vol.List(dir))
-        {
-            var path = dir + name;
-            if (vol.ReadFile(path) is null) CollectFiles(vol, path + "/", files);
-            else files.Add(path);
-        }
-    }
+    public static IReadOnlyList<string> ListFiles(byte[] flash) => FatVolume.Open(flash, 0)?.ListFiles() ?? [];
 
     // ── Copying files onto CIRCUITPY ───────────────────────────────────────────
 
@@ -129,9 +114,6 @@ public static class CircuitPythonFs
 
     // ── Writing / baking ───────────────────────────────────────────────────────
 
-    const int Bps = 512, Reserved = 1, RootEnts = 512, SecPerFat = 7;
-    const string Label = "CIRCUITPY  ";
-
     /// <summary>
     /// Builds a fresh FAT12 volume of <paramref name="sizeBytes"/> containing
     /// <paramref name="files"/> (typically <c>code.py</c> + modules), using the exact geometry
@@ -142,15 +124,8 @@ public static class CircuitPythonFs
     /// </summary>
     public static byte[] BuildVolume(int sizeBytes, IReadOnlyList<(string Name, byte[] Data)> files)
     {
-        var img = new byte[sizeBytes];
-        WriteBootSector(img, sizeBytes / Bps);
-        int fatStart = Reserved * Bps;
-        int rootStart = (Reserved + SecPerFat) * Bps;
-        img[fatStart] = 0xF8; img[fatStart + 1] = 0xFF; img[fatStart + 2] = 0xFF;
-        WriteRaw11(img, rootStart, Label);
-        img[rootStart + 11] = 0x08;
-
-        var vol = FatVolume.FromImage(img);
+        var vol = FatVolume.Format(sizeBytes);
+        vol.Timestamp = new DateTime(1980, 1, 1);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (path, data) in files)
         {
@@ -160,7 +135,7 @@ public static class CircuitPythonFs
             if (!seen.Add(normal)) throw new FatException($"duplicate path '{path}'");
             vol.Put(path, data);
         }
-        return img;
+        return vol.Image.ToArray();
     }
 
     /// <summary>
@@ -183,26 +158,6 @@ public static class CircuitPythonFs
     }
 
 
-    static void WriteBootSector(byte[] img, int totSec)
-    {
-        img[0] = 0xEB; img[1] = 0xFE; img[2] = 0x90;
-        Encoding.ASCII.GetBytes("MSDOS5.0").CopyTo(img, 3);
-        img[11] = Bps & 0xFF; img[12] = Bps >> 8;
-        img[13] = 1;
-        img[14] = Reserved;
-        img[16] = 1;
-        img[17] = RootEnts & 0xFF; img[18] = RootEnts >> 8;
-        img[19] = (byte)(totSec & 0xFF); img[20] = (byte)((totSec >> 8) & 0xFF);
-        img[21] = 0xF8;
-        img[22] = SecPerFat & 0xFF; img[23] = SecPerFat >> 8;
-        img[24] = 0x3F; img[26] = 0xFF;
-        img[36] = 0x80; img[38] = 0x29;
-        img[39] = 0x12; img[40] = 0x34; img[41] = 0x56; img[42] = 0x78;
-        WriteRaw11(img, 43, Label);
-        Encoding.ASCII.GetBytes("FAT12   ").CopyTo(img, 54);
-        img[510] = 0x55; img[511] = 0xAA;
-    }
-
     /// <summary>
     /// Splices a freshly-built CircuitPython volume (containing <paramref name="files"/>) into a
     /// firmware flash image at the reserved FS region, so the next boot mounts it and runs
@@ -213,11 +168,6 @@ public static class CircuitPythonFs
     {
         var vol = BuildVolume(regionSize, files);
         Array.Copy(vol, 0, flash, regionOffset, Math.Min(vol.Length, flash.Length - regionOffset));
-    }
-
-    static void WriteRaw11(byte[] img, int p, string raw11)
-    {
-        for (int k = 0; k < 11; k++) img[p + k] = (byte)(k < raw11.Length ? raw11[k] : ' ');
     }
 
     // ── BPB helpers ───────────────────────────────────────────────────────────

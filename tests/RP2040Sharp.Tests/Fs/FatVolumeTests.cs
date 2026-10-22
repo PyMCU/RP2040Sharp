@@ -229,4 +229,31 @@ public class FatVolumeTests
         var bad = FatVolume.FromImage(img);
         bad.Invoking(v => v.Put("a.bin", [1])).Should().Throw<FatException>().WithMessage("*corrupt*");
     }
+
+    [Fact]
+    public void Format_ProducesAnOpenableCircuitPythonVolume()
+    {
+        var vol = FatVolume.Format(0x100000);
+        vol.FatBits.Should().Be(12);
+        vol.ClusterBytes.Should().Be(512);
+        vol.List("").Should().BeEmpty();
+        FatVolume.FromImage(vol.Image.ToArray()).VolumeBytes.Should().Be(0x100000);
+    }
+
+    [Fact]
+    public void Format_TooSmallOrTooLarge_Throws()
+    {
+        FluentActions.Invoking(() => FatVolume.Format(1024)).Should().Throw<FatException>();
+        FluentActions.Invoking(() => FatVolume.Format(64 * 1024 * 1024)).Should().Throw<FatException>();
+    }
+
+    [Fact]
+    public void ListFiles_RecursesIntoSubdirectories()
+    {
+        var vol = FatVolume.Format(0x100000);
+        vol.Put("code.py", [1]);
+        vol.Put("lib/pkg/mod.py", [2]);
+        vol.Put("lib/other.py", [3]);
+        vol.ListFiles().Should().BeEquivalentTo("code.py", "lib/pkg/mod.py", "lib/other.py");
+    }
 }

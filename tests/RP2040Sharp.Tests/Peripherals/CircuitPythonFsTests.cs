@@ -348,4 +348,13 @@ public class CircuitPythonFsTests
         FluentActions.Invoking(() => CircuitPythonFs.BuildVolumeFromDirectory(Size, Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))))
             .Should().Throw<DirectoryNotFoundException>();
     }
+
+    [Fact]
+    public void BuildVolume_SameInputs_AreByteIdentical()
+    {
+        var files = Files(("code.py", B("print(1)")), ("lib/pkg/mod.py", B("x = 1")), ("a long name.txt", B("y")));
+        var first = CircuitPythonFs.BuildVolume(Size, files);
+        Thread.Sleep(2100);
+        CircuitPythonFs.BuildVolume(Size, files).Should().Equal(first);
+    }
 }

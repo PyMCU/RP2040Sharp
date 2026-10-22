@@ -129,6 +129,48 @@ public sealed class FatVolume
         return new FatVolume(image, 0, b);
     }
 
+    /// <summary>
+    /// A blank volume of <paramref name="sizeBytes"/> laid out as CircuitPython formats CIRCUITPY (no MBR, 512-byte
+    /// clusters, one FAT of at least 7 sectors, 512 root entries, label "CIRCUITPY"), FAT12 or FAT16 by cluster count.
+    /// </summary>
+    public static FatVolume Format(int sizeBytes)
+    {
+        const int Bps = 512, RootEntries = 512, RootSectors = RootEntries * Slot / Bps;
+        int totSec = sizeBytes / Bps, spf = 7, clusters, bits;
+        for (;; spf++)
+        {
+            clusters = totSec - 1 - spf - RootSectors;
+            if (clusters < 1) throw new FatException($"{sizeBytes} bytes is too small for a FAT volume");
+            bits = clusters < 4085 ? 12 : 16;
+            if ((long)spf * Bps * 8 / bits >= clusters + 2) break;
+        }
+        if (clusters >= 65525) throw new FatException($"{sizeBytes} bytes is too large for a FAT12/FAT16 volume");
+        var v = new byte[totSec * Bps];
+        v[0] = 0xEB; v[1] = 0xFE; v[2] = 0x90;
+        Encoding.ASCII.GetBytes("MSDOS5.0").CopyTo(v, 3);
+        BitConverter.TryWriteBytes(v.AsSpan(11), (ushort)Bps);
+        v[13] = 1;
+        v[14] = 1;
+        v[16] = 1;
+        BitConverter.TryWriteBytes(v.AsSpan(17), (ushort)RootEntries);
+        if (totSec < 0x10000) BitConverter.TryWriteBytes(v.AsSpan(19), (ushort)totSec);
+        else BitConverter.TryWriteBytes(v.AsSpan(32), totSec);
+        v[21] = 0xF8;
+        BitConverter.TryWriteBytes(v.AsSpan(22), (ushort)spf);
+        v[24] = 0x3F; v[26] = 0xFF;
+        v[36] = 0x80; v[38] = 0x29;
+        v[39] = 0x12; v[40] = 0x34; v[41] = 0x56; v[42] = 0x78;
+        Encoding.ASCII.GetBytes("CIRCUITPY  " + (bits == 12 ? "FAT12   " : "FAT16   ")).CopyTo(v, 43);
+        v[510] = 0x55; v[511] = 0xAA;
+        v[Bps] = 0xF8; v[Bps + 1] = 0xFF; v[Bps + 2] = 0xFF;
+        if (bits == 16) v[Bps + 3] = 0xFF;
+        int root = Bps * (1 + spf);
+        Encoding.ASCII.GetBytes("CIRCUITPY  ").CopyTo(v, root);
+        v[root + 11] = AttrVolumeId;
+        TryParse(v, out var b);
+        return new FatVolume(v, 0, b);
+    }
+
     /// <summary>The volume's bytes (boot sector at 0), including what <see cref="Put"/> changed.</summary>
     public ReadOnlySpan<byte> Image => _v;
 
@@ -206,6 +248,24 @@ public sealed class FatVolume
         var names = new List<string>();
         foreach (var e in Entries(dir)) if (e.Name is not ("." or "..")) names.Add(e.Name);
         return names;
+    }
+
+    /// <summary>The '/'-separated path of every file in the volume, recursing into subdirectories.</summary>
+    public IReadOnlyList<string> ListFiles()
+    {
+        var paths = new List<string>();
+        var seen = new HashSet<int>();
+        void Walk(int dir, string prefix)
+        {
+            foreach (var e in Entries(dir))
+            {
+                if (e.Name is "." or "..") continue;
+                if (!e.IsDir) paths.Add(prefix + e.Name);
+                else if (e.Cluster >= 2 && seen.Add(e.Cluster)) Walk(e.Cluster, prefix + e.Name + "/");
+            }
+        }
+        Walk(0, "");
+        return paths;
     }
 
     // ── Writing ─────────────────────────────────────────────────────────────────────────────────────────
