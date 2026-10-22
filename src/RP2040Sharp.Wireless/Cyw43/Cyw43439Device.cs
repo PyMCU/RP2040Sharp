@@ -59,7 +59,7 @@ public sealed class Cyw43439Device
     {
         BtBus = new BtSharedBus(_chip, Ble);  // wires the BT shared bus into the backplane
         Bus = new GSpiSlave(io);
-        Bus.OnPower = on => _powered = on;
+        Bus.OnPower = on => { _powered = on; if (!on) Sdpcm.PowerDown(); };   // WL_ON low: the WL GPIOs (LED) reset
         Bus.OnRead = HandleRead;
         Bus.OnWrite = HandleWrite;
         // An SDPCM packet queued for the host drives the F2-packet-available IRQ (DATA-line host-wake)

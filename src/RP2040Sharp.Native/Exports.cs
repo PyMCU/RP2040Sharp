@@ -791,6 +791,11 @@ internal static unsafe class Exports
         catch (Exception e) { chip.Fault("st_rp2040_wifi_status", e); return -1; }
     }
 
+    // Read every step by the host, so nothing is rejected: no radio, a bad handle or a destroyed chip is just 0. A
+    // faulted chip keeps the outputs it had.
+    [UnmanagedCallersOnly(EntryPoint = "st_rp2040_wifi_gpio", CallConvs = [typeof(CallConvCdecl)])]
+    public static uint WifiGpio(nint h) => Lookup(h)?.Wifi?.Device.Sdpcm.WlGpioOut ?? 0;
+
     [UnmanagedCallersOnly(EntryPoint = "st_rp2040_set_wifi_callback", CallConvs = [typeof(CallConvCdecl)])]
     public static void SetWifiCallback(nint h, delegate* unmanaged[Cdecl]<nint, int, ulong, WifiStatus*, void> cb, nint user)
     {

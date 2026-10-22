@@ -74,6 +74,29 @@ public sealed class Sdpcm
     private const uint STATUS_NO_NETWORKS = 3; // EV_SET_SSID status: no matching SSID
     private const uint STATUS_PARTIAL = 8;
 
+    /// <summary>
+    /// The chip's WL GPIO outputs (chipcommon gpioout), bit n = WL_GPIOn. On the Pico W and Pico 2 W, WL_GPIO0 drives
+    /// the onboard LED. cyw43_ll_gpio_set writes it with the "gpioout" iovar (le32 mask, le32 value) and
+    /// cyw43_ll_gpio_get reads it back with "ccgpioin", which is how MicroPython's <c>Pin("LED").value()</c> answers.
+    /// 0 at power-on and again whenever WL_ON drops (<see cref="PowerDown"/>).
+    /// </summary>
+    public uint WlGpioOut { get; private set; }
+
+    /// <summary>Raised with the new <see cref="WlGpioOut"/> each time it changes (a write that leaves it as it was
+    /// raises nothing).</summary>
+    public Action<uint>? OnWlGpioChanged;
+
+    /// <summary>WL_ON went low: the chip's registers lose their state. Of them only the WL GPIO outputs are modelled
+    /// here; they return to 0 (the LED goes off).</summary>
+    public void PowerDown() => SetWlGpioOut(0);
+
+    private void SetWlGpioOut(uint value)
+    {
+        if (value == WlGpioOut) return;
+        WlGpioOut = value;
+        OnWlGpioChanged?.Invoke(value);
+    }
+
     /// <summary>Diagnostics/notification: the STA joined a network (matched SSID) or failed (null).</summary>
     public Action<string?>? OnStaJoin;
 
@@ -269,6 +292,17 @@ public sealed class Sdpcm
                 OnApUp?.Invoke(up != 0);
             }
         }
+        // WL GPIO: cyw43_ll_gpio_set sends iovar "gpioout" = u32(mask) u32(value); the bits under the mask take the
+        // value's (WL_GPIO0 is the onboard LED).
+        else if (cmd == WLC_SET_VAR && varName == "gpioout")
+        {
+            var v = varName.Length + 1;
+            if (payload.Length >= v + 8)
+            {
+                var mask = Get32(payload, v);
+                SetWlGpioOut((WlGpioOut & ~mask) | (Get32(payload, v + 4) & mask));
+            }
+        }
         // WPA2 passphrase: cyw43_ll_wifi_join() sends WLC_SET_WSEC_PMK with { u16 key_len; u16 flags;
         // u8 key[64] } and the passphrase in the clear. Held until the join so a wrong one can be
         // rejected the way silicon does — by stalling the supplicant, not by failing the association.
@@ -428,6 +462,11 @@ public sealed class Sdpcm
                     break;
                 case "ver":
                     WriteString(buf, "wl0: RP2040Sharp virtual CYW43439 (gSPI protocol translation)");
+                    break;
+                // The WL GPIO levels, le32 (cyw43_ll_gpio_get tests bit n). Nothing drives a WL GPIO from outside, so
+                // an output reads back what it was set to.
+                case "ccgpioin":
+                    Put32(buf, 0, WlGpioOut);
                     break;
                 // Intentionally zeroed (count 0). clmload_status=0 is DLOAD_STATUS_SUCCESS, which the
                 // firmware needs after streaming the CLM blob; the event/mcast lists are legitimately empty.

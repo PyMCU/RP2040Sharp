@@ -101,6 +101,8 @@ static void hammer_dead_handle(st_rp2040 *dead, const char *label) {
         snprintf(what, sizeof what, "%s: wifi_set_ap / wifi_status = -1", label);
         CHECK(st_rp2040_wifi_set_ap(dead, "x", NULL, 0, 0) == -1 && st_rp2040_wifi_status(dead, &ws) == -1, what);
         st_rp2040_set_wifi_callback(dead, NULL, NULL);
+        snprintf(what, sizeof what, "%s: wifi_gpio = 0", label);
+        CHECK(st_rp2040_wifi_gpio(dead) == 0, what);
     }
     {
         st_rp2040_fs_info fs;
@@ -209,6 +211,7 @@ static void wifi_arguments(void) {
           "plain Pico: wifi_set_ap -> -1 + reason");
     CHECK(st_rp2040_wifi_status(plain, &s) == -1, "plain Pico: wifi_status -> -1");
     st_rp2040_set_wifi_callback(plain, NULL, NULL);
+    CHECK(st_rp2040_wifi_gpio(plain) == 0, "plain Pico: wifi_gpio -> 0 (nothing rejected)");
     CHECK(st_rp2040_status(plain) == ST_RP2040_STATUS_OK, "plain Pico still OK");
 
     CHECK(st_rp2040_wifi_set_ap(w, "Proteus", NULL, 0, 0) == 0, "open AP");
@@ -229,6 +232,7 @@ static void wifi_arguments(void) {
     memset(&s, 0xAB, sizeof s);
     s.size = 16;
     CHECK(st_rp2040_wifi_status(w, &s) == 0 && s.size == 16 && s.rssi == 0 && s.ipv4[0] == 0xAB, "size 16: 16 bytes filled, the rest untouched");
+    CHECK(st_rp2040_wifi_gpio(w) == 0, "fresh Pico W: wifi_gpio 0 (LED off)");
     st_rp2040_set_wifi_callback(w, cb, NULL);
     st_rp2040_set_wifi_callback(w, NULL, NULL);
     CHECK(st_rp2040_status(w) == ST_RP2040_STATUS_OK, "Pico W still OK after all of that");

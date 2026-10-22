@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added: the Pico W onboard LED (`Pin("LED")`) is modelled, and `st_rp2040_wifi_gpio` reports it
+
+On the W boards the LED hangs off the CYW43439's WL_GPIO0, which the cyw43-driver sets with the `WLC_SET_VAR "gpioout"`
+iovar (le32 mask, le32 value) and reads back with `WLC_GET_VAR "ccgpioin"`. Both were acked and dropped, so
+`Pin("LED").on()` lit nothing and `.value()` read 0. `Sdpcm` now keeps the WL GPIO outputs (`WlGpioOut`, the bits under
+the mask take the value's), answers `ccgpioin` from them, raises `OnWlGpioChanged` when they change and clears them when
+WL_ON goes low (`PowerDown`, called by `Cyw43439Device`). New ABI function `uint32_t st_rp2040_wifi_gpio(st_rp2040 *chip)`:
+the WL GPIO outputs, bit 0 = the LED, cheap enough for a host to read after every step; it rejects nothing and reads 0
+on a chip without the CYW43439 or for a bad handle. No Wi-Fi event is raised for it (a blinking LED would flood the
+event queue and the `changes` count). The CYW43439 is still not emulated: this is the gSPI protocol translation
+answering two more iovars. Documented in `docs/native-abi.md`. Tested by `Cyw43WlGpioTests` (the ioctl decode, read-back, power-off), `PicoWLedTests`
+(MicroPython v1.28.0 RPI_PICO_W: `led.on()` / `led.off()` read 1 then 0 through the export and through `led.value()`)
+and `abi_selftest.c`.
+
 ### Fixed: a forwarded connection lost the guest's answer when the guest reset it after closing
 
 A connection the guest had closed (FIN) and then reset was aborted at once, with a reset to the host socket, even when

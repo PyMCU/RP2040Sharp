@@ -307,6 +307,13 @@ int  st_rp2040_wifi_status(st_rp2040 *chip, st_rp2040_wifi_info *status);
 /* cb = NULL disables (also from inside a callback). */
 void st_rp2040_set_wifi_callback(st_rp2040 *chip, st_rp2040_wifi_cb cb, void *user);
 
+/* The CYW43439's WL GPIO outputs, bit n = WL_GPIOn; bit 0 (WL_GPIO0) is the Pico W's onboard LED, 1 = lit. The guest
+ * sets them through its driver (cyw43_gpio_set: MicroPython Pin("LED").on()), and reads them back the same way. 0 at
+ * power-on and again whenever WL_ON (GPIO23) goes low. Cheap enough to call after every run call: a host draws the LED
+ * from it. The exception to the rule above: nothing is rejected, and a chip without the CYW43439, a bad handle or a
+ * destroyed chip reads 0 (a faulted chip reads what it had). Also from inside a callback. */
+uint32_t st_rp2040_wifi_gpio(st_rp2040 *chip);
+
 /* Port forwarding: listen on 127.0.0.1:host_port (loopback only: nothing outside the PC reaches it) and relay every
  * connection accepted there to the station's guest_port (192.168.4.2), the way a NAT router's port forward does: a
  * browser on http://127.0.0.1:8080 reaches a MicroPython / Microdot server on port 80. The guest sees the connections
