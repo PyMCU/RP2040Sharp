@@ -1539,8 +1539,6 @@ public sealed class RP2040Machine : IDisposable
         ResetCount++;
         var t0 = Cpu.Cycles;
         var t1 = Cpu1.Cycles;
-        Cpu.Registers = default;
-        Cpu1.Registers = default;
         Reset();
         Cpu.Cycles = t0;
         Cpu1.Cycles = t1;
@@ -1591,8 +1589,12 @@ public sealed class RP2040Machine : IDisposable
         _core1Launched = false;
         _activeCoreId  = 0;
         Sio.ResetMulticoreLaunch();
+        Cpu.Registers = default;
+        Cpu1.Registers = default;
         Cpu.Reset();
         Cpu1.Reset();
+        Ppb.Reset();
+        Ppb1.Reset();
     }
 
     public void Dispose() => Bus.Dispose();
@@ -1675,7 +1677,9 @@ public sealed class RP2040Machine : IDisposable
     {
         _core1Launched = false;
         Sio.ResetMulticoreLaunch();
+        Cpu1.Registers = default;
         Cpu1.Reset();
+        Ppb1.Reset();
         Sio.SignalCore1BootromReady();
     }
 

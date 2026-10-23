@@ -221,6 +221,23 @@ public sealed class MicroPythonReleaseTests
     }
 
     [Fact]
+    public async Task HostReset_WithInterruptsDisabled_RebootsToRepl()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await BootAsync();
+        if (runner is null) return;
+
+        runner.Execute("import machine; machine.disable_irq()");
+        runner.Simulation.RunMilliseconds(50);
+        runner.Simulation.Reset();
+        runner.UsbCdc.Clear();
+        runner.WaitForPrompt(timeoutMs: 15_000)
+            .Should().BeTrue("a core leaves reset with PRIMASK clear, so the restarted firmware gets its interrupts back");
+        runner.ExecuteAndWait("print('alive', 6 * 7)", "alive 42").Should().BeTrue();
+    }
+
+    [Fact]
     public async Task PicoW_WifiConnectsAgain_AfterMachineResetTwice()
     {
         if (ShouldSkip) return;
