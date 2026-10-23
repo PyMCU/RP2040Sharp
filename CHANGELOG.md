@@ -5,6 +5,52 @@ All notable changes to **RP2040Sharp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-10-23
+
+### Fixed: state that survived a reset on silicon does not
+
+Found by using a peripheral, resetting, and using it again with real MicroPython and CircuitPython.
+- **CYW43439:** dropping WL_REG_ON now power-on-resets the whole chip: gSPI mode, F0/F1 registers, backplane cores and memory, downloaded firmware, SDPCM queues, SoftAP/association and BLE. Before, a Pico W that had used Wi-Fi failed `WLAN.active(True)` with `Failed to start CYW43` after `machine.reset()` or the watchdog. The MAC, the BD address and the host callbacks are kept.
+- **IO_BANK0, PADS_BANK0 and SIO:** IO_BANK0 and PADS_BANK0 reset through RESETS bits 5 and 8, and a system reset resets SIO: GPIO OUT/OE, FIFOs, spinlocks, the divider and the interpolators. Before, a pin driven high stayed high after `machine.reset()`. Host-driven levels, pin-level functions and the CYW43 wiring are kept.
+- **PIO:** asserting a PIO block's RESETS bit returns it to its reset state and releases its pins. Before, a PIO program kept running after `machine.reset()`.
+- **Core resets:** a host reset and core 1's PSM reset clear PRIMASK, IPSR, CONTROL, VTOR, the NVIC and SysTick. Before, a host reset with interrupts disabled left MicroPython hung without a REPL.
+- **RESETS after a system reset:** every block is held in reset (0x01FFFFFF), as after a watchdog reset on silicon.
+
+### Fixed: an aborted I2C read shifted every later read by one byte
+
+A read the target NACKed queued 0xFF in the RX FIFO. MicroPython does not drain it, so every following read came back shifted. An aborted transfer now queues nothing, TX_ABRT raises STOP_DET, and commands are dropped until IC_CLR_TX_ABRT.
+
+### Fixed: registers that disagreed with the datasheet
+
+Found by checking every register in pico-sdk 2.1.1's RP2040 SVD:
+- **SIO divider:** DIV_CSR READY and DIRTY were swapped, so pico-sdk's `hw_divider_wait_ready` never returned.
+- **DMA:**
+  - Writing 1 to INTS0 or INTS1 clears the interrupt (F-12). The arduino-pico audio buffers that seemed to regress were relying on the bug: they served both ping-pong channels on every IRQ.
+  - A null trigger on CTRL_TRIG, including through CLR/XOR, disables the channel.
+  - READ_ERROR and WRITE_ERROR are write-1-to-clear.
+- **Atomic aliases:** they no longer clear write-1-to-clear flags (F-31). ADC FCS OVER and UNDER survive `hw_write_masked`.
+- **USB:** DEV_SOF clears on a SOF_RD read and the SOF period stays exact.
+- **Values firmware reads:**
+  - SYSINFO.PLATFORM reads ASIC, and VREG starts at 0xB1.
+  - CLK_*_DIV start at 0x100 (F-54).
+  - SSI supports the atomic aliases.
+  - Reading RTC_0 latches RTC_1.
+  - BUS_PRIORITY uses bits 0, 4, 8 and 12.
+
+`SvdConformanceTest` checks 1069 registers against the SVD on every PR, in 136 ms, with an allowlist where every entry has a reason. The allowlist also fails on stale entries.
+
+### Added: release gate scenarios
+
+The gate now covers:
+- Pico W: connect, `machine.reset()`, connect again, twice;
+- pins and PIO released after a reset, in MicroPython and CircuitPython;
+- a host reset with interrupts disabled;
+- `_thread` after a reset;
+- peripheral re-init without a reset;
+- an I2C read NACK followed by a correct read.
+
+It has 18 scenarios and runs in about 5 s.
+
 ## [1.2.1] - 2026-10-23
 
 ### Fixed: RESETS did not reset I2C, SPI, UART, PWM, ADC or DMA, so CircuitPython could not re-create I2C after a reload
