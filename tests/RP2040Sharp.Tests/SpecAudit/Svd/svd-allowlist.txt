@@ -1,0 +1,290 @@
+# register check reason (svd: the emulator matches silicon and the SVD does not;
+# intentional: documented difference; pending: real difference with no known firmware impact)
+ADC.CS RESERVED pending: reserved bits are stored as written
+ADC.CS RESET svd: READY reads 1 while idle
+ADC.CS RO_WRITABLE pending: ERR and ERR_STICKY are stored as written, conversions never fail
+ADC.CS RW_NOT_STORED svd: writing ones also sets START_MANY; AINSEL 0-7 is stored
+ADC.CS W1C_STORED pending: ERR and ERR_STICKY are stored as written, conversions never fail
+ADC.DIV RESERVED pending: reserved bits are stored as written
+ADC.FCS RESET svd: EMPTY is live, the FIFO is empty
+BUSCTRL.PERFSEL0 RESERVED pending: reserved bits are stored as written
+BUSCTRL.PERFSEL1 RESERVED pending: reserved bits are stored as written
+BUSCTRL.PERFSEL2 RESERVED pending: reserved bits are stored as written
+BUSCTRL.PERFSEL3 RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_ADC_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_ADC_DIV RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_GPOUT0_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_GPOUT1_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_GPOUT2_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_GPOUT3_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_PERI_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_PERI_DIV RESET svd: RP2040 clk_peri has no divider (not in the datasheet)
+CLOCKS.CLK_REF_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_REF_DIV RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_RTC_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_SYS_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_SYS_RESUS_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_SYS_RESUS_CTRL RESET intentional: no resus model
+CLOCKS.CLK_USB_CTRL RESERVED pending: reserved bits are stored as written
+CLOCKS.CLK_USB_DIV RESERVED pending: reserved bits are stored as written
+CLOCKS.ENABLED0 RESET intentional: fixed 125 MHz, no frequency counter
+CLOCKS.ENABLED1 RESERVED pending: reserved bits are stored as written
+CLOCKS.ENABLED1 RESET intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_DELAY RESET intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_DELAY RW_NOT_STORED intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_INTERVAL RESET intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_INTERVAL RW_NOT_STORED intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_MAX_KHZ RESET intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_MAX_KHZ RW_NOT_STORED intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_MIN_KHZ RW_NOT_STORED intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_REF_KHZ RW_NOT_STORED intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_RESULT RESET intentional: fixed 125 MHz, no frequency counter
+CLOCKS.FC0_SRC RESERVED pending: reserved bits are stored as written
+CLOCKS.FC0_STATUS RESET intentional: fixed 125 MHz, no frequency counter
+CLOCKS.INTE RESERVED pending: reserved bits are stored as written
+CLOCKS.INTF RW_NOT_STORED intentional: fixed 125 MHz, no frequency counter
+CLOCKS.SLEEP_EN1 RESERVED pending: reserved bits are stored as written
+CLOCKS.WAKE_EN1 RESERVED pending: reserved bits are stored as written
+DMA.CH1_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH10_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH11_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH2_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH3_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH4_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH5_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH6_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH7_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH8_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.CH9_CTRL_TRIG RESET svd: CHAIN_TO resets to the channel itself (chaining disabled)
+DMA.INTE0 RW_NOT_STORED svd: bits 15:12 have no channel, RP2040 has 12
+DMA.INTE1 RW_NOT_STORED svd: bits 15:12 have no channel, RP2040 has 12
+DMA.INTF0 RW_NOT_STORED svd: bits 15:12 have no channel, RP2040 has 12
+DMA.INTF1 RW_NOT_STORED svd: bits 15:12 have no channel, RP2040 has 12
+DMA.SNIFF_CTRL RESERVED pending: reserved bits are stored as written
+I2C0.IC_CON RO_WRITABLE pending: rarely used I2C control bit not modelled
+I2C0.IC_DATA_CMD RW_NOT_STORED svd: DAT writes the TX FIFO and reads the RX FIFO
+I2C0.IC_ENABLE RW_NOT_STORED pending: rarely used I2C control bit not modelled
+I2C0.IC_INTR_MASK RW_NOT_STORED pending: rarely used I2C control bit not modelled
+I2C0.IC_SS_SCL_HCNT RESET pending: reset value 0 (F-47), the SDK always writes it
+I2C0.IC_SS_SCL_LCNT RESET pending: reset value 0 (F-47), the SDK always writes it
+I2C0.IC_TAR RESET pending: reset value 0 (F-47), the SDK always writes it
+I2C0.IC_TAR RW_NOT_STORED pending: rarely used I2C control bit not modelled
+I2C1.IC_CON RO_WRITABLE pending: rarely used I2C control bit not modelled
+I2C1.IC_DATA_CMD RW_NOT_STORED svd: DAT writes the TX FIFO and reads the RX FIFO
+I2C1.IC_ENABLE RW_NOT_STORED pending: rarely used I2C control bit not modelled
+I2C1.IC_INTR_MASK RW_NOT_STORED pending: rarely used I2C control bit not modelled
+I2C1.IC_SS_SCL_HCNT RESET pending: reset value 0 (F-47), the SDK always writes it
+I2C1.IC_SS_SCL_LCNT RESET pending: reset value 0 (F-47), the SDK always writes it
+I2C1.IC_TAR RESET pending: reset value 0 (F-47), the SDK always writes it
+I2C1.IC_TAR RW_NOT_STORED pending: rarely used I2C control bit not modelled
+IO_BANK0.DORMANT_WAKE_INTE0 RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_BANK0.DORMANT_WAKE_INTE1 RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_BANK0.DORMANT_WAKE_INTE2 RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_BANK0.DORMANT_WAKE_INTE3 RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_BANK0.DORMANT_WAKE_INTF0 RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_BANK0.DORMANT_WAKE_INTF1 RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_BANK0.DORMANT_WAKE_INTF2 RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_BANK0.DORMANT_WAKE_INTF3 RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_BANK0.INTR0 RESET svd: LEVEL_LOW shows the live level of pads at 0
+IO_BANK0.INTR1 RESET svd: LEVEL_LOW shows the live level of pads at 0
+IO_BANK0.INTR2 RESET svd: LEVEL_LOW shows the live level of pads at 0
+IO_BANK0.INTR3 RESET svd: LEVEL_LOW shows the live level of pads at 0
+IO_BANK0.PROC0_INTE3 RESERVED pending: reserved bits are stored as written
+IO_BANK0.PROC0_INTF3 RESERVED pending: reserved bits are stored as written
+IO_BANK0.PROC1_INTE3 RESERVED pending: reserved bits are stored as written
+IO_BANK0.PROC1_INTF3 RESERVED pending: reserved bits are stored as written
+IO_QSPI.DORMANT_WAKE_INTE RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_QSPI.DORMANT_WAKE_INTF RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_QSPI.GPIO_QSPI_SCLK_CTRL RESERVED pending: reserved bits are stored as written
+IO_QSPI.GPIO_QSPI_SCLK_CTRL RESET pending: FUNCSEL reads the post-bootrom XIP function, not NULL
+IO_QSPI.GPIO_QSPI_SCLK_STATUS RESET svd: live QSPI pad levels
+IO_QSPI.GPIO_QSPI_SD0_CTRL RESERVED pending: reserved bits are stored as written
+IO_QSPI.GPIO_QSPI_SD0_CTRL RESET pending: FUNCSEL reads the post-bootrom XIP function, not NULL
+IO_QSPI.GPIO_QSPI_SD0_STATUS RESET svd: live QSPI pad levels
+IO_QSPI.GPIO_QSPI_SD1_CTRL RESERVED pending: reserved bits are stored as written
+IO_QSPI.GPIO_QSPI_SD1_CTRL RESET pending: FUNCSEL reads the post-bootrom XIP function, not NULL
+IO_QSPI.GPIO_QSPI_SD1_STATUS RESET svd: live QSPI pad levels
+IO_QSPI.GPIO_QSPI_SD2_CTRL RESERVED pending: reserved bits are stored as written
+IO_QSPI.GPIO_QSPI_SD2_CTRL RESET pending: FUNCSEL reads the post-bootrom XIP function, not NULL
+IO_QSPI.GPIO_QSPI_SD2_STATUS RESET svd: live QSPI pad levels
+IO_QSPI.GPIO_QSPI_SD3_CTRL RESERVED pending: reserved bits are stored as written
+IO_QSPI.GPIO_QSPI_SD3_CTRL RESET pending: FUNCSEL reads the post-bootrom XIP function, not NULL
+IO_QSPI.GPIO_QSPI_SD3_STATUS RESET svd: live QSPI pad levels
+IO_QSPI.GPIO_QSPI_SS_CTRL RESERVED pending: reserved bits are stored as written
+IO_QSPI.GPIO_QSPI_SS_CTRL RESET pending: FUNCSEL reads the post-bootrom XIP function, not NULL
+IO_QSPI.GPIO_QSPI_SS_STATUS RESET svd: live QSPI pad levels
+IO_QSPI.PROC0_INTE RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_QSPI.PROC0_INTF RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_QSPI.PROC1_INTE RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+IO_QSPI.PROC1_INTF RW_NOT_STORED pending: dormant wake and QSPI GPIO interrupts not modelled
+PIO0.INTR RESET svd: SMx_TXNFULL is live, the TX FIFOs are empty
+PIO0.SM0_CLKDIV RESERVED pending: reserved bits are stored as written
+PIO0.SM0_EXECCTRL RESERVED pending: reserved bits are stored as written
+PIO0.SM0_SHIFTCTRL RESERVED pending: reserved bits are stored as written
+PIO0.SM1_CLKDIV RESERVED pending: reserved bits are stored as written
+PIO0.SM1_EXECCTRL RESERVED pending: reserved bits are stored as written
+PIO0.SM1_SHIFTCTRL RESERVED pending: reserved bits are stored as written
+PIO0.SM2_CLKDIV RESERVED pending: reserved bits are stored as written
+PIO0.SM2_EXECCTRL RESERVED pending: reserved bits are stored as written
+PIO0.SM2_SHIFTCTRL RESERVED pending: reserved bits are stored as written
+PIO0.SM3_CLKDIV RESERVED pending: reserved bits are stored as written
+PIO0.SM3_EXECCTRL RESERVED pending: reserved bits are stored as written
+PIO0.SM3_SHIFTCTRL RESERVED pending: reserved bits are stored as written
+PIO1.INTR RESET svd: SMx_TXNFULL is live, the TX FIFOs are empty
+PIO1.SM0_CLKDIV RESERVED pending: reserved bits are stored as written
+PIO1.SM0_EXECCTRL RESERVED pending: reserved bits are stored as written
+PIO1.SM0_SHIFTCTRL RESERVED pending: reserved bits are stored as written
+PIO1.SM1_CLKDIV RESERVED pending: reserved bits are stored as written
+PIO1.SM1_EXECCTRL RESERVED pending: reserved bits are stored as written
+PIO1.SM1_SHIFTCTRL RESERVED pending: reserved bits are stored as written
+PIO1.SM2_CLKDIV RESERVED pending: reserved bits are stored as written
+PIO1.SM2_EXECCTRL RESERVED pending: reserved bits are stored as written
+PIO1.SM2_SHIFTCTRL RESERVED pending: reserved bits are stored as written
+PIO1.SM3_CLKDIV RESERVED pending: reserved bits are stored as written
+PIO1.SM3_EXECCTRL RESERVED pending: reserved bits are stored as written
+PIO1.SM3_SHIFTCTRL RESERVED pending: reserved bits are stored as written
+PLL_SYS.CS RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_SYS.CS RW_NOT_STORED intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_SYS.FBDIV_INT RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_SYS.PRIM RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_SYS.PRIM RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_SYS.PWR RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_USB.CS RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_USB.CS RW_NOT_STORED intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_USB.FBDIV_INT RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_USB.PRIM RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_USB.PRIM RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+PLL_USB.PWR RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+PPB.AIRCR RESET svd: AIRCR reads VECTKEYSTAT 0xFA05 (ARMv6-M)
+PPB.AIRCR RW_NOT_STORED svd: ARMv6-M set/clear/read-as-zero semantics, the SVD calls it RW
+PPB.CCR RESET svd: STKALIGN and UNALIGN_TRP read as one on ARMv6-M
+PPB.ICSR RW_NOT_STORED svd: ARMv6-M set/clear/read-as-zero semantics, the SVD calls it RW
+PPB.MPU_RBAR RW_NOT_STORED svd: ARMv6-M set/clear/read-as-zero semantics, the SVD calls it RW
+PPB.MPU_RNR RW_NOT_STORED svd: ARMv6-M set/clear/read-as-zero semantics, the SVD calls it RW
+PPB.NVIC_ICER RW_NOT_STORED svd: ARMv6-M set/clear/read-as-zero semantics, the SVD calls it RW
+PPB.NVIC_ICPR RW_NOT_STORED svd: ARMv6-M set/clear/read-as-zero semantics, the SVD calls it RW
+PPB.NVIC_ISER RW_NOT_STORED svd: ARMv6-M set/clear/read-as-zero semantics, the SVD calls it RW
+PPB.NVIC_ISPR RW_NOT_STORED svd: ARMv6-M set/clear/read-as-zero semantics, the SVD calls it RW
+PPB.SYST_CVR RW_NOT_STORED svd: ARMv6-M set/clear/read-as-zero semantics, the SVD calls it RW
+PSM.DONE RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+PWM.CH0_CSR RESERVED pending: reserved bits are stored as written
+PWM.CH1_CSR RESERVED pending: reserved bits are stored as written
+PWM.CH2_CSR RESERVED pending: reserved bits are stored as written
+PWM.CH3_CSR RESERVED pending: reserved bits are stored as written
+PWM.CH4_CSR RESERVED pending: reserved bits are stored as written
+PWM.CH5_CSR RESERVED pending: reserved bits are stored as written
+PWM.CH6_CSR RESERVED pending: reserved bits are stored as written
+PWM.CH7_CSR RESERVED pending: reserved bits are stored as written
+RESETS.RESET RESET intentional: blocks other than PIO start out of reset (ResetsPeripheral)
+RESETS.RESET_DONE RESET intentional: blocks other than PIO start out of reset (ResetsPeripheral)
+ROSC.COUNT RW_NOT_STORED intentional: register stub, no frequency model (CHANGELOG known limitations)
+ROSC.CTRL RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+ROSC.DIV RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+ROSC.FREQA RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+ROSC.FREQB RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+ROSC.PHASE RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+ROSC.PHASE RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+ROSC.STATUS RESET intentional: register stub, no frequency model (CHANGELOG known limitations)
+RTC.CLKDIV_M1 RW_NOT_STORED pending: CLKDIV_M1 and FORCE_NOTLEAPYEAR not stored, the RTC runs from the core clock
+RTC.CTRL RW_NOT_STORED pending: CLKDIV_M1 and FORCE_NOTLEAPYEAR not stored, the RTC runs from the core clock
+RTC.IRQ_SETUP_0 RESERVED pending: reserved bits are stored as written
+RTC.IRQ_SETUP_1 RESERVED pending: reserved bits are stored as written
+RTC.SETUP_0 RESERVED pending: reserved bits are stored as written
+RTC.SETUP_1 RESERVED pending: reserved bits are stored as written
+SIO.GPIO_HI_IN RESET svd: live QSPI pad levels
+SIO.INTERP0_ACCUM0_ADD RW_NOT_STORED svd: a write adds to ACCUM, it is not stored
+SIO.INTERP0_ACCUM1_ADD RW_NOT_STORED svd: a write adds to ACCUM, it is not stored
+SIO.INTERP1_ACCUM0_ADD RW_NOT_STORED svd: a write adds to ACCUM, it is not stored
+SIO.INTERP1_ACCUM1_ADD RW_NOT_STORED svd: a write adds to ACCUM, it is not stored
+SPI0.SSPCPSR RW_NOT_STORED svd: CPSDVSR is even, bit 0 reads 0 (PL022)
+SPI0.SSPCR0 RESERVED pending: reserved bits are stored as written
+SPI0.SSPPERIPHID2 RESET pending: REVISION reads 0
+SPI0.SSPRIS RESET pending: TXRIS reads 0 until SSE
+SPI1.SSPCPSR RW_NOT_STORED svd: CPSDVSR is even, bit 0 reads 0 (PL022)
+SPI1.SSPCR0 RESERVED pending: reserved bits are stored as written
+SPI1.SSPPERIPHID2 RESET pending: REVISION reads 0
+SPI1.SSPRIS RESET pending: TXRIS reads 0 until SSE
+SSI.BAUDR RESERVED pending: reserved bits are stored as written
+SSI.BAUDR RESET intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.CTRLR0 RESERVED pending: reserved bits are stored as written
+SSI.CTRLR1 RESERVED pending: reserved bits are stored as written
+SSI.DMACR RW_NOT_STORED intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.DMARDLR RW_NOT_STORED intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.DMATDLR RW_NOT_STORED intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.DR0 RW_NOT_STORED intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.IMR RW_NOT_STORED intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.MWCR RW_NOT_STORED intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.RX_SAMPLE_DLY RESERVED pending: reserved bits are stored as written
+SSI.RXFTLR RW_NOT_STORED intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.SER RESERVED pending: reserved bits are stored as written
+SSI.SPI_CTRLR0 RESERVED pending: reserved bits are stored as written
+SSI.SPI_CTRLR0 RESET intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.SR RESET intentional: XIP hardware path not modelled, flash goes through hooks
+SSI.SSIENR RESERVED pending: reserved bits are stored as written
+SSI.TXD_DRIVE_EDGE RESERVED pending: reserved bits are stored as written
+SSI.TXFTLR RW_NOT_STORED intentional: XIP hardware path not modelled, flash goes through hooks
+SYSCFG.DBGFORCE RESERVED pending: reserved bits are stored as written
+SYSCFG.DBGFORCE RESET pending: debug configuration not modelled
+SYSCFG.MEMPOWERDOWN RESERVED pending: reserved bits are stored as written
+SYSCFG.PROC_CONFIG RESERVED pending: reserved bits are stored as written
+SYSCFG.PROC_CONFIG RESET pending: debug configuration not modelled
+SYSCFG.PROC_CONFIG RO_WRITABLE pending: debug configuration not modelled
+SYSCFG.PROC_IN_SYNC_BYPASS RESERVED pending: reserved bits are stored as written
+SYSCFG.PROC_IN_SYNC_BYPASS_HI RESERVED pending: reserved bits are stored as written
+SYSINFO.PLATFORM RESET svd: the SVD reset is 0, silicon reads ASIC (bit 1)
+TIMER.DBGPAUSE RESET intentional: PAUSE/DBGPAUSE not implemented yet (CHANGELOG F-10)
+TIMER.DBGPAUSE RW_NOT_STORED intentional: PAUSE/DBGPAUSE not implemented yet (CHANGELOG F-10)
+TIMER.PAUSE RW_NOT_STORED intentional: PAUSE/DBGPAUSE not implemented yet (CHANGELOG F-10)
+UART0.UARTCR RESERVED pending: reserved bits are stored as written
+UART0.UARTCR RESET pending: TXE/RXE reset 0, uart_init writes CR
+UART0.UARTILPR RW_NOT_STORED pending: IrDA not modelled
+UART1.UARTCR RESERVED pending: reserved bits are stored as written
+UART1.UARTCR RESET pending: TXE/RXE reset 0, uart_init writes CR
+UART1.UARTILPR RW_NOT_STORED pending: IrDA not modelled
+USB.ADDR_ENDP RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP1 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP10 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP11 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP12 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP13 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP14 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP15 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP2 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP3 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP4 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP5 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP6 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP7 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP8 RESERVED pending: reserved bits are stored as written
+USB.ADDR_ENDP9 RESERVED pending: reserved bits are stored as written
+USB.EP_STALL_ARM RESERVED pending: reserved bits are stored as written
+USB.INT_EP_CTRL RESERVED pending: reserved bits are stored as written
+USB.INTE RESERVED pending: reserved bits are stored as written
+USB.INTF RESERVED pending: reserved bits are stored as written
+USB.MAIN_CTRL RESERVED pending: reserved bits are stored as written
+USB.NAK_POLL RESERVED pending: reserved bits are stored as written
+USB.NAK_POLL RESET pending: USB PHY and host-only fields
+USB.SIE_CTRL RESERVED pending: reserved bits are stored as written
+USB.USB_MUXING RESERVED pending: reserved bits are stored as written
+USB.USB_PWR RESERVED pending: reserved bits are stored as written
+USB.USBPHY_DIRECT RESERVED pending: reserved bits are stored as written
+USB.USBPHY_DIRECT RO_WRITABLE pending: USB PHY and host-only fields
+USB.USBPHY_DIRECT_OVERRIDE RESERVED pending: reserved bits are stored as written
+USB.USBPHY_TRIM RESERVED pending: reserved bits are stored as written
+USB.USBPHY_TRIM RESET pending: USB PHY and host-only fields
+VREG_AND_CHIP_RESET.BOD RESERVED intentional: register stub (CHANGELOG known limitations)
+VREG_AND_CHIP_RESET.VREG RESERVED intentional: register stub (CHANGELOG known limitations)
+VREG_AND_CHIP_RESET.VREG RO_WRITABLE intentional: register stub (CHANGELOG known limitations)
+WATCHDOG.CTRL RESERVED pending: reserved bits are stored as written
+WATCHDOG.CTRL RESET pending: PAUSE_DBG0/DBG1/JTAG reset 0, no debugger model
+WATCHDOG.TICK RESET intentional: tick generator already started as after runtime_init
+XIP_CTRL.CTRL RESET intentional: XIP_CTRL is not modelled (BusInterconnect)
+XIP_CTRL.CTRL RW_NOT_STORED intentional: XIP_CTRL is not modelled (BusInterconnect)
+XIP_CTRL.STAT RESET intentional: XIP_CTRL is not modelled (BusInterconnect)
+XIP_CTRL.STREAM_ADDR RW_NOT_STORED intentional: XIP_CTRL is not modelled (BusInterconnect)
+XIP_CTRL.STREAM_CTR RW_NOT_STORED intentional: XIP_CTRL is not modelled (BusInterconnect)
+XOSC.COUNT RW_NOT_STORED intentional: register stub, no frequency model (CHANGELOG known limitations)
+XOSC.CTRL RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+XOSC.STARTUP RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+XOSC.STATUS RESERVED intentional: register stub, no frequency model (CHANGELOG known limitations)
+XOSC.STATUS RESET intentional: register stub, no frequency model (CHANGELOG known limitations)

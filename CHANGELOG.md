@@ -42,6 +42,15 @@ TIMER, RTC, IO_BANK0 and PADS_BANK0 are left as they were. Tested by `ResetsBloc
   against. The SSI takes SET/CLR/XOR aliases (MicroPython's `hw_set_bits(&ssi_hw->ssienr, ...)` was dropped). Reading
   `RTC_0` latches `RTC_1`, as `rtc_get_datetime()` relies on. `BUS_PRIORITY` keeps bits 0, 4, 8 and 12, not 3:0.
 
+### Added: SVD conformance test
+
+`SvdConformanceTest` checks the 1069 registers without read side effects of the RP2040 SVD (DPRAM excluded) against a fresh machine in
+about 140 ms: reset values, read-only and reserved bits, write-1-to-clear fields, SET/CLR/XOR aliases (none on SIO)
+and undeclared read side effects. The register data (`SpecAudit/Svd/rp2040-registers.txt`, BSD-3-Clause, from
+pico-sdk 2.1.1 via `tools/svd_registers.py`) and `svd-allowlist.txt` are embedded in the test assembly. Every known
+difference is listed with a reason (`svd:`, `intentional:` or `pending:`); the test fails on a new difference and on
+an entry that passes. `SvdFidelityTests` pins the FIFO, read-to-clear and write-1-to-clear behaviour the sweep skips.
+
 ### Added: release gate
 
 `publish.yml` runs the `Release` category of the integration tests before packing. Real MicroPython 1.28.0 and
