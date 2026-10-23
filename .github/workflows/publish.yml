@@ -60,6 +60,14 @@ jobs:
           --no-build
           --logger "console;verbosity=normal"
 
+      - name: Release gate
+        run: >
+          dotnet test tests/RP2040Sharp.IntegrationTests/RP2040Sharp.IntegrationTests.csproj
+          -c Release
+          --no-build
+          --filter "Category=Release"
+          --logger "console;verbosity=normal"
+
       # ── Rolling BUSL Change Date: stamp each packed license file with
       #    (release date + 4 years) so every published version gets a full
       #    4-year BUSL window before it converts to the Change License (MIT). ──
