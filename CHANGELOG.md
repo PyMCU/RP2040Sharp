@@ -5,6 +5,24 @@ All notable changes to **RP2040Sharp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-10-23
+
+### Fixed: RESETS did not reset I2C, SPI, UART, PWM, ADC or DMA, so CircuitPython could not re-create I2C after a reload
+
+Only USBCTRL and PIO reacted to their RESETS bit. CircuitPython deinits `busio.I2C` with `reset_block` and refuses to
+construct one while `IC_ENABLE` is still set, so after Ctrl-C + Ctrl-D (or any soft reload) `busio.I2C(...)` raised
+`ValueError: I2C peripheral in use`. Asserting the RESETS bit of ADC, DMA, I2C0/1, PWM, SPI0/1 or UART0/1, through a
+plain write or the SET/CLR/XOR aliases, now returns that block's registers, FIFOs and IRQ lines to their reset state.
+TIMER, RTC, IO_BANK0 and PADS_BANK0 are left as they were. Tested by `ResetsBlockTests`.
+
+### Added: release gate
+
+`publish.yml` runs the `Release` category of the integration tests before packing. Real MicroPython 1.28.0 and
+CircuitPython 10.3.1 boot, a never-ending program's output arrives after a late port open, I2C, SPI, UART, PWM and ADC
+are re-created after two reloads, `machine.reset()`, the watchdog and `microcontroller.reset()` reboot twice, and a
+long-named module and a `lib/` package import. A tag, prerelease tags included, does not publish if the gate fails or
+its firmware cannot be fetched. Pull requests do not run it.
+
 ## [1.2.0] - 2026-10-22
 
 ### Performance: scalar loads, stores and stack bursts stay call-free on the SRAM path
