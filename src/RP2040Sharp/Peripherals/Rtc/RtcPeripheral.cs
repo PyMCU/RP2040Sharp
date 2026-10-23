@@ -49,6 +49,7 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, IDeferrableTickable
     private uint _irqSetup1;
     // Running time registers
     private uint _rtcDate;   // YEAR[27:16] MONTH[11:8] DAY[4:0]
+    private uint _rtc1Latch;
     private uint _rtcTime;   // DOTW[26:24] HOUR[20:16] MIN[13:8] SEC[5:0]
 
     private long _accumCycles;
@@ -125,10 +126,16 @@ public sealed class RtcPeripheral : IMemoryMappedDevice, IDeferrableTickable
         0x28        => _intf,
         0x2C        => ((_matchActive ? 1u : 0u) | _intf) & _inte,   // INTS
         IRQ_SETUP_1 => _irqSetup1,
-        RTC_RTC1    => _rtcDate,   // RTC_1 (0x18) = YEAR/MONTH/DAY
-        RTC_RTC0    => _rtcTime,   // RTC_0 (0x1C) = DOTW/HOUR/MIN/SEC
+        RTC_RTC1    => _rtc1Latch,
+        RTC_RTC0    => LatchRtc1(),
         _           => 0,
     };
+
+    private uint LatchRtc1()
+    {
+        _rtc1Latch = _rtcDate;
+        return _rtcTime;
+    }
 
     public ushort ReadHalfWord(uint address) =>
         (ushort)(ReadWord(address & ~3u) >> (int)((address & 2) << 3));

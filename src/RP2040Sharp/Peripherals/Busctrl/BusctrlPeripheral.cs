@@ -53,7 +53,7 @@ public sealed class BusctrlPeripheral : IMemoryMappedDevice
     {
         switch (address)
         {
-            case BUS_PRIORITY: _priority  = value & 0xF; break;
+            case BUS_PRIORITY: _priority  = value & 0x1111; break;
             case PERFSEL0:     _perfsel[0] = value; break;
             case PERFSEL1:     _perfsel[1] = value; break;
             case PERFSEL2:     _perfsel[2] = value; break;

@@ -150,6 +150,7 @@ public class SpecAuditTests
         m.Bus.WriteWord(0x4005C014, (1u << 28) | 46u);                       // SEC_ENA, SEC=46
         m.Bus.WriteWord(0x4005C010, 1u << 28);                               // MATCH_ENA
         m.Rtc.Tick(125_000_000);                                             // one second
+        m.Bus.ReadWord(0x4005C01C);
         var rtc1 = m.Bus.ReadWord(0x4005C018);
         ((rtc1 >> 12) & 0xFFF).Should().Be(2024u);
         (m.Bus.ReadWord(0x4005C010) & (1u << 29)).Should().NotBe(0u, "MATCH_ACTIVE");

@@ -36,6 +36,11 @@ TIMER, RTC, IO_BANK0 and PADS_BANK0 are left as they were. Tested by `ResetsBloc
   which wrote back every write-1-to-clear flag that read as 1 and so cleared it. A peripheral now names those bits
   and the bridge leaves them out of the value it writes back: `adc_fifo_setup()` (`hw_write_masked` on ADC `FCS`) no
   longer clears OVER/UNDER. UART, SPI and I2C keep the read-modify-write, which is what their bus interposer does.
+- **SYSINFO, VREG, CLOCKS, SSI, RTC, BUSCTRL.** `SYSINFO.PLATFORM` reads ASIC (2) instead of FPGA (1). `VREG` resets
+  to `0xB1` (VSEL 1.10 V in bits 7:4, EN), so `vreg_get_voltage()` no longer reports 0.80 V at boot. The `CLK_*_DIV`
+  registers reset to `0x100` (divide by 1 in INT[31:8]) instead of `0x01000000`, which `clock_configure()` compared
+  against. The SSI takes SET/CLR/XOR aliases (MicroPython's `hw_set_bits(&ssi_hw->ssienr, ...)` was dropped). Reading
+  `RTC_0` latches `RTC_1`, as `rtc_get_datetime()` relies on. `BUS_PRIORITY` keeps bits 0, 4, 8 and 12, not 3:0.
 
 ### Added: release gate
 

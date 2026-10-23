@@ -13,7 +13,7 @@ public sealed class VregPeripheral : IMemoryMappedDevice
     private const uint CHIP_RESET  = 0x08;  // chip reset reason
 
     // VREG default: 1.1V (VSEL=0b1011)
-    private uint _vreg = 0x0B_00;  // VSEL=11, EN=1 in bits [8:4]
+    private uint _vreg = 0xB1;
     private uint _bod  = 0x0091;   // brownout enabled at ~1.0V
 
     public uint Size => 0x1000;
