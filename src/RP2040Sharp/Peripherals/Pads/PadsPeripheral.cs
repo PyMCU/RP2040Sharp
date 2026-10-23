@@ -44,22 +44,26 @@ public sealed class PadsPeripheral : IMemoryMappedDevice
     /// <summary>Raised with a mask of the pads whose IE, OD or pull configuration changed.</summary>
     public event Action<uint>? PadsChanged;
 
+    private readonly bool _qspi;
+
     public PadsPeripheral(bool qspi = false)
     {
-        for (int i = 0; i < _gpioRegs.Length; i++)
-            _gpioRegs[i] = DEFAULT_PAD;
-        if (qspi)
+        _qspi = qspi;
+        for (uint i = 0; i < _gpioRegs.Length; i++)
         {
-            // GPIO_QSPI_SCLK, SD0-SD3, SS are indices 0-5
-            for (var i = 1; i <= 4; i++) _gpioRegs[i] = 0x52;
-            _gpioRegs[5] = 0x5A;
+            _gpioRegs[i] = ResetValue(i);
+            RefreshPulls(i);
         }
-        else
-        {
-            _gpioRegs[30] = 0xDA;   // SWCLK
-            _gpioRegs[31] = 0x5A;   // SWD
-        }
-        for (uint i = 0; i < _gpioRegs.Length; i++) RefreshPulls(i);
+    }
+
+    private uint ResetValue(uint i) => _qspi
+        ? i is >= 1 and <= 4 ? 0x52u : i == 5 ? 0x5Au : DEFAULT_PAD
+        : i == 30 ? 0xDAu : i == 31 ? 0x5Au : DEFAULT_PAD;
+
+    public void Reset()
+    {
+        _voltageSelect = 0;
+        for (uint i = 0; i < _gpioRegs.Length; i++) WriteWord(GPIO_FIRST + i * 4, ResetValue(i));
     }
 
     private void RefreshPulls(uint idx)

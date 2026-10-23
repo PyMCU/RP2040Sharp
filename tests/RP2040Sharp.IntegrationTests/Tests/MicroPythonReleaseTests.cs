@@ -161,6 +161,27 @@ public sealed class MicroPythonReleaseTests
     }
 
     [Fact]
+    public async Task MachineReset_ReleasesPins()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await BootAsync();
+        if (runner is null) return;
+
+        runner.ExecuteAndWait(
+            "from machine import Pin; a = Pin(15, Pin.OUT, value=1); b = Pin(14, Pin.IN, Pin.PULL_UP); " +
+            "c = Pin(13, Pin.IN); c.irq(lambda p: None, Pin.IRQ_RISING); print('set', a.value(), b.value())", "set 1 1")
+            .Should().BeTrue();
+        RebootAndWaitForRepl(runner, "import machine; machine.reset()");
+
+        runner.Simulation.Rp2040.IoBank0.GetPadOutputEnable(15).Should().BeFalse("machine.reset() releases an output pin");
+        runner.ExecuteAndWait(
+            "import machine; m = machine.mem32; print('gpio', hex(m[0x4001407c]), machine.Pin(15).value(), " +
+            "machine.Pin(14).value(), hex(m[0x4001c03c]), hex(m[0x40014104]))", "gpio 0x1f 0 0 0x56 0x0")
+            .Should().BeTrue($"IO_BANK0, the pads and the GPIO interrupt enables must come back at their reset values, got: {runner.UsbCdc.Text}");
+    }
+
+    [Fact]
     public async Task PicoW_WifiConnectsAgain_AfterMachineResetTwice()
     {
         if (ShouldSkip) return;

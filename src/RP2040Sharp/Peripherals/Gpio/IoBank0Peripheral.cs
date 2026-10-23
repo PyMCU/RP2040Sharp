@@ -569,6 +569,17 @@ public sealed class IoBank0Peripheral : IMemoryMappedDevice
         };
     }
 
+    public void Reset()
+    {
+        for (uint pin = 0; pin < GPIO_COUNT; pin++) WriteWord(pin * 8 + 4, FUNCSEL_MASK);
+        Array.Clear(_intrEdge);
+        Array.Clear(_proc0Inte);
+        Array.Clear(_proc0Intf);
+        Array.Clear(_proc1Inte);
+        Array.Clear(_proc1Intf);
+        CheckInterrupts();
+    }
+
     // ── GPIO input update ────────────────────────────────────────────
 
     /// <summary>

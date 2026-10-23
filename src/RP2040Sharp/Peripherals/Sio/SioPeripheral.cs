@@ -734,6 +734,21 @@ public sealed class SioPeripheral : IMemoryMappedDevice, IAddressDecoder
         }
     }
 
+    public void Reset()
+    {
+        var changed = _gpioOut | _gpioOe;
+        _gpioOut = _gpioOe = _gpioHiOut = _gpioHiOe = 0;
+        Array.Clear(_div);
+        Array.Clear(_interp0);
+        Array.Clear(_interp1);
+        _spinLocks = 0;
+        _fifo01.Clear();
+        _fifo10.Clear();
+        _wof0 = _roe0 = _wof1 = _roe1 = false;
+        ResetMulticoreLaunch();
+        NotifyGpio(changed);
+    }
+
     /// <summary>
     /// Clear the multicore launch state so a subsequent §2.8.3 handshake re-launches Core1.
     /// Called by <see cref="RP2040Machine.Reset"/>.

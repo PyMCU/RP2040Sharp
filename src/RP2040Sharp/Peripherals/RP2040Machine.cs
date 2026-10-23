@@ -329,6 +329,8 @@ public sealed class RP2040Machine : IDisposable
             if ((asserted & (1u << 2)) != 0)  ResetBlock(Dma, Dma.Reset);
             if ((asserted & (1u << 3)) != 0)  ResetBlock(I2c0, I2c0.Reset);
             if ((asserted & (1u << 4)) != 0)  ResetBlock(I2c1, I2c1.Reset);
+            if ((asserted & (1u << 5)) != 0)  IoBank0.Reset();
+            if ((asserted & (1u << 8)) != 0)  PadsBank0.Reset();
             if ((asserted & (1u << 14)) != 0) ResetBlock(Pwm, Pwm.Reset);
             if ((asserted & (1u << 16)) != 0) ResetBlock(Spi0, Spi0.Reset);
             if ((asserted & (1u << 17)) != 0) ResetBlock(Spi1, Spi1.Reset);
@@ -1537,6 +1539,7 @@ public sealed class RP2040Machine : IDisposable
         Ppb.Reset();
         Ppb1.Reset();
         Usb.Reset();
+        Sio.Reset();
         RebaseEngines();
     }
 
