@@ -1546,6 +1546,7 @@ public sealed class RP2040Machine : IDisposable
         Ppb1.Reset();
         Usb.Reset();
         Sio.Reset();
+        Resets.WriteWord(0, 0x01FFFFFF);
         RebaseEngines();
     }
 
