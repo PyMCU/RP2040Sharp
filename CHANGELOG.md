@@ -17,6 +17,10 @@ TIMER, RTC, IO_BANK0 and PADS_BANK0 are left as they were. Tested by `ResetsBloc
 
 ### Fixed: registers that disagreed with the RP2040 SVD
 
+- **USB SOF.** `INTR.DEV_SOF` is cleared by reading `SOF_RD`, as on silicon (TinyUSB reads it in its SOF handler),
+  instead of by the next peripheral sweep, and SOFs keep a 1 ms period from the first one instead of restarting from
+  the sweep that saw them. Both depended on where a host's run call ended, so `st_rp2040_run` could land on a
+  different cycle at different call sizes once the boot timeline moved.
 - **SIO divider.** `DIV_CSR` had READY and DIRTY swapped: READY read 0 after every divide, so
   `hw_divider_wait_ready()` (the `hardware_divider` API, `pico_divider_compiler`) spun forever. READY is bit 0 and
   always set, DIRTY is bit 1, set by any write and cleared by reading `DIV_QUOTIENT`.
