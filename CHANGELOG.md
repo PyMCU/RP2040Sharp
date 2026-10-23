@@ -25,6 +25,9 @@ TIMER, RTC, IO_BANK0 and PADS_BANK0 are left as they were. Tested by `ResetsBloc
   channel stayed pending forever and a ping-pong ISR (arduino-pico `AudioBufferManager`) served both channels on
   every interrupt. That is the "less output" that kept F-12 deferred: arduino-pico ADCInput now delivers 8000
   samples/s at 8 kHz instead of 16000, and I2S TDM at 1 kHz × 8 channels 8000 words/s (125 MHz build).
+- **DMA CTRL.** A null trigger on `CTRL_TRIG` (writing 0, also through a CLR/XOR alias) now writes the register, so the
+  channel is disabled; it kept EN and the old configuration. READ_ERROR/WRITE_ERROR are write-1-to-clear, AHB_ERROR
+  is read-only and bits 25-28 are reserved: writing ones no longer sets them.
 
 ### Added: release gate
 
