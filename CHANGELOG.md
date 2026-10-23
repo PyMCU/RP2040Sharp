@@ -15,6 +15,12 @@ construct one while `IC_ENABLE` is still set, so after Ctrl-C + Ctrl-D (or any s
 plain write or the SET/CLR/XOR aliases, now returns that block's registers, FIFOs and IRQ lines to their reset state.
 TIMER, RTC, IO_BANK0 and PADS_BANK0 are left as they were. Tested by `ResetsBlockTests`.
 
+### Fixed: registers that disagreed with the RP2040 SVD
+
+- **SIO divider.** `DIV_CSR` had READY and DIRTY swapped: READY read 0 after every divide, so
+  `hw_divider_wait_ready()` (the `hardware_divider` API, `pico_divider_compiler`) spun forever. READY is bit 0 and
+  always set, DIRTY is bit 1, set by any write and cleared by reading `DIV_QUOTIENT`.
+
 ### Added: release gate
 
 `publish.yml` runs the `Release` category of the integration tests before packing. Real MicroPython 1.28.0 and

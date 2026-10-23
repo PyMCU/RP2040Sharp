@@ -50,7 +50,9 @@ public sealed class SioPeripheral : IMemoryMappedDevice, IAddressDecoder
     private const uint DIV_SDIVISOR  = 0x06C;
     private const uint DIV_QUOTIENT  = 0x070;
     private const uint DIV_REMAINDER = 0x074;
-    private const uint DIV_CSR       = 0x078;  // bit0=DIRTY, bit1=READY
+    private const uint DIV_CSR       = 0x078;
+    private const uint DIV_CSR_READY = 1u;
+    private const uint DIV_CSR_DIRTY = 1u << 1;
 
     // ── Interpolators (INTERP0: 0x080, INTERP1: 0x0C0, stride 0x40) ───
     private const uint INTERP0_BASE = 0x080;
@@ -308,9 +310,9 @@ public sealed class SioPeripheral : IMemoryMappedDevice, IAddressDecoder
             DIV_UDIVISOR  => _div[CoreIdx].Divisor,
             DIV_SDIVIDEND => _div[CoreIdx].Dividend,
             DIV_SDIVISOR  => _div[CoreIdx].Divisor,
-            DIV_QUOTIENT  => _div[CoreIdx].Quotient,
+            DIV_QUOTIENT  => ReadQuotient(),
             DIV_REMAINDER => _div[CoreIdx].Remainder,
-            DIV_CSR       => _div[CoreIdx].Csr,
+            DIV_CSR       => _div[CoreIdx].Csr | DIV_CSR_READY,
             FIFO_ST  => BuildFifoStatus(GetActiveCoreId?.Invoke() ?? 0),
             FIFO_RD  => ReadFifoForCore(GetActiveCoreId?.Invoke() ?? 0),
             SPINLOCK_ST   => _spinLocks,
@@ -454,11 +456,11 @@ public sealed class SioPeripheral : IMemoryMappedDevice, IAddressDecoder
                 break;
             case DIV_QUOTIENT:
                 _div[CoreIdx].Quotient = value;
-                _div[CoreIdx].Csr |= 1;
+                _div[CoreIdx].Csr = DIV_CSR_DIRTY;
                 break;
             case DIV_REMAINDER:
                 _div[CoreIdx].Remainder = value;
-                _div[CoreIdx].Csr |= 1;
+                _div[CoreIdx].Csr = DIV_CSR_DIRTY;
                 break;
         }
     }
@@ -632,11 +634,18 @@ public sealed class SioPeripheral : IMemoryMappedDevice, IAddressDecoder
 
     // ── Divider ──────────────────────────────────────────────────────
 
+    private uint ReadQuotient()
+    {
+        ref var d = ref _div[CoreIdx];
+        d.Csr = 0;
+        return d.Quotient;
+    }
+
     private void PerformDivide(int core)
     {
         ref var d = ref _div[core];
         (core == 1 && _cpu1 is not null ? _cpu1 : _cpu).Cycles += 8;   // the issuing core waits out the 8-cycle divide
-        d.Csr = 0x2;  // READY, not DIRTY
+        d.Csr = DIV_CSR_DIRTY;
 
         if (d.Signed)
         {
