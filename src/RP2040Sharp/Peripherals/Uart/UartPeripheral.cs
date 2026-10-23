@@ -73,6 +73,18 @@ public sealed class UartPeripheral : IMemoryMappedDevice, IDeferrableTickable, I
         _ifls = 0x12;  // default: TX at 1/2 full, RX at 1/2 full
     }
 
+    public void Reset()
+    {
+        Advance();
+        _ibrd = _fbrd = _lcrH = _cr = _imsc = _dmacr = _ris = _rsr = 0;
+        _ifls = 0x12;
+        _rxFifo.Clear();
+        _txFifo.Clear();
+        _engine?.Reset();
+        CheckInterrupts();
+        Changed?.Invoke();
+    }
+
     /// <summary>Inject a byte into the RX FIFO (simulates remote device sending data).</summary>
     public void InjectByte(byte value)
     {

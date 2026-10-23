@@ -148,9 +148,27 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, IDeferrableTickable
     {
         _bus = bus;
         _cpu = cpu;
-        // Default CHAIN_TO: each channel chains to itself (no chaining)
+        ResetRegisters();
+    }
+
+    public void Reset()
+    {
+        ResetRegisters();
+        _cpu.SetInterrupt(11, false);
+        _cpu.SetInterrupt(12, false);
+    }
+
+    private void ResetRegisters()
+    {
+        Array.Clear(_readAddr);
+        Array.Clear(_writeAddr);
+        Array.Clear(_transCount);
         for (var i = 0; i < CHANNEL_COUNT; i++)
             _ctrl[i] = (uint)i << 11;
+        _intr = _inte0 = _intf0 = _inte1 = _intf1 = 0;
+        _timer0 = _timer1 = _timer2 = _timer3 = 0;
+        _sniffCtrl = _sniffData = 0;
+        _budgetPaused = 0;
     }
 
     // ── IMemoryMappedDevice ──────────────────────────────────────────

@@ -104,6 +104,15 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, IDeferrableTickable
         _cpu = cpu;
     }
 
+    public void Reset()
+    {
+        _cs = _result = _fcs = _div = _inte = _intf = 0;
+        _adcFifo.Clear();
+        _fifoUnder = _fifoOver = false;
+        _tickAccum = 0;
+        _cpu.SetInterrupt(22, false);
+    }
+
     public uint ReadWord(uint address)
     {
         return address switch

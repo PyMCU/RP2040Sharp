@@ -32,7 +32,7 @@ public static class FirmwareCache
         // Prefer firmware embedded in the test assembly — offline and free of network flakiness.
         if (TryLoadEmbedded(key) is { } embedded)
         {
-            await File.WriteAllBytesAsync(path, embedded);
+            await WriteAtomicAsync(path, embedded);
             return VerifyOrThrow(path, key);
         }
 
@@ -46,7 +46,7 @@ public static class FirmwareCache
             if (url is null) return null;
 
             var bytes = await http.GetByteArrayAsync(url);
-            await File.WriteAllBytesAsync(path, bytes);
+            await WriteAtomicAsync(path, bytes);
             return VerifyOrThrow(path, key);
         }
         catch
@@ -122,7 +122,7 @@ public static class FirmwareCache
         var embeddedTag = version.StartsWith('v') ? version[1..] : version;
         if (TryLoadEmbedded($"circuitpython-{embeddedTag}") is { } embedded)
         {
-            await File.WriteAllBytesAsync(path, embedded);
+            await WriteAtomicAsync(path, embedded);
             return VerifyOrThrow(path, key);
         }
 
@@ -137,7 +137,7 @@ public static class FirmwareCache
                       $"adafruit-circuitpython-raspberry_pi_pico-en_US-{tag}.uf2";
 
             var bytes = await http.GetByteArrayAsync(url);
-            await File.WriteAllBytesAsync(path, bytes);
+            await WriteAtomicAsync(path, bytes);
             return VerifyOrThrow(path, key);
         }
         catch
@@ -193,7 +193,7 @@ public static class FirmwareCache
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
             http.DefaultRequestHeaders.UserAgent.ParseAdd("RP2040Sharp-IntegrationTests/1.0");
             var bytes = await http.GetByteArrayAsync(url);
-            await File.WriteAllBytesAsync(path, bytes);
+            await WriteAtomicAsync(path, bytes);
             return VerifyOrThrow(path, key);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
@@ -208,6 +208,13 @@ public static class FirmwareCache
     /// unchecked (forward-compatibility). A mismatch deletes the bad copy and throws — it must be loud, not
     /// a silent skip, because the file is not the build the tests were written against.
     /// </summary>
+    private static async Task WriteAtomicAsync(string path, byte[] bytes)
+    {
+        var tmp = $"{path}.{Guid.NewGuid():N}.tmp";
+        await File.WriteAllBytesAsync(tmp, bytes);
+        File.Move(tmp, path, overwrite: true);
+    }
+
     private static string VerifyOrThrow(string path, string cacheKey)
     {
         var pin = FirmwareManifest.PinFor(cacheKey);
