@@ -4,7 +4,7 @@ name: Publish NuGet
 # Versioning is handled by MinVer (Directory.Build.props): a `v*` tag produces a
 # stable release version, any other ref produces a preview version derived from
 # the last tag + commit height. Packages are always built and uploaded as a
-# workflow artifact; they are pushed to nuget.org only for `v*` tags (or when a
+# workflow artifact; they are pushed to nuget.org only for stable `v*` tags, never `vX.Y.Z-rc.N` (or when a
 # manual run sets push_public=true).
 #
 # Publishing uses NuGet Trusted Publishing (OIDC) — no long-lived API key. A short-lived
@@ -133,7 +133,7 @@ jobs:
 
       # ── Trusted Publishing: mint a short-lived API key from the OIDC token ────
       - name: NuGet login (OIDC → temporary API key)
-        if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event.inputs.push_public == 'true' }}
+        if: ${{ (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')) || github.event.inputs.push_public == 'true' }}
         uses: NuGet/login@v1
         id: login
         with:
@@ -141,7 +141,7 @@ jobs:
 
       # ── Push to nuget.org (tags, or a manual push_public run) ───────────────
       - name: Push to nuget.org
-        if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event.inputs.push_public == 'true' }}
+        if: ${{ (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')) || github.event.inputs.push_public == 'true' }}
         run: >
           dotnet nuget push "./nupkgs/*.nupkg"
           --source https://api.nuget.org/v3/index.json
