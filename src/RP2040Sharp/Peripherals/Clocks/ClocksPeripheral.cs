@@ -63,8 +63,7 @@ public sealed class ClocksPeripheral : IMemoryMappedDevice
     private uint _sleepEn0 = 0xFFFFFFFF, _sleepEn1 = 0xFFFF;
     private uint _inte;
 
-    // Default divider = 1.0 (integer=1, frac=0 → top byte = 0x01, rest 0 → 0x01000000)
-    private const uint DIV_DEFAULT = 0x01000000;
+    private const uint DIV_DEFAULT = 0x100;
 
     public ClocksPeripheral()
     {
@@ -113,12 +112,7 @@ public sealed class ClocksPeripheral : IMemoryMappedDevice
                 3 => XoscHz,       // XOSC
                 _ => 0u,           // gpin0/gpin1 — external, unmodeled
             };
-            // CLK_SYS_DIV INT[31:8]. NB: this peripheral's reset default (DIV_DEFAULT = 0x01000000)
-            // uses a top-byte layout, not the hardware INT[31:8]; firmware that starts the PLL but
-            // leaves the divider untouched would otherwise read a huge divisor. Treat that exact
-            // reset value as div = 1 (firmware writes 0x100 for div 1 in the real layout).
-            var raw = _div[5];
-            var divInt = raw == 0x01000000u ? 1u : ((raw >> 8) & 0xFFFFFFu);
+            var divInt = (_div[5] >> 8) & 0xFFFFFFu;
             if (divInt == 0) divInt = 1;
             var hz = aux / divInt;
             return hz == 0 ? 125_000_000u : hz;

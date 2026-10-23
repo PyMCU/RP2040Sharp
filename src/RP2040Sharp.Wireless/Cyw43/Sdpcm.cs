@@ -86,9 +86,22 @@ public sealed class Sdpcm
     /// raises nothing).</summary>
     public Action<uint>? OnWlGpioChanged;
 
-    /// <summary>WL_ON went low: the chip's registers lose their state. Of them only the WL GPIO outputs are modelled
-    /// here; they return to 0 (the LED goes off).</summary>
-    public void PowerDown() => SetWlGpioOut(0);
+    /// <summary>WL_ON went low: the chip loses its state. The WL GPIO outputs return to 0 (the LED goes off), queued
+    /// packets are dropped, and an association or SoftAP goes down with the radio.</summary>
+    public void PowerDown()
+    {
+        SetWlGpioOut(0);
+        _txq.Clear();
+        _chipSeq = _lastHostSeq = 0;
+        _pendingPassphrase = null;
+        OnPacketReadyChanged?.Invoke(false, 0);
+        if (ApSsid is not null) { ApSsid = null; OnApUp?.Invoke(false); }
+        var left = _joinedAp;
+        _joinedAp = null;
+        if (left is null) return;
+        OnStaJoin?.Invoke(null);
+        OnStaEvent?.Invoke(StaEvent.Left, left.Ssid);
+    }
 
     private void SetWlGpioOut(uint value)
     {

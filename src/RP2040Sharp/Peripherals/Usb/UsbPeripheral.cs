@@ -192,7 +192,7 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
 
             R_MAIN_CTRL      => _mainCtrl,
             R_SOF_RW         => _sofRw,
-            R_SOF_RD         => _sofRd,
+            R_SOF_RD         => ReadSofRd(),
             R_SIE_CTRL       => _sieCtrl,
             R_SIE_STATUS     => _sieStatus,
             R_INT_EP_CTRL    => _intEpCtrl,
@@ -419,6 +419,16 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
         _intr |= INTR_DEV_SOF;
         CheckInterrupts();
         OnSof?.Invoke(frameNumber);
+    }
+
+    private uint ReadSofRd()
+    {
+        if ((_intr & INTR_DEV_SOF) != 0)
+        {
+            _intr &= ~INTR_DEV_SOF;
+            CheckInterrupts();
+        }
+        return _sofRd;
     }
 
     /// <summary>Simulate an isolated SETUP_REC bit assertion (no payload).</summary>
@@ -650,12 +660,12 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
     }
 
     /// <summary>
-    /// Cycles until a tick does more than count: a SETUP to raise or a SOF bit to clear (the next sweep), the next
+    /// Cycles until a tick does more than count: a SETUP to raise (the next sweep), the next
     /// SOF while the controller runs in device mode, or the next deferred endpoint completion.
     /// </summary>
     public long CyclesUntilEvent()
     {
-        if (_setupPending || (_intr & INTR_DEV_SOF) != 0) return 0;
+        if (_setupPending) return 0;
         var best = long.MaxValue;
         if (_controllerEnabled && !_hostMode)
             best = Math.Max(0, _lastSofCycles + SOF_PERIOD_CYCLES - _totalCycles);
@@ -683,16 +693,13 @@ public sealed class UsbPeripheral : IMemoryMappedDevice, IHandlesAtomicAliases, 
             SieStatusUpdated();
         }
 
-        // Auto-clear SOF bit after one tick so it doesn't re-trigger indefinitely.
-        _intr &= ~INTR_DEV_SOF;
-
         // Emit periodic SOF when USB controller is enabled in device mode.
         // The host generates SOFs unconditionally regardless of whether the device has the SOF interrupt enabled.
         if (_controllerEnabled && !_hostMode)
         {
             if (_totalCycles - _lastSofCycles >= SOF_PERIOD_CYCLES)
             {
-                _lastSofCycles = _totalCycles;
+                _lastSofCycles = _totalCycles - _lastSofCycles < 2 * SOF_PERIOD_CYCLES ? _lastSofCycles + SOF_PERIOD_CYCLES : _totalCycles;
                 _sofFrameCount = (_sofFrameCount + 1) & 0x7FF;
                 SignalSof(_sofFrameCount);
             }

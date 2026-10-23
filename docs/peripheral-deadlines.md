@@ -44,7 +44,7 @@ have it (`Sync`, then `Touch` asks for its next event again):
 | PWM | the first counter step, over the enabled free-running or gated-high slices, that wraps, turns at TOP or changes a channel output (8.4 dividers with the fraction carried) |
 | PIO | the next divider edge of an enabled state machine that does not wait on an access ([stalled state machines](#stalled-pio-state-machines)); the next sweep if its interrupt lines are about to change or the IRQ latch is behind the flags. A put-off tick still runs its heartbeat (`SkipTick` = `EndTick`) |
 | RTC, watchdog, ADC | the next second, the countdown reaching zero, the next START_MANY conversion |
-| USB | a SETUP to raise or a SOF bit to clear (next sweep), the next SOF, the next endpoint completion |
+| USB | a SETUP to raise (next sweep), the next SOF, the next endpoint completion |
 | DMA, SPI | the next sweep while a transfer is paused on the beat budget / the TX FIFO holds words |
 | Pin-level SPI, UART, I2C | the engine's next step ([pin-level-buses.md](pin-level-buses.md)): a timed wait inside a frame, a queued word / byte / command to take, a stretched SCL seen high, an RX start bit. The engines run on core 0's clock and are brought up to the cycle of every access, DREQ query and pad input, so a tick only catches them up; the UART and I2C blocks are in the sweep only with their bus enabled |
 | SysTick (PPB) | stays eager (it counts from the cores' own cycle counters); its next exception bounds stretches and bounded runs |

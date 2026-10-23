@@ -442,6 +442,8 @@ public sealed class I2cPeripheral : IMemoryMappedDevice, IDeferrableTickable, II
             return;
         }
 
+        if (!_inSlaveTransmit && (_rawIntr & INTR_TX_ABRT) != 0) return;
+
         var isRead = (value & (1u << 8)) != 0;
         var addr   = (byte)(_tar & 0x7F);
 
@@ -452,18 +454,18 @@ public sealed class I2cPeripheral : IMemoryMappedDevice, IDeferrableTickable, II
         if (!_inSlaveTransmit && !DeviceAnswers(addr))
         {
             SignalAddressNack();
-            if ((value & (1u << 9)) != 0)
-            {
-                OnStop?.Invoke();
-                _rawIntr |= 1u << 9;   // STOP_DET still follows the aborted transfer
-                CheckInterrupts();
-            }
+            StopAfterAbort();
             return;
         }
 
         if (isRead)
         {
             var rxByte = OnRead?.Invoke(addr) ?? 0;
+            if ((_rawIntr & INTR_TX_ABRT) != 0)
+            {
+                StopAfterAbort();
+                return;
+            }
             if (_rxFifo.Count < FIFO_DEPTH)
             {
                 _rxFifo.Enqueue(rxByte);
@@ -485,6 +487,11 @@ public sealed class I2cPeripheral : IMemoryMappedDevice, IDeferrableTickable, II
         else
         {
             OnWrite?.Invoke(addr, (byte)(value & 0xFF));
+            if ((_rawIntr & INTR_TX_ABRT) != 0)
+            {
+                StopAfterAbort();
+                return;
+            }
             // TX FIFO is always drained instantly in simulation
             _rawIntr |= 1u << 4;  // TX_EMPTY
             CheckInterrupts();
@@ -497,6 +504,13 @@ public sealed class I2cPeripheral : IMemoryMappedDevice, IDeferrableTickable, II
             _rawIntr |= 1u << 9;
             CheckInterrupts();
         }
+    }
+
+    private void StopAfterAbort()
+    {
+        OnStop?.Invoke();
+        _rawIntr |= 1u << 9;
+        CheckInterrupts();
     }
 
     /// <summary>Queue an IC_DATA_CMD write for the pin-level engine.</summary>
@@ -598,6 +612,8 @@ public sealed class I2cPeripheral : IMemoryMappedDevice, IDeferrableTickable, II
     {
         _txAbrtSource |= ABRT_7B_ADDR_NOACK;
         _rawIntr      |= INTR_TX_ABRT;
+        _rxFifo.Clear();
+        UpdateRxFull();
         // The abort flushes the TX FIFO, which raises TX_EMPTY. Drivers wait on TX_EMPTY FIRST and
         // only then read IC_TX_ABRT_SOURCE (pico-sdk's i2c_write_blocking_internal does exactly
         // that), so raising TX_ABRT alone leaves them spinning on a flag that never comes.

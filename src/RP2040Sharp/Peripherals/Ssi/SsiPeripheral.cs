@@ -245,6 +245,14 @@ public sealed unsafe class SsiPeripheral : IMemoryMappedDevice
 
     public void WriteWord(uint address, uint value)
     {
+        var alias = (address >> 12) & 3;
+        if (alias != 0)
+        {
+            var offset = address & 0xFFF;
+            var current = ReadWord(offset);
+            WriteWord(offset, alias switch { 1 => current ^ value, 2 => current | value, _ => current & ~value });
+            return;
+        }
         switch (address)
         {
             case SSI_CTRLR0:         _ctrlr0      = value; break;

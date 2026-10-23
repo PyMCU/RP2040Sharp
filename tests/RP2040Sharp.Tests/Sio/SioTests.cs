@@ -58,7 +58,7 @@ public abstract class SioTests
             f.Sio.WriteWord(DIV_UDIVISOR, 5);
 
             var csr = f.Sio.ReadWord(DIV_CSR);
-            (csr & 0x2).Should().Be(2u, "READY bit must be set after divide");
+            (csr & 0x1).Should().Be(1u, "READY bit must be set after divide");
         }
 
         [Fact]
@@ -141,12 +141,14 @@ public abstract class SioTests
             f.Sio.WriteWord(DIV_UDIVIDEND, 10);
             f.Sio.WriteWord(DIV_UDIVISOR, 2);
             // Verify READY is set
-            (f.Sio.ReadWord(DIV_CSR) & 0x2).Should().Be(2u);
+            (f.Sio.ReadWord(DIV_CSR) & 0x1).Should().Be(1u);
+            f.Sio.ReadWord(DIV_QUOTIENT);
+            (f.Sio.ReadWord(DIV_CSR) & 0x2).Should().Be(0u, "reading the quotient clears DIRTY");
 
             // Save quotient (simulating context save)
             f.Sio.WriteWord(DIV_QUOTIENT, 99);
-            // DIRTY bit should now be set (bit 0)
-            (f.Sio.ReadWord(DIV_CSR) & 0x1).Should().Be(1u, "writing quotient sets DIRTY");
+            // DIRTY bit should now be set (bit 1)
+            (f.Sio.ReadWord(DIV_CSR) & 0x2).Should().Be(2u, "writing quotient sets DIRTY");
         }
     }
 

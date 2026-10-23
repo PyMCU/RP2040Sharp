@@ -118,16 +118,31 @@ public sealed class PioPeripheral : IMemoryMappedDevice, IDeferrableTickable
         _blockIndex = blockIndex;
         _sm = new PioStateMachine[SM_COUNT];
         for (var i = 0; i < SM_COUNT; i++)
-        {
-            _sm[i] = new PioStateMachine();
-            _sm[i].SmIndex = i;
-            // Reset values (SVD SMn_*): wrap top=31 bottom=0, clock divider 1.0, shift right for both ISR and OSR
-            // (IN_SHIFTDIR / OUT_SHIFTDIR set), SET_COUNT 5.
-            _sm[i].ExecCtrl = (31u << 12);
-            _sm[i].ClkDiv = 1u << 16;
-            _sm[i].ShiftCtrl = 3u << 18;
-            _sm[i].PinCtrl = 5u << 26;
-        }
+            _sm[i] = NewStateMachine(i);
+    }
+
+    // Reset values (SVD SMn_*): wrap top=31 bottom=0, clock divider 1.0, shift right for both ISR and OSR
+    // (IN_SHIFTDIR / OUT_SHIFTDIR set), SET_COUNT 5.
+    private static PioStateMachine NewStateMachine(int index) => new()
+    {
+        SmIndex = index,
+        ExecCtrl = 31u << 12,
+        ClkDiv = 1u << 16,
+        ShiftCtrl = 3u << 18,
+        PinCtrl = 5u << 26,
+    };
+
+    public void Reset()
+    {
+        Mutated();
+        Array.Clear(_instrMem);
+        for (var i = 0; i < SM_COUNT; i++)
+            _sm[i] = NewStateMachine(i);
+        _irq = _irqSnapshot = _fdebug = 0;
+        _irq0Inte = _irq0Intf = _irq1Inte = _irq1Intf = 0;
+        _dbgPadOut = _dbgPadOe = _inputSyncBypass = 0;
+        _irqStateKnown = false;
+        CheckInterrupts();
     }
 
     // ── ITickable ────────────────────────────────────────────────────

@@ -136,6 +136,34 @@ public sealed class CircuitPythonReleaseTests
     }
 
     [Fact]
+    public async Task MicrocontrollerReset_ReleasesPinsAndPio()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await CreateAsync([Py("code.py", "print('code', 'ran')\n")]);
+        if (runner is null) return;
+        runner.WaitForPrompt(timeoutMs: 20_000).Should().BeTrue($"CircuitPython {Version} must reach the REPL");
+        var rp = runner.Simulation.Rp2040;
+
+        runner.ExecuteAndWait(
+            "import board, digitalio, rp2pio, array, microcontroller; o = digitalio.DigitalInOut(board.GP15); o.switch_to_output(True); " +
+            "sm = rp2pio.StateMachine(array.array('H', [0xFF01, 0xFF00]), frequency=200_000, first_set_pin=board.GP16); print('pio', 'on')", "pio on")
+            .Should().BeTrue($"the pin and the state machine must start, got: {runner.UsbCdc.Text}");
+        (rp.Pio0.ReadWord(0x50200000) | rp.Pio1.ReadWord(0x50300000)).Should().NotBe(0u, "a state machine runs");
+
+        var before = rp.ResetCount;
+        runner.Execute("microcontroller.reset()");
+        RunUntil(runner, () => rp.ResetCount > before);
+        OpenPortLate(runner);
+        runner.Simulation.RunUntilOutput(runner.UsbCdc, "code ran", timeoutMs: 15_000)
+            .Should().BeTrue($"CircuitPython must boot again, got: {runner.UsbCdc.Text}");
+
+        rp.IoBank0.GetPadOutputEnable(15).Should().BeFalse("microcontroller.reset() releases GP15");
+        rp.IoBank0.GetPadOutputEnable(16).Should().BeFalse("microcontroller.reset() releases GP16");
+        (rp.Pio0.ReadWord(0x50200000) | rp.Pio1.ReadWord(0x50300000)).Should().Be(0u, "no state machine survives the reset");
+    }
+
+    [Fact]
     public async Task Fat_LongNamedModule_AndLibPackage_Import()
     {
         if (ShouldSkip) return;

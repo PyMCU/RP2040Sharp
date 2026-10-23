@@ -48,6 +48,7 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, IDeferrableTickable
     // CTRL bit masks
     private const uint CTRL_EN         = 1u << 0;
     private const uint CTRL_BUSY       = 1u << 24;
+    private const uint CTRL_WRITABLE   = 0x00FFFFFFu;
     private const uint CTRL_AHB_ERROR  = 1u << 31;
     private const uint CTRL_DATA_SIZE  = 3u << 2;   // bits 3:2
     private const uint CTRL_INCR_READ  = 1u << 4;
@@ -242,6 +243,8 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, IDeferrableTickable
         switch (address)
         {
             case REG_INTR:  _intr &= ~value; break;     // write 1 to clear
+            case REG_INTS0: _intr &= ~value; break;
+            case REG_INTS1: _intr &= ~value; break;
             case REG_INTE0: _inte0 = value & 0xFFF; break;
             case REG_INTF0: _intf0 = value & 0xFFF; break;
             case REG_INTE1: _inte1 = value & 0xFFF; break;
@@ -304,14 +307,15 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, IDeferrableTickable
                 {
                     // Null trigger: signal completion without starting a transfer
                     NullTrigger(ch);
+                    _ctrl[ch] = 0;
                     break;
                 }
-                _ctrl[ch] = value & ~CTRL_BUSY;  // BUSY is HW-driven
+                _ctrl[ch] = value & CTRL_WRITABLE;  // BUSY is HW-driven
                 if ((value & CTRL_EN) != 0 && _transCount[ch] > 0)
                     ExecuteChannel(ch);
                 break;
             // AL1: CTRL, READ, WRITE, TRANS_TRIG (last triggers)
-            case 0x10: _ctrl[ch] = value & ~CTRL_BUSY; break;
+            case 0x10: _ctrl[ch] = value & CTRL_WRITABLE; break;
             case 0x14: _readAddr[ch] = value; break;
             case 0x18: _writeAddr[ch] = value; break;
             case 0x1C:
@@ -320,7 +324,7 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, IDeferrableTickable
                 else if (_transCount[ch] == 0) NullTrigger(ch);
                 break;
             // AL2: CTRL, TRANS, READ, WRITE_TRIG (last triggers)
-            case 0x20: _ctrl[ch] = value & ~CTRL_BUSY; break;
+            case 0x20: _ctrl[ch] = value & CTRL_WRITABLE; break;
             case 0x24: _transCount[ch] = value; break;
             case 0x28: _readAddr[ch] = value; break;
             case 0x2C:
@@ -329,7 +333,7 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, IDeferrableTickable
                 else if (_transCount[ch] == 0) NullTrigger(ch);
                 break;
             // AL3: CTRL, WRITE, TRANS, READ_TRIG (last triggers)
-            case 0x30: _ctrl[ch] = value & ~CTRL_BUSY; break;
+            case 0x30: _ctrl[ch] = value & CTRL_WRITABLE; break;
             case 0x34: _writeAddr[ch] = value; break;
             case 0x38: _transCount[ch] = value; break;
             case 0x3C:

@@ -177,6 +177,36 @@ public abstract class I2cTests
         }
 
         [Fact]
+        public void Nack_in_the_read_phase_queues_nothing_and_the_next_read_is_not_shifted()
+        {
+            var i2c = Enabled();
+            i2c.OnRead = addr =>
+            {
+                if (addr == 0x18) { i2c.SignalAddressNack(); return 0xFF; }
+                return 0x54;
+            };
+            i2c.WriteWord(0x004, 0x18);
+
+            i2c.WriteWord(IC_DATA_CMD, (1u << 8) | (1u << 9));
+
+            i2c.ReadWord(0x078).Should().Be(0u, "an aborted read leaves nothing in the RX FIFO");
+            (i2c.ReadWord(IC_RAW_INTR_STAT) & (TX_ABRT | STOP_DET)).Should().Be(TX_ABRT | STOP_DET, "the abort is followed by a STOP");
+            (i2c.ReadWord(IC_TX_ABRT_SOURCE) & 0x1u).Should().NotBe(0);
+
+            i2c.WriteWord(IC_DATA_CMD, 1u << 8);
+            i2c.ReadWord(0x078).Should().Be(0u, "the TX FIFO is held flushed until TX_ABRT is cleared");
+
+            i2c.ReadWord(IC_CLR_TX_ABRT);
+            i2c.WriteWord(IC_ENABLE, 0);
+            i2c.WriteWord(0x004, 0x2A);
+            i2c.WriteWord(IC_ENABLE, 1);
+            i2c.WriteWord(IC_DATA_CMD, (1u << 8) | (1u << 9));
+
+            i2c.ReadWord(0x078).Should().Be(1u);
+            (i2c.ReadWord(IC_DATA_CMD) & 0xFF).Should().Be(0x54u);
+        }
+
+        [Fact]
         public void Reading_IC_CLR_TX_ABRT_clears_interrupt_and_source()
         {
             var i2c = Enabled();

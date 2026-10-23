@@ -181,7 +181,7 @@ server.Start();
 - [~] DMA (all channels, DREQ sources). Deferred spec gaps, not yet modelled (they change the timing of
   arduino-pico I2S/ADC streaming, so they wait for a regression pass):
   - [ ] TRANS_COUNT is not reloaded when a channel is re-triggered (datasheet 2.5.1.2, F-11)
-  - [ ] Writing INTS does not clear the interrupt, and IRQ_QUIET is ignored (F-12, F-13)
+  - [ ] IRQ_QUIET is ignored (F-13)
   - [ ] DMA_IRQ is not a level `(INTR | INTF) & INTE`; INTF/INTE do not re-evaluate it (F-33)
   - [ ] PWM wrap, pacing-timer and XIP-stream DREQs are not registered as pulse sources (F-34, I2C DREQs are)
   - [ ] Sniffer result is not computed; CTRL error flags are not set by the bus (F-35, F-36)

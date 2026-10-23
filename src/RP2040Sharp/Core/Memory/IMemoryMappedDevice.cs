@@ -40,3 +40,8 @@ public interface IAddressDecoder
 /// can apply the correct per-register semantics (e.g. W1C vs R/W).
 /// </summary>
 public interface IHandlesAtomicAliases { }
+
+public interface IWriteOneToClear
+{
+    uint WriteOneToClearMask(uint address);
+}

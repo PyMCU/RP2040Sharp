@@ -5,6 +5,52 @@ All notable changes to **RP2040Sharp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-10-23
+
+### Fixed: state that survived a reset on silicon does not
+
+Found by using a peripheral, resetting, and using it again with real MicroPython and CircuitPython.
+- **CYW43439:** dropping WL_REG_ON now power-on-resets the whole chip: gSPI mode, F0/F1 registers, backplane cores and memory, downloaded firmware, SDPCM queues, SoftAP/association and BLE. Before, a Pico W that had used Wi-Fi failed `WLAN.active(True)` with `Failed to start CYW43` after `machine.reset()` or the watchdog. The MAC, the BD address and the host callbacks are kept.
+- **IO_BANK0, PADS_BANK0 and SIO:** IO_BANK0 and PADS_BANK0 reset through RESETS bits 5 and 8, and a system reset resets SIO: GPIO OUT/OE, FIFOs, spinlocks, the divider and the interpolators. Before, a pin driven high stayed high after `machine.reset()`. Host-driven levels, pin-level functions and the CYW43 wiring are kept.
+- **PIO:** asserting a PIO block's RESETS bit returns it to its reset state and releases its pins. Before, a PIO program kept running after `machine.reset()`.
+- **Core resets:** a host reset and core 1's PSM reset clear PRIMASK, IPSR, CONTROL, VTOR, the NVIC and SysTick. Before, a host reset with interrupts disabled left MicroPython hung without a REPL.
+- **RESETS after a system reset:** every block is held in reset (0x01FFFFFF), as after a watchdog reset on silicon.
+
+### Fixed: an aborted I2C read shifted every later read by one byte
+
+A read the target NACKed queued 0xFF in the RX FIFO. MicroPython does not drain it, so every following read came back shifted. An aborted transfer now queues nothing, TX_ABRT raises STOP_DET, and commands are dropped until IC_CLR_TX_ABRT.
+
+### Fixed: registers that disagreed with the datasheet
+
+Found by checking every register in pico-sdk 2.1.1's RP2040 SVD:
+- **SIO divider:** DIV_CSR READY and DIRTY were swapped, so pico-sdk's `hw_divider_wait_ready` never returned.
+- **DMA:**
+  - Writing 1 to INTS0 or INTS1 clears the interrupt (F-12). The arduino-pico audio buffers that seemed to regress were relying on the bug: they served both ping-pong channels on every IRQ.
+  - A null trigger on CTRL_TRIG, including through CLR/XOR, disables the channel.
+  - READ_ERROR and WRITE_ERROR are write-1-to-clear.
+- **Atomic aliases:** they no longer clear write-1-to-clear flags (F-31). ADC FCS OVER and UNDER survive `hw_write_masked`.
+- **USB:** DEV_SOF clears on a SOF_RD read and the SOF period stays exact.
+- **Values firmware reads:**
+  - SYSINFO.PLATFORM reads ASIC, and VREG starts at 0xB1.
+  - CLK_*_DIV start at 0x100 (F-54).
+  - SSI supports the atomic aliases.
+  - Reading RTC_0 latches RTC_1.
+  - BUS_PRIORITY uses bits 0, 4, 8 and 12.
+
+`SvdConformanceTest` checks 1069 registers against the SVD on every PR, in 136 ms, with an allowlist where every entry has a reason. The allowlist also fails on stale entries.
+
+### Added: release gate scenarios
+
+The gate now covers:
+- Pico W: connect, `machine.reset()`, connect again, twice;
+- pins and PIO released after a reset, in MicroPython and CircuitPython;
+- a host reset with interrupts disabled;
+- `_thread` after a reset;
+- peripheral re-init without a reset;
+- an I2C read NACK followed by a correct read.
+
+It has 18 scenarios and runs in about 5 s.
+
 ## [1.2.1] - 2026-10-23
 
 ### Fixed: RESETS did not reset I2C, SPI, UART, PWM, ADC or DMA, so CircuitPython could not re-create I2C after a reload
@@ -14,6 +60,42 @@ construct one while `IC_ENABLE` is still set, so after Ctrl-C + Ctrl-D (or any s
 `ValueError: I2C peripheral in use`. Asserting the RESETS bit of ADC, DMA, I2C0/1, PWM, SPI0/1 or UART0/1, through a
 plain write or the SET/CLR/XOR aliases, now returns that block's registers, FIFOs and IRQ lines to their reset state.
 TIMER, RTC, IO_BANK0 and PADS_BANK0 are left as they were. Tested by `ResetsBlockTests`.
+
+### Fixed: registers that disagreed with the RP2040 SVD
+
+- **USB SOF.** `INTR.DEV_SOF` is cleared by reading `SOF_RD`, as on silicon (TinyUSB reads it in its SOF handler),
+  instead of by the next peripheral sweep, and SOFs keep a 1 ms period from the first one instead of restarting from
+  the sweep that saw them. Both depended on where a host's run call ended, so `st_rp2040_run` could land on a
+  different cycle at different call sizes once the boot timeline moved.
+- **SIO divider.** `DIV_CSR` had READY and DIRTY swapped: READY read 0 after every divide, so
+  `hw_divider_wait_ready()` (the `hardware_divider` API, `pico_divider_compiler`) spun forever. READY is bit 0 and
+  always set, DIRTY is bit 1, set by any write and cleared by reading `DIV_QUOTIENT`.
+- **DMA interrupt acknowledge (F-12).** Writing a mask to `INTS0`/`INTS1` clears those `INTR` bits, as
+  `dma_channel_acknowledge_irq0/1`, CircuitPython's audio DMA and `rp2pio` expect. It was ignored, so a completed
+  channel stayed pending forever and a ping-pong ISR (arduino-pico `AudioBufferManager`) served both channels on
+  every interrupt. That is the "less output" that kept F-12 deferred: arduino-pico ADCInput now delivers 8000
+  samples/s at 8 kHz instead of 16000, and I2S TDM at 1 kHz × 8 channels 8000 words/s (125 MHz build).
+- **DMA CTRL.** A null trigger on `CTRL_TRIG` (writing 0, also through a CLR/XOR alias) now writes the register, so the
+  channel is disabled; it kept EN and the old configuration. READ_ERROR/WRITE_ERROR are write-1-to-clear, AHB_ERROR
+  is read-only and bits 25-28 are reserved: writing ones no longer sets them.
+- **Atomic aliases over write-1-to-clear bits (F-31).** The APB bridge emulates SET/CLR/XOR with a read-modify-write,
+  which wrote back every write-1-to-clear flag that read as 1 and so cleared it. A peripheral now names those bits
+  and the bridge leaves them out of the value it writes back: `adc_fifo_setup()` (`hw_write_masked` on ADC `FCS`) no
+  longer clears OVER/UNDER. UART, SPI and I2C keep the read-modify-write, which is what their bus interposer does.
+- **SYSINFO, VREG, CLOCKS, SSI, RTC, BUSCTRL.** `SYSINFO.PLATFORM` reads ASIC (2) instead of FPGA (1). `VREG` resets
+  to `0xB1` (VSEL 1.10 V in bits 7:4, EN), so `vreg_get_voltage()` no longer reports 0.80 V at boot. The `CLK_*_DIV`
+  registers reset to `0x100` (divide by 1 in INT[31:8]) instead of `0x01000000`, which `clock_configure()` compared
+  against. The SSI takes SET/CLR/XOR aliases (MicroPython's `hw_set_bits(&ssi_hw->ssienr, ...)` was dropped). Reading
+  `RTC_0` latches `RTC_1`, as `rtc_get_datetime()` relies on. `BUS_PRIORITY` keeps bits 0, 4, 8 and 12, not 3:0.
+
+### Added: SVD conformance test
+
+`SvdConformanceTest` checks the 1069 registers without read side effects of the RP2040 SVD (DPRAM excluded) against a fresh machine in
+about 140 ms: reset values, read-only and reserved bits, write-1-to-clear fields, SET/CLR/XOR aliases (none on SIO)
+and undeclared read side effects. The register data (`SpecAudit/Svd/rp2040-registers.txt`, BSD-3-Clause, from
+pico-sdk 2.1.1 via `tools/svd_registers.py`) and `svd-allowlist.txt` are embedded in the test assembly. Every known
+difference is listed with a reason (`svd:`, `intentional:` or `pending:`); the test fails on a new difference and on
+an entry that passes. `SvdFidelityTests` pins the FIFO, read-to-clear and write-1-to-clear behaviour the sweep skips.
 
 ### Added: release gate
 
@@ -339,7 +421,7 @@ Each item names the audit finding it closes. Behaviour the audit listed as open 
 - **GPIO and SIO.** The IO_BANK0 overrides (OUTOVER, OEOVER, INOVER, IRQOVER) take effect (F-38). Edge IRQs fire on
   pads driven by SIO (F-18). PROC1 has its own INTE/INTF/INTS and drives core 1's IRQ (F-39). Pads reset to 0x56,
   and IE and OD take effect (F-40). GPIO_OUT and GPIO_OE are 30 bits wide (F-41).
-- **Deferred.** The DMA findings F-11, F-12, F-13, F-33, F-34, F-35 and F-36 are not in this change. Applying
+- **Deferred.** The DMA findings F-11, F-13, F-33, F-34, F-35 and F-36 are not in this change (F-12 landed in 1.2.1). Applying
   them made arduino-pico I2S and ADC streaming produce less output, and one I2S example hard-faulted, so they are
   tracked in the README roadmap until that regression is understood.
 

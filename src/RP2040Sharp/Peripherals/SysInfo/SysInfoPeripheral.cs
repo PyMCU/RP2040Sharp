@@ -9,7 +9,8 @@ namespace RP2040.Peripherals.SysInfo;
 public sealed class SysInfoPeripheral : IMemoryMappedDevice
 {
     private const uint CHIP_ID       = 0x00;   // RP2040 chip ID
-    private const uint PLATFORM      = 0x04;   // 0=FPGA, 1=ASIC, 2=SIMULATION
+    private const uint PLATFORM      = 0x04;
+    private const uint PLATFORM_ASIC = 1u << 1;
     private const uint GITREF_RP2040 = 0x40;   // ROM git ref
 
     // CHIP_ID: REVISION[31:28] PART[27:12]=0x0002 MANUFACTURER[11:0]=0x927 (RP2040 datasheet 2.20 SYSINFO / SVD).
@@ -25,7 +26,7 @@ public sealed class SysInfoPeripheral : IMemoryMappedDevice
     public uint ReadWord(uint address) => address switch
     {
         CHIP_ID       => _chipId,
-        PLATFORM      => 1,    // ASIC
+        PLATFORM      => PLATFORM_ASIC,
         GITREF_RP2040 => 0,
         _             => 0,
     };

@@ -37,11 +37,16 @@ public sealed class Backplane
     /// downloaded firmware would now be "running", so the F2 (WLAN data) channel reports ready.</summary>
     public bool WlanCoreUp { get; private set; }
 
-    public Backplane()
+    public Backplane() => PowerDown();
+
+    public void PowerDown()
     {
+        _mem.Clear();
         // Cores come out of power-on in reset.
         _mem[WlanArmWrapper + AiResetctrlOffset] = AircReset;
         _mem[SocsramWrapper + AiResetctrlOffset] = AircReset;
+        WlanCoreUp = false;
+        BytesDownloaded = 0;
     }
 
     /// <summary>Total firmware/NVRAM/CLM bytes written into SOCRAM (diagnostics).</summary>
