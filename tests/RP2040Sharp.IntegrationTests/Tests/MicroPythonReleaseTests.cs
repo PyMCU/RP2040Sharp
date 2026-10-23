@@ -291,6 +291,34 @@ public sealed class MicroPythonReleaseTests
     }
 
     [Fact]
+    public async Task I2c_ReadNack_DoesNotShiftTheNextRead()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await BootAsync();
+        if (runner is null) return;
+
+        var i2c = runner.Simulation.Rp2040.I2c0;
+        var next = 0;
+        i2c.DeviceResponds = addr => addr is 0x18 or 0x2A;
+        i2c.OnWrite = (_, _) => next = 0;
+        i2c.OnRead = addr =>
+        {
+            if (addr == 0x18) { i2c.SignalAddressNack(); return 0xFF; }
+            return next++ == 0 ? (byte)0x00 : (byte)0x54;
+        };
+
+        runner.ExecuteAndWait(
+            "from machine import I2C, Pin; i2c = I2C(0, scl=Pin(5), sda=Pin(4)); " +
+            "exec('try:\\n  i2c.readfrom_mem(0x18, 6, 2); print(\\'nack\\', \\'missed\\')\\nexcept OSError:\\n  print(\\'nack\\', \\'seen\\')'); " +
+            "print('rd', i2c.readfrom_mem(0x2A, 6, 2).hex(), i2c.readfrom_mem(0x2A, 6, 2).hex())", "rd ")
+            .Should().BeTrue($"got: {runner.UsbCdc.Text}");
+        runner.WaitForOutput(">>> ");
+        runner.UsbCdc.Text.Should().Contain("nack seen", "a read the device NACKs raises OSError");
+        runner.UsbCdc.Text.Should().Contain("rd 0054 0054", "the aborted read must not leave a byte behind in the RX FIFO");
+    }
+
+    [Fact]
     public async Task PicoW_WifiConnectsAgain_AfterMachineResetTwice()
     {
         if (ShouldSkip) return;
