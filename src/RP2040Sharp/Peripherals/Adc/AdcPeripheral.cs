@@ -9,7 +9,7 @@ namespace RP2040.Peripherals.Adc;
 /// Conversion results are provided via injectable callbacks for simulation.
 /// START_MANY (free-running) mode is driven via ITickable.
 /// </summary>
-public sealed class AdcPeripheral : IMemoryMappedDevice, IDeferrableTickable
+public sealed class AdcPeripheral : IMemoryMappedDevice, IDeferrableTickable, IWriteOneToClear
 {
     private const uint ADC_CS     = 0x000;  // Control / Status
     private const uint ADC_RESULT = 0x004;  // Conversion result (12-bit, read-only)
@@ -135,6 +135,8 @@ public sealed class AdcPeripheral : IMemoryMappedDevice, IDeferrableTickable
 
     public byte ReadByte(uint address) =>
         (byte)(ReadWord(address & ~3u) >> (int)((address & 3) << 3));
+
+    public uint WriteOneToClearMask(uint address) => address == ADC_FCS ? 3u << 10 : 0;
 
     public void WriteWord(uint address, uint value)
     {

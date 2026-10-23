@@ -110,6 +110,7 @@ public sealed class ApbBridge : IMemoryMappedDevice, IAddressDecoder
         }
 
         var current = device.ReadWord(offset);
+        if (device is IWriteOneToClear w1c) current &= ~w1c.WriteOneToClearMask(offset);
         device.WriteWord(offset, atomicType switch
         {
             1 => current ^ value,    // XOR  (+0x1000)

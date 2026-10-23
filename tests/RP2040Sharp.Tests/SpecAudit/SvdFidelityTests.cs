@@ -38,4 +38,21 @@ public class SvdFidelityTests
         b.WriteWord(0x50000010, 0xFE3F8000);
         b.ReadWord(0x50000010).Should().Be(0x003F8000u);
     }
+
+    [Theory]
+    [InlineData(0x1000u)]
+    [InlineData(0x2000u)]
+    [InlineData(0x3000u)]
+    public void Adc_FcsAlias_KeepsTheStickyFlags(uint alias)
+    {
+        using var m = Boot(); var b = m.Bus;
+        b.WriteWord(0x4004C000, 1);
+        b.WriteWord(0x4004C008, 1);
+        b.ReadWord(0x4004C00C);
+        (b.ReadWord(0x4004C008) & (1u << 10)).Should().NotBe(0u);
+        b.WriteWord(0x4004C008 + alias, 1u << 3);
+        (b.ReadWord(0x4004C008) & (1u << 10)).Should().NotBe(0u, "hw_write_masked on FCS must not clear UNDER");
+        b.WriteWord(0x4004C008, b.ReadWord(0x4004C008));
+        (b.ReadWord(0x4004C008) & (1u << 10)).Should().Be(0u);
+    }
 }

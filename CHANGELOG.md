@@ -28,6 +28,10 @@ TIMER, RTC, IO_BANK0 and PADS_BANK0 are left as they were. Tested by `ResetsBloc
 - **DMA CTRL.** A null trigger on `CTRL_TRIG` (writing 0, also through a CLR/XOR alias) now writes the register, so the
   channel is disabled; it kept EN and the old configuration. READ_ERROR/WRITE_ERROR are write-1-to-clear, AHB_ERROR
   is read-only and bits 25-28 are reserved: writing ones no longer sets them.
+- **Atomic aliases over write-1-to-clear bits (F-31).** The APB bridge emulates SET/CLR/XOR with a read-modify-write,
+  which wrote back every write-1-to-clear flag that read as 1 and so cleared it. A peripheral now names those bits
+  and the bridge leaves them out of the value it writes back: `adc_fifo_setup()` (`hw_write_masked` on ADC `FCS`) no
+  longer clears OVER/UNDER. UART, SPI and I2C keep the read-modify-write, which is what their bus interposer does.
 
 ### Added: release gate
 
