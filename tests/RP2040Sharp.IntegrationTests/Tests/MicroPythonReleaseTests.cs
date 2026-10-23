@@ -43,6 +43,25 @@ public sealed class MicroPythonReleaseTests
         "def sq():\n    set(pins, 1) [31]\n    set(pins, 0) [31]\n" +
         "sm = rp2.StateMachine(0, sq, freq=200_000, set_base=Pin(16))\nsm.active(1)\nprint('pio', 'on')\n";
 
+    private const string Reinit =
+        "import rp2, time\nfrom machine import Pin, SPI, UART, PWM\n" +
+        "@rp2.asm_pio()\ndef p1():\n    set(x, 1)\n    mov(isr, x)\n    push()\n    wrap_target()\n    nop()\n    wrap()\n" +
+        "@rp2.asm_pio()\ndef p2():\n    set(x, 2)\n    mov(isr, x)\n    push()\n    wrap_target()\n    nop()\n    wrap()\n" +
+        "sm = rp2.StateMachine(0, p1); sm.active(1); time.sleep_ms(5); a = sm.get(); sm.active(0)\n" +
+        "rp2.PIO(0).remove_program()\n" +
+        "sm = rp2.StateMachine(0, p2); sm.active(1); time.sleep_ms(5); b = sm.get(); sm.active(0)\n" +
+        "print('pio', a, b, sm.rx_fifo())\n" +
+        "p = PWM(Pin(15), freq=1000, duty_u16=32768); p.deinit()\n" +
+        "p = PWM(Pin(15), freq=2000, duty_u16=16384); print('pwm', p.freq(), p.duty_u16()); p.deinit()\n" +
+        "u = UART(1, 9600, tx=Pin(8), rx=Pin(9)); u.write(b'A'); time.sleep_ms(5); u.deinit()\n" +
+        "u = UART(1, 115200, tx=Pin(8), rx=Pin(9)); u.write(b'B'); time.sleep_ms(5)\n" +
+        "s = SPI(0, baudrate=1_000_000); s.deinit(); s = SPI(0, baudrate=4_000_000); s2 = SPI(0, baudrate=2_000_000); s.write(b'xy')\n" +
+        "src = bytearray(b'0123456789abcdef'); dst = bytearray(16); dst2 = bytearray(16)\n" +
+        "d = rp2.DMA(); d.config(read=src, write=dst, count=4, ctrl=d.pack_ctrl(), trigger=True); time.sleep_ms(2); d.close()\n" +
+        "d = rp2.DMA(); d.config(read=src, write=dst2, count=4, ctrl=d.pack_ctrl(), trigger=True); time.sleep_ms(2); d.close()\n" +
+        "print('dma', dst == src, dst2 == src)\n" +
+        "print('reinit', 'done')\n";
+
     private static int PadEdges(MicroPythonRunner runner, int pin, double ms)
     {
         var io = runner.Simulation.Rp2040.IoBank0;
@@ -235,6 +254,40 @@ public sealed class MicroPythonReleaseTests
         runner.WaitForPrompt(timeoutMs: 15_000)
             .Should().BeTrue("a core leaves reset with PRIMASK clear, so the restarted firmware gets its interrupts back");
         runner.ExecuteAndWait("print('alive', 6 * 7)", "alive 42").Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Thread_StartsAgain_AfterMachineReset()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await BootAsync();
+        if (runner is null) return;
+
+        runner.ExecuteAndWait("import _thread; _thread.start_new_thread(lambda: print('th', 1), ())", "th 1")
+            .Should().BeTrue("_thread must run on core 1");
+        RebootAndWaitForRepl(runner, "import machine; machine.reset()");
+        for (var i = 2; i <= 3; i++)
+            runner.ExecuteAndWait($"import _thread; _thread.start_new_thread(lambda: print('th', {i}), ())", $"th {i}")
+                .Should().BeTrue($"_thread #{i} must run on core 1 after machine.reset()");
+    }
+
+    [Fact]
+    public async Task Peripherals_ReinitWithoutReset()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await BootAsync();
+        if (runner is null) return;
+
+        runner.Execute($"exec({JsonSerializer.Serialize(Reinit)})");
+        runner.WaitForOutput(t => t.Contains("reinit done") || t.Contains("Traceback"), timeoutMs: 10_000);
+        var text = runner.UsbCdc.Text;
+        text.Should().NotContain("Traceback");
+        text.Should().Contain("pio 1 2 0", "a state machine re-created with a new program runs it, with an empty RX FIFO");
+        text.Should().Contain("pwm 2000 16384", "a PWM re-created after deinit takes its new settings");
+        text.Should().Contain("dma True True", "a DMA channel re-claimed after close copies again");
+        runner.Simulation.Uart1.Text.Should().Contain("A").And.Contain("B", "a UART re-created after deinit transmits");
     }
 
     [Fact]
