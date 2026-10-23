@@ -242,6 +242,8 @@ public sealed class DmaPeripheral : IMemoryMappedDevice, IDeferrableTickable
         switch (address)
         {
             case REG_INTR:  _intr &= ~value; break;     // write 1 to clear
+            case REG_INTS0: _intr &= ~value; break;
+            case REG_INTS1: _intr &= ~value; break;
             case REG_INTE0: _inte0 = value & 0xFFF; break;
             case REG_INTF0: _intf0 = value & 0xFFF; break;
             case REG_INTE1: _inte1 = value & 0xFFF; break;

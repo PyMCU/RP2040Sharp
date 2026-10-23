@@ -118,7 +118,7 @@ public class SpecAuditTests
         b.ReadWord(0x20011010).Should().Be(0x11110000u, "WRITE_ADDR keeps incrementing; TRANS_COUNT reloads");
     }
 
-    [Fact(Skip = "DMA spec fixes deferred: regress arduino-pico I2S/ADCInput throughput and I2SLoopback_Buffer HardFault")] // F-12 DMA INTS is write-1-to-clear (2.5.4)
+    [Fact] // F-12 DMA INTS is write-1-to-clear (2.5.4)
     public void Dma_IntsWriteClears()
     {
         var m = Boot(); var b = m.Bus;

@@ -20,6 +20,11 @@ TIMER, RTC, IO_BANK0 and PADS_BANK0 are left as they were. Tested by `ResetsBloc
 - **SIO divider.** `DIV_CSR` had READY and DIRTY swapped: READY read 0 after every divide, so
   `hw_divider_wait_ready()` (the `hardware_divider` API, `pico_divider_compiler`) spun forever. READY is bit 0 and
   always set, DIRTY is bit 1, set by any write and cleared by reading `DIV_QUOTIENT`.
+- **DMA interrupt acknowledge (F-12).** Writing a mask to `INTS0`/`INTS1` clears those `INTR` bits, as
+  `dma_channel_acknowledge_irq0/1`, CircuitPython's audio DMA and `rp2pio` expect. It was ignored, so a completed
+  channel stayed pending forever and a ping-pong ISR (arduino-pico `AudioBufferManager`) served both channels on
+  every interrupt. That is the "less output" that kept F-12 deferred: arduino-pico ADCInput now delivers 8000
+  samples/s at 8 kHz instead of 16000, and I2S TDM at 1 kHz × 8 channels 8000 words/s (125 MHz build).
 
 ### Added: release gate
 
@@ -345,7 +350,7 @@ Each item names the audit finding it closes. Behaviour the audit listed as open 
 - **GPIO and SIO.** The IO_BANK0 overrides (OUTOVER, OEOVER, INOVER, IRQOVER) take effect (F-38). Edge IRQs fire on
   pads driven by SIO (F-18). PROC1 has its own INTE/INTF/INTS and drives core 1's IRQ (F-39). Pads reset to 0x56,
   and IE and OD take effect (F-40). GPIO_OUT and GPIO_OE are 30 bits wide (F-41).
-- **Deferred.** The DMA findings F-11, F-12, F-13, F-33, F-34, F-35 and F-36 are not in this change. Applying
+- **Deferred.** The DMA findings F-11, F-13, F-33, F-34, F-35 and F-36 are not in this change (F-12 landed in 1.2.1). Applying
   them made arduino-pico I2S and ADC streaming produce less output, and one I2S example hard-faulted, so they are
   tracked in the README roadmap until that regression is understood.
 
