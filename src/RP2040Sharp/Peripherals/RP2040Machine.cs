@@ -325,6 +325,15 @@ public sealed class RP2040Machine : IDisposable
         {
             if ((asserted & (1u << 10)) != 0) Pio0.InReset = true;
             if ((asserted & (1u << 11)) != 0) Pio1.InReset = true;
+            if ((asserted & (1u << 0)) != 0)  ResetBlock(Adc, Adc.Reset);
+            if ((asserted & (1u << 2)) != 0)  ResetBlock(Dma, Dma.Reset);
+            if ((asserted & (1u << 3)) != 0)  ResetBlock(I2c0, I2c0.Reset);
+            if ((asserted & (1u << 4)) != 0)  ResetBlock(I2c1, I2c1.Reset);
+            if ((asserted & (1u << 14)) != 0) ResetBlock(Pwm, Pwm.Reset);
+            if ((asserted & (1u << 16)) != 0) ResetBlock(Spi0, Spi0.Reset);
+            if ((asserted & (1u << 17)) != 0) ResetBlock(Spi1, Spi1.Reset);
+            if ((asserted & (1u << 22)) != 0) ResetBlock(Uart0, Uart0.Reset);
+            if ((asserted & (1u << 23)) != 0) ResetBlock(Uart1, Uart1.Reset);
         };
 
         // ── GPIO pins ─────────────────────────────────────────────────────
@@ -1491,6 +1500,14 @@ public sealed class RP2040Machine : IDisposable
         }
         LastElapsedCycles = delta;
         Sweep(delta, core0Delta);
+    }
+
+    private void ResetBlock(ITickable block, Action reset)
+    {
+        var i = Array.IndexOf(_tickables, block);
+        if (i >= 0) _schedule[i].Sync();
+        reset();
+        if (i >= 0) _schedule[i].Touch();
     }
 
     /// <summary>Number of system resets (watchdog reboots) performed.</summary>

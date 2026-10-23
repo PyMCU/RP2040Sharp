@@ -209,6 +209,18 @@ public sealed class SpiPeripheral : IMemoryMappedDevice, IDeferrableTickable, IS
         _irq = irq;
     }
 
+    public void Reset()
+    {
+        Advance();
+        _cr0 = _cr1 = _cpsr = _imsc = _ris = _dmacr = 0;
+        _txLevel = 0;
+        _rxFifo.Clear();
+        _txFifo.Clear();
+        _engine?.Reset();
+        CheckInterrupts();
+        Changed?.Invoke();
+    }
+
     // ── IMemoryMappedDevice ──────────────────────────────────────────
 
     public uint ReadWord(uint address)

@@ -63,11 +63,26 @@ public sealed class PwmPeripheral : IMemoryMappedDevice, IDeferrableTickable
     public PwmPeripheral(CortexM0Plus cpu)
     {
         _cpu = cpu;
-        for (var i = 0; i < SLICE_COUNT; i++)
-        {
-            _top[i] = 0xFFFF;   // default wrap at 0xFFFF
-            _div[i] = 0x10;     // reset: integer=1, frac=0
-        }
+        ResetRegisters();
+    }
+
+    public void Reset()
+    {
+        ResetRegisters();
+        _cpu.SetInterrupt(4, false);
+        OutputsWritten?.Invoke();
+    }
+
+    private void ResetRegisters()
+    {
+        Array.Clear(_csr);
+        Array.Clear(_ctr);
+        Array.Clear(_cc);
+        Array.Clear(_fracAccum);
+        Array.Clear(_phaseDir);
+        Array.Fill(_top, 0xFFFFu);
+        Array.Fill(_div, 0x10u);
+        _enable = _intr = _inte = _intf = 0;
     }
 
     // ── ITickable ────────────────────────────────────────────────────

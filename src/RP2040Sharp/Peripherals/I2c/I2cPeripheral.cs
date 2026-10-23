@@ -75,25 +75,25 @@ public sealed class I2cPeripheral : IMemoryMappedDevice, IDeferrableTickable, II
     private readonly CortexM0Plus? _cpu;
     private readonly int _irq;
 
-    private uint _con  = 0x65;  // default: master, 7-bit, fast-mode enabled, restart enabled
+    private uint _con;
     private uint _tar;
-    private uint _sar  = 0x55;  // default slave address
+    private uint _sar;
     private uint _ssSclHcnt, _ssSclLcnt;
-    private uint _fsSclHcnt = 0x06, _fsSclLcnt = 0x0D;
-    private uint _intrMask = 0x8FF;
+    private uint _fsSclHcnt, _fsSclLcnt;
+    private uint _intrMask;
     private uint _rawIntr;
     private uint _txAbrtSource;
     private uint _rxTl;
     private uint _txTl;
     private uint _enable;
-    private uint _sdaHold = 0x1;
+    private uint _sdaHold;
     private uint _slvDataNackOnly;
     private uint _dmaCr;
     private uint _dmaTdlr;
     private uint _dmaRdlr;
-    private uint _sdaSetup = 0x64;
-    private uint _ackGeneralCall = 0x1;
-    private uint _fsSpklen = 0x7;
+    private uint _sdaSetup;
+    private uint _ackGeneralCall;
+    private uint _fsSpklen;
 
     private readonly Queue<byte> _rxFifo = new(FIFO_DEPTH);
 
@@ -248,6 +248,39 @@ public sealed class I2cPeripheral : IMemoryMappedDevice, IDeferrableTickable, II
     {
         _cpu = cpu;
         _irq = irq;
+        ResetRegisters();
+    }
+
+    public void Reset()
+    {
+        Advance();
+        var sar = _sar;
+        ResetRegisters();
+        _engine?.Reset();
+        CheckInterrupts();
+        Changed?.Invoke();
+        if (_sar != sar) SlaveAddressChanged?.Invoke((byte)(_sar & 0x7F));
+    }
+
+    private void ResetRegisters()
+    {
+        _con = 0x65;
+        _tar = 0;
+        _sar = 0x55;
+        _ssSclHcnt = _ssSclLcnt = 0;
+        _fsSclHcnt = 0x06;
+        _fsSclLcnt = 0x0D;
+        _intrMask = 0x8FF;
+        _rawIntr = _txAbrtSource = _rxTl = _txTl = _enable = 0;
+        _sdaHold = 0x1;
+        _slvDataNackOnly = _dmaCr = _dmaTdlr = _dmaRdlr = 0;
+        _sdaSetup = 0x64;
+        _ackGeneralCall = 0x1;
+        _fsSpklen = 0x7;
+        _rxFifo.Clear();
+        _txFifo.Clear();
+        _slaveTxFifo.Clear();
+        _inSlaveTransmit = false;
     }
 
     // ── IMemoryMappedDevice ──────────────────────────────────────────
