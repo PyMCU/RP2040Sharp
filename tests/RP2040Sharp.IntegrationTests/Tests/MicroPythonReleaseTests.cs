@@ -6,8 +6,11 @@ namespace RP2040Sharp.IntegrationTests.Tests;
 [Trait("Category", "Release")]
 public sealed class MicroPythonReleaseTests
 {
+    private static bool Required =>
+        Environment.GetEnvironmentVariable("RELEASE_GATE_REQUIRED") == "true";
+
     private static bool ShouldSkip =>
-        Environment.GetEnvironmentVariable("SKIP_INTEGRATION_TESTS") == "1";
+        !Required && Environment.GetEnvironmentVariable("SKIP_INTEGRATION_TESTS") == "1";
 
     private const string Version = "v1.28.0";
 
@@ -31,7 +34,11 @@ public sealed class MicroPythonReleaseTests
     private static async Task<MicroPythonRunner?> BootAsync()
     {
         var runner = await MicroPythonRunner.CreateAsync(Version);
-        if (runner is null) return null;
+        if (runner is null)
+        {
+            Required.Should().BeFalse($"MicroPython {Version} firmware must be available for the release gate");
+            return null;
+        }
         runner.WaitForPrompt(timeoutMs: 15_000)
             .Should().BeTrue($"MicroPython {Version} must reach the REPL");
         return runner;

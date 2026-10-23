@@ -61,6 +61,8 @@ jobs:
           --logger "console;verbosity=normal"
 
       - name: Release gate
+        env:
+          RELEASE_GATE_REQUIRED: "true"
         run: >
           dotnet test tests/RP2040Sharp.IntegrationTests/RP2040Sharp.IntegrationTests.csproj
           -c Release

@@ -7,8 +7,11 @@ namespace RP2040Sharp.IntegrationTests.Tests;
 [Trait("Category", "Release")]
 public sealed class CircuitPythonReleaseTests
 {
+    private static bool Required =>
+        Environment.GetEnvironmentVariable("RELEASE_GATE_REQUIRED") == "true";
+
     private static bool ShouldSkip =>
-        Environment.GetEnvironmentVariable("SKIP_INTEGRATION_TESTS") == "1";
+        !Required && Environment.GetEnvironmentVariable("SKIP_INTEGRATION_TESTS") == "1";
 
     private const string Version = "10.3.1";
 
@@ -28,6 +31,14 @@ public sealed class CircuitPythonReleaseTests
         "    time.sleep(0.05)\n";
 
     private static (string, byte[]) Py(string path, string content) => (path, Encoding.ASCII.GetBytes(content));
+
+    private static async Task<CircuitPythonRunner?> CreateAsync(IReadOnlyList<(string, byte[])> files)
+    {
+        var runner = await CircuitPythonRunner.CreateWithFilesAsync(Version, files);
+        if (runner is null)
+            Required.Should().BeFalse($"CircuitPython {Version} firmware must be available for the release gate");
+        return runner;
+    }
 
     private static void RunUntil(CircuitPythonRunner runner, Func<bool> condition, double timeoutMs = 5_000)
     {
@@ -57,8 +68,7 @@ public sealed class CircuitPythonReleaseTests
     {
         if (ShouldSkip) return;
 
-        await using var runner = await CircuitPythonRunner.CreateWithFilesAsync(
-            Version, [Py("code.py", "print('boot', 6 * 7)\n")]);
+        await using var runner = await CreateAsync([Py("code.py", "print('boot', 6 * 7)\n")]);
         if (runner is null) return;
 
         runner.WaitForPrompt(timeoutMs: 20_000)
@@ -72,7 +82,7 @@ public sealed class CircuitPythonReleaseTests
     {
         if (ShouldSkip) return;
 
-        await using var runner = await CircuitPythonRunner.CreateWithFilesAsync(Version, [Py("code.py", TickCode)]);
+        await using var runner = await CreateAsync([Py("code.py", TickCode)]);
         if (runner is null) return;
 
         OpenPortLate(runner);
@@ -86,7 +96,7 @@ public sealed class CircuitPythonReleaseTests
     {
         if (ShouldSkip) return;
 
-        await using var runner = await CircuitPythonRunner.CreateWithFilesAsync(Version, [Py("code.py", PeripheralCode)]);
+        await using var runner = await CreateAsync([Py("code.py", PeripheralCode)]);
         if (runner is null) return;
         runner.Simulation.Gpio[4].ForceInput(true);
         runner.Simulation.Gpio[5].ForceInput(true);
@@ -106,7 +116,7 @@ public sealed class CircuitPythonReleaseTests
     {
         if (ShouldSkip) return;
 
-        await using var runner = await CircuitPythonRunner.CreateWithFilesAsync(Version, [Py("code.py", "print('code', 'ran')\n")]);
+        await using var runner = await CreateAsync([Py("code.py", "print('code', 'ran')\n")]);
         if (runner is null) return;
         runner.WaitForPrompt(timeoutMs: 20_000).Should().BeTrue($"CircuitPython {Version} must reach the REPL");
 
@@ -130,7 +140,7 @@ public sealed class CircuitPythonReleaseTests
     {
         if (ShouldSkip) return;
 
-        await using var runner = await CircuitPythonRunner.CreateWithFilesAsync(Version,
+        await using var runner = await CreateAsync(
         [
             Py("code.py", "print('code', 'ran')\n"),
             Py("release_gate_long_module.py", "VALUE = 'long'\n"),
