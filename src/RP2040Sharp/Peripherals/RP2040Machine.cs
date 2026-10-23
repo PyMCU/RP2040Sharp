@@ -323,8 +323,8 @@ public sealed class RP2040Machine : IDisposable
         };
         Resets.OnReset += asserted =>
         {
-            if ((asserted & (1u << 10)) != 0) Pio0.InReset = true;
-            if ((asserted & (1u << 11)) != 0) Pio1.InReset = true;
+            if ((asserted & (1u << 10)) != 0) ResetPio(0, Pio0);
+            if ((asserted & (1u << 11)) != 0) ResetPio(1, Pio1);
             if ((asserted & (1u << 0)) != 0)  ResetBlock(Adc, Adc.Reset);
             if ((asserted & (1u << 2)) != 0)  ResetBlock(Dma, Dma.Reset);
             if ((asserted & (1u << 3)) != 0)  ResetBlock(I2c0, I2c0.Reset);
@@ -1502,6 +1502,14 @@ public sealed class RP2040Machine : IDisposable
         }
         LastElapsedCycles = delta;
         Sweep(delta, core0Delta);
+    }
+
+    private void ResetPio(int block, PioPeripheral pio)
+    {
+        pio.InReset = true;
+        ResetBlock(pio, pio.Reset);
+        IoBank0.SetPioDirs(block, 0, ~0u);
+        IoBank0.SetPioOut(block, 0, ~0u);
     }
 
     private void ResetBlock(ITickable block, Action reset)

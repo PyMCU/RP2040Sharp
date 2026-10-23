@@ -37,6 +37,27 @@ public sealed class MicroPythonReleaseTests
         "import network, time\nw = network.WLAN(network.STA_IF)\nw.active(True)\nw.connect('RP2040Sharp-AP')\n" +
         "n = 0\nwhile w.status() != 3 and n < 100:\n    time.sleep_ms(50)\n    n += 1\nprint('IP', w.ifconfig()[0])\n";
 
+    private const string PioSquare =
+        "import rp2\nfrom machine import Pin\n" +
+        "@rp2.asm_pio(set_init=rp2.PIO.OUT_LOW)\n" +
+        "def sq():\n    set(pins, 1) [31]\n    set(pins, 0) [31]\n" +
+        "sm = rp2.StateMachine(0, sq, freq=200_000, set_base=Pin(16))\nsm.active(1)\nprint('pio', 'on')\n";
+
+    private static int PadEdges(MicroPythonRunner runner, int pin, double ms)
+    {
+        var io = runner.Simulation.Rp2040.IoBank0;
+        var last = io.GetPadOutputLevel(pin);
+        var edges = 0;
+        for (var t = 0.0; t < ms; t += 0.05)
+        {
+            runner.Simulation.RunMilliseconds(0.05);
+            var now = io.GetPadOutputLevel(pin);
+            if (now != last) edges++;
+            last = now;
+        }
+        return edges;
+    }
+
     private static async Task<MicroPythonRunner?> BootAsync()
     {
         var runner = await MicroPythonRunner.CreateAsync(Version);
@@ -179,6 +200,24 @@ public sealed class MicroPythonReleaseTests
             "import machine; m = machine.mem32; print('gpio', hex(m[0x4001407c]), machine.Pin(15).value(), " +
             "machine.Pin(14).value(), hex(m[0x4001c03c]), hex(m[0x40014104]))", "gpio 0x1f 0 0 0x56 0x0")
             .Should().BeTrue($"IO_BANK0, the pads and the GPIO interrupt enables must come back at their reset values, got: {runner.UsbCdc.Text}");
+    }
+
+    [Fact]
+    public async Task MachineReset_StopsPio()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await BootAsync();
+        if (runner is null) return;
+
+        runner.Execute($"exec({JsonSerializer.Serialize(PioSquare)})");
+        runner.WaitForOutput("pio on").Should().BeTrue($"the state machine must start, got: {runner.UsbCdc.Text}");
+        PadEdges(runner, 16, 2).Should().BeGreaterThan(0, "the state machine toggles GPIO16");
+        RebootAndWaitForRepl(runner, "import machine; machine.reset()");
+
+        PadEdges(runner, 16, 2).Should().Be(0, "machine.reset() stops every PIO state machine");
+        runner.ExecuteAndWait("import machine; print('pio', hex(machine.mem32[0x50200000]))", "pio 0x0")
+            .Should().BeTrue($"PIO0 CTRL must come back at its reset value, got: {runner.UsbCdc.Text}");
     }
 
     [Fact]
