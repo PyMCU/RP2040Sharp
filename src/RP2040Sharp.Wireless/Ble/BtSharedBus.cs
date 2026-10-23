@@ -65,6 +65,13 @@ public sealed class BtSharedBus
         _chip.Bt = this;
     }
 
+    public void PowerDown()
+    {
+        _hostCtrl = 0;
+        _swReady = false;
+        _b2hPending = false;
+    }
+
     /// <summary>Whether <paramref name="addr"/> is one of the BT control registers (4 bytes each).</summary>
     public bool OwnsRegister(uint addr) =>
         (addr >= BtCtrlReg && addr < BtCtrlReg + 4) ||

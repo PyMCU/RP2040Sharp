@@ -42,9 +42,9 @@ public sealed class MicroPythonRunner : IAsyncDisposable
     /// Create a runner loaded with MicroPython <paramref name="version"/>.
     /// Returns <c>null</c> when the firmware is not available (no network / not cached).
     /// </summary>
-    public static async Task<MicroPythonRunner?> CreateAsync(string version)
+    public static async Task<MicroPythonRunner?> CreateAsync(string version, bool picoW = false)
     {
-        var uf2Path = await FirmwareCache.GetMicroPythonAsync(version);
+        var uf2Path = picoW ? await FirmwareCache.GetMicroPythonPicoWAsync(version) : await FirmwareCache.GetMicroPythonAsync(version);
         if (uf2Path is null)
             return null;
 

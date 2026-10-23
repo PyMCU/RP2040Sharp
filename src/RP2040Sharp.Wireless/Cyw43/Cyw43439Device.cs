@@ -59,7 +59,7 @@ public sealed class Cyw43439Device
     {
         BtBus = new BtSharedBus(_chip, Ble);  // wires the BT shared bus into the backplane
         Bus = new GSpiSlave(io);
-        Bus.OnPower = on => { _powered = on; if (!on) Sdpcm.PowerDown(); };   // WL_ON low: the WL GPIOs (LED) reset
+        Bus.OnPower = on => { _powered = on; if (!on) PowerDown(); };
         Bus.OnRead = HandleRead;
         Bus.OnWrite = HandleWrite;
         // An SDPCM packet queued for the host drives the F2-packet-available IRQ (DATA-line host-wake)
@@ -68,10 +68,29 @@ public sealed class Cyw43439Device
         // BT shares the same host-wake line: a queued HCI/ACL packet (or the host draining the B2H ring)
         // re-evaluates it, so an idle peripheral is woken to run cyw43_poll exactly like an inbound F2 frame.
         BtBus.OnWorkChanged = UpdateHostWake;
+        ResetF0();
+    }
+
+    private void ResetF0()
+    {
+        Array.Clear(_f0);
         _f0[SPI_READ_TEST_REGISTER + 0] = (byte)(TEST_PATTERN & 0xFF);
         _f0[SPI_READ_TEST_REGISTER + 1] = (byte)((TEST_PATTERN >> 8) & 0xFF);
         _f0[SPI_READ_TEST_REGISTER + 2] = (byte)((TEST_PATTERN >> 16) & 0xFF);
         _f0[SPI_READ_TEST_REGISTER + 3] = (byte)((TEST_PATTERN >> 24) & 0xFF);
+    }
+
+    private void PowerDown()
+    {
+        Ble.PowerDown();
+        BtBus.PowerDown();
+        _chip.PowerDown();
+        Sdpcm.PowerDown();
+        _word32 = _pendingWord32 = false;
+        ResetF0();
+        Array.Clear(_f1ctrl);
+        _window = 0;
+        UpdateHostWake();
     }
 
     public bool Powered => _powered;

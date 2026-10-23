@@ -1,4 +1,6 @@
+using System.Text.Json;
 using RP2040.TestKit;
+using RP2040Sharp.Wireless.Cyw43;
 using RP2040Sharp.IntegrationTests.Infrastructure;
 
 namespace RP2040Sharp.IntegrationTests.Tests;
@@ -30,6 +32,10 @@ public sealed class MicroPythonReleaseTests
         "print('periph', 'ok')\n" +
         "while True:\n" +
         "    time.sleep_ms(50)\n";
+
+    private const string Join =
+        "import network, time\nw = network.WLAN(network.STA_IF)\nw.active(True)\nw.connect('RP2040Sharp-AP')\n" +
+        "n = 0\nwhile w.status() != 3 and n < 100:\n    time.sleep_ms(50)\n    n += 1\nprint('IP', w.ifconfig()[0])\n";
 
     private static async Task<MicroPythonRunner?> BootAsync()
     {
@@ -152,5 +158,35 @@ public sealed class MicroPythonReleaseTests
         runner.ExecuteAndWait("import machine; print('cause', machine.reset_cause() == machine.WDT_RESET)", "cause True")
             .Should().BeTrue("the firmware must see the watchdog as the reset cause");
         RebootAndWaitForRepl(runner, "from machine import WDT; w = WDT(timeout=100)");
+    }
+
+    [Fact]
+    public async Task PicoW_WifiConnectsAgain_AfterMachineResetTwice()
+    {
+        if (ShouldSkip) return;
+
+        await using var runner = await MicroPythonRunner.CreateAsync(Version, picoW: true);
+        if (runner is null)
+        {
+            Required.Should().BeFalse($"MicroPython {Version} Pico W firmware must be available for the release gate");
+            return;
+        }
+        var rp = runner.Simulation.Rp2040;
+        rp.Pio0.ReadGpioIn = () => rp.IoBank0.GetInputWord();
+        rp.Pio1.ReadGpioIn = () => rp.IoBank0.GetInputWord();
+        rp.Sio.OnGpioChanged += mask => rp.IoBank0.NotifyPads(mask);
+        var dev = new Cyw43439Device(rp.IoBank0);
+        dev.Sdpcm.VisibleAps.Add(new Sdpcm.VirtualAp("RP2040Sharp-AP", [0x02, 0x00, 0x5E, 0x00, 0x04, 0x01], 6, -50, false));
+        _ = new VirtualNet(dev.Sdpcm);
+        runner.WaitForPrompt(timeoutMs: 15_000).Should().BeTrue("MicroPython must reach the REPL");
+
+        for (var i = 0; i <= 2; i++)
+        {
+            if (i > 0) RebootAndWaitForRepl(runner, "import machine; machine.reset()");
+            runner.Execute($"exec({JsonSerializer.Serialize(Join)})");
+            for (long n = 0; n < 400_000_000 && !runner.UsbCdc.Text.Contains("IP 192.168.4.2") && !runner.UsbCdc.Text.Contains("Traceback"); n++)
+                rp.Run(rp.Core0Waiting ? 1600 : 512);
+            runner.UsbCdc.Text.Should().Contain("IP 192.168.4.2", $"connect #{i} must take a DHCP lease");
+        }
     }
 }

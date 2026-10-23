@@ -98,6 +98,14 @@ public sealed class HciController
     /// <summary>Deliver an ACL packet (already handle-rewritten for this side) up to this host.</summary>
     public void DeliverAclToHost(byte[] acl) => DeliverAcl(acl);
 
+    internal void PowerDown()
+    {
+        foreach (var handle in _links.Keys.ToArray()) CloseLink(handle, 0x08);
+        _externalLinks.Clear();
+        if (Advertising) { Advertising = false; OnAdvertisingChanged?.Invoke(); }
+        if (Scanning) { Scanning = false; OnScanningChanged?.Invoke(); }
+    }
+
     /// <summary>Tear down an external-radio link and notify this host.</summary>
     public void CloseExternalLink(ushort handle, byte reason)
     {
