@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 
 namespace RP2040.Core.Memory;
 
-public sealed unsafe class RandomAccessMemory : IMemoryMappedDevice, IDisposable
+public unsafe class RandomAccessMemory : IMemoryMappedDevice, IDisposable
 {
     // Backing store is unmanaged native memory (not a pinned managed array). This keeps the
     // multi-megabyte RAM/Flash/BootROM blocks out of the GC heap entirely — a pinned array of
@@ -17,15 +17,24 @@ public sealed unsafe class RandomAccessMemory : IMemoryMappedDevice, IDisposable
     public const int TailPad = 16;
 
     public readonly byte* BasePtr;
-    public uint Size { get; }
+    public uint Size {
+        get {
+            return _size;
+        }
+    }
 
     private bool _disposed;
+    private uint _size;
 
     public RandomAccessMemory(int size)
     {
-        // AllocZeroed preserves the zero-initialised semantics of `new byte[size]`.
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(size);
+
+        _size = (uint)size;
         BasePtr = (byte*)NativeMemory.AllocZeroed((nuint)size + TailPad);
-        Size = (uint)size;
+        // The native block is invisible to the GC; without this, machines nobody disposed pile up
+        // megabytes before a gen2 ever runs their finalizers.
+        GC.AddMemoryPressure(size);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -60,20 +69,23 @@ public sealed unsafe class RandomAccessMemory : IMemoryMappedDevice, IDisposable
     [ExcludeFromCodeCoverage]
     ~RandomAccessMemory()
     {
-        Free();
+        Dispose(false);
     }
 
     public void Dispose()
     {
-        Free();
+        Dispose(true);
         GC.SuppressFinalize(this);
     }
-
-    private void Free()
-    {
-        if (_disposed)
+    
+    internal virtual void Dispose(bool disposing) {
+        // BasePtr is null when the constructor threw: the finalizer still runs, with nothing to free.
+        if (_disposed || BasePtr == null)
             return;
-        NativeMemory.Free(BasePtr);
+
         _disposed = true;
+
+        NativeMemory.Free(BasePtr);
+        GC.RemoveMemoryPressure(_size);
     }
 }
