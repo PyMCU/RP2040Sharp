@@ -5,6 +5,20 @@ All notable changes to **RP2040Sharp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-11-05
+
+### Fixed: a host no longer has to call Dispose to free the machine
+
+`Dispose` frees the SRAM, the flash and the boot ROM at once, and the interpreter reaches them through raw pointers. A host that disposed a machine from one thread while another was inside `Run` crashed in native code. `Dispose` still frees at once and must not be called while a `Run` is in flight; what changes is that dropping the machine is now enough:
+- **Finalizers:** `RP2040Machine` and `BusInterconnect` have finalizers, next to the one `RandomAccessMemory` already had. Once nothing references a machine its native memory is freed, which cannot happen during a `Run` because the running thread holds the machine.
+- **Memory pressure:** `RandomAccessMemory` reports its native block to the GC. Before, a test that dropped 400 machines without `Dispose` had more than 200 alive at once and no gen2 collection; now it has at most 10.
+- **A constructor that throws:** `RandomAccessMemory` rejects a size of zero or less with `ArgumentOutOfRangeException`, and the finalizers do nothing on an object whose constructor threw. A flash size of 0 used to build a machine with a broken flash mask.
+
+### Changed
+
+- `RandomAccessMemory` is no longer sealed.
+- `BusInterconnect.Dispose(bool)` is `internal virtual` (it was `protected virtual`).
+
 ## [1.2.2] - 2026-10-23
 
 ### Fixed: state that survived a reset on silicon does not
