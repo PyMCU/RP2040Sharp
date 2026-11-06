@@ -372,6 +372,10 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
         EmuStrict.Note("mmio.write.unmapped-region", $"0x{address:X8}");
         return false;
     }
+    ~BusInterconnect ()
+    {
+        Dispose(false);
+    }
 
     public void Dispose()
     {
@@ -379,20 +383,17 @@ public unsafe class BusInterconnect : IMemoryBus, IDisposable
         GC.SuppressFinalize(this);
     }
 
-    protected virtual void Dispose(bool disposing)
+    internal virtual void Dispose(bool disposing)
     {
         if (_disposed)
         {
             return;
         }
 
-        if (disposing)
-        {
-            _sram?.Dispose();
-            _flash?.Dispose();
-            _bootRom?.Dispose();
-        }
-
         _disposed = true;
+        
+        _sram?.Dispose(disposing);
+        _flash?.Dispose(disposing);
+        _bootRom?.Dispose(disposing);
     }
 }

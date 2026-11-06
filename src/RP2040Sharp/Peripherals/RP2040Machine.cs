@@ -1598,7 +1598,21 @@ public sealed class RP2040Machine : IDisposable
         Ppb1.Reset();
     }
 
-    public void Dispose() => Bus.Dispose();
+    ~RP2040Machine ()
+    {
+        Dispose(false);
+    } 
+
+    public void Dispose ()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+    
+    internal void Dispose(bool disposing)
+    {
+        Bus?.Dispose(disposing);
+    }
 
     // ── Multicore launch ──────────────────────────────────────────────
 
